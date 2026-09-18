@@ -32,11 +32,26 @@
 # target resource is not the tagged Attendance one. A misconfigured secret
 # stops the deployment; it does not redirect it somewhere else.
 
+# ---------------------------------------------------------------------------
+# Why this never runs on its own
+# ---------------------------------------------------------------------------
+# Production is deployed only when a person starts this workflow deliberately.
+#
+# The intended gate was a required reviewer on the `production` environment,
+# but GitHub does not offer environment protection rules on a private
+# repository under the Free plan, and neither making an attendance system's
+# repository public nor paying for a plan is an acceptable way to buy an
+# approval prompt. So the trigger itself is the gate: there is no `push:`
+# here, and a commit reaching `main` builds nothing and deploys nothing.
+#
+# The branch restriction is enforced twice over — by the environment's
+# deployment branch policy, which permits only `main`, and again by the
+# explicit check in `guard` below, so that deleting the policy does not
+# silently re-open deployment from an arbitrary branch.
+
 name: Deploy (production)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -76,6 +91,18 @@ jobs:
     outputs:
       sha: ${{ steps.sha.outputs.sha }}
     steps:
+      # workflow_dispatch can be started against any ref. The environment's
+      # deployment branch policy already refuses anything but `main`, and this
+      # repeats the check in the workflow so the rule survives a change to the
+      # environment configuration and fails with a message that says why.
+      - name: Refuse to deploy from any ref except main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Production deploys from main only. This run is on '$GITHUB_REF'."
+            exit 1
+          fi
+          echo "Ref is refs/heads/main."
+
       - name: Require deployment configuration
         env:
           CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}

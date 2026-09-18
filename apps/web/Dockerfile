@@ -42,13 +42,31 @@ FROM deps AS build
 WORKDIR /repo
 COPY . .
 
-# Prisma resolves datasource.url from the environment even for `generate` and
-# for `next build`, and refuses to proceed when the variable is absent (P1012).
-# This value is a syntactically valid placeholder that is never connected to:
-# the build performs no queries, and the runtime stage below does not inherit
-# this stage's environment. The real DATABASE_URL reaches the container at
-# runtime as a Key Vault secret reference and exists nowhere in this image.
+# Build-time placeholders for every variable apps/web/src/lib/env.ts validates.
+#
+# That module calls envSchema.parse() at import time so a misconfigured
+# deployment dies at boot rather than mid-request. `next build` imports it while
+# collecting page data for the route handlers, so the build needs all four
+# present or it fails — which is what it did before these were added. Prisma
+# has the same requirement independently: it resolves datasource.url from the
+# environment even for `generate`, and errors with P1012 when it is absent.
+#
+# These values are placeholders, not secrets, and they cannot leak or take
+# effect in production for two independent reasons:
+#
+#   1. Next.js inlines only NEXT_PUBLIC_* variables. Server-side reads stay as
+#      `process.env.X` lookups in the emitted standalone output — verified
+#      against a build made with real values, which baked in none of them — so
+#      the running container reads its real configuration, never these.
+#   2. The runtime stage below is a fresh FROM and inherits none of this
+#      stage's environment.
+#
+# The real values reach the container at runtime as Key Vault secret
+# references and exist nowhere in this image.
 ENV DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build?schema=public"
+ENV FACE_AI_SERVICE_URL="http://127.0.0.1:8000"
+ENV AUTH_SECRET="build-time-placeholder-not-a-secret"
+ENV API_KEY_PEPPER="build-time-placeholder-not-a-secret"
 ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN npx prisma generate --schema=apps/web/prisma/schema.prisma

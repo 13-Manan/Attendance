@@ -63,7 +63,7 @@ trade-off accepted when Container Apps was chosen.
    │ NO database credentials  │   │ attendance_prod            │
    └──────────────────────────┘   └────────────────────────────┘
 
-   Supporting:  attendance-prod-kv (Key Vault) · attendanceprodacr (ACR)
+   Supporting:  attendance-prod-keyvault (Key Vault) · attendanceprodacr (ACR)
                 attendanceprodsa (Blob) · attendance-prod-law / -appi
                 attendance-prod-vnet
 ```
@@ -88,7 +88,7 @@ identity is granted no database role and no storage role.
 | Web app | `attendance-prod-web` | Next.js, external ingress |
 | Face AI | `attendance-prod-face-ai` | FastAPI, **internal ingress only** |
 | Container registry | `attendanceprodacr` | Two images; ACR names allow no hyphens |
-| Key Vault | `attendance-prod-kv` | Four runtime secrets |
+| Key Vault | `attendance-prod-keyvault` | Four runtime secrets |
 | Storage | `attendanceprodsa` | Classroom captures; storage names allow no hyphens |
 | Log Analytics | `attendance-prod-law` | Required by the Container Apps env |
 | App Insights | `attendance-prod-appi` | Application telemetry |
@@ -149,7 +149,7 @@ change the local image — do not downgrade production.
 
 | Setting | Value | Reasoning |
 | --- | --- | --- |
-| Tier | GeneralPurpose `GP_Standard_D2s_v3` | 2 vCore / 8 GiB. pgvector similarity search is CPU- and memory-bound, and load arrives in bursts at period boundaries. Burstable would throttle on exhausted credits during exactly that rush |
+| Tier | GeneralPurpose `Standard_D2s_v3` | 2 vCore / 8 GiB. pgvector similarity search is CPU- and memory-bound, and load arrives in bursts at period boundaries. Burstable would throttle on exhausted credits during exactly that rush |
 | Version | PostgreSQL 17 | Supported in-region; pgvector available |
 | Storage | 64 GiB, autogrow on | Embeddings are 512 floats/student; the volume is attendance rows, which grow linearly per session |
 | Backup | 14 days, geo-redundant | Attendance is a legal record. 14 days covers a reporting cycle; geo-redundancy survives a regional failure |
@@ -214,7 +214,7 @@ the internal contract.
 Set them after deployment, never through a template parameter:
 
 ```sh
-az keyvault secret set --vault-name attendance-prod-kv \
+az keyvault secret set --vault-name attendance-prod-keyvault \
   --name AUTH-SECRET --value "$(openssl rand -base64 32)"
 ```
 
@@ -349,10 +349,10 @@ resources:
 | Identity | Role | Scope |
 | --- | --- | --- |
 | web | AcrPull | `attendanceprodacr` |
-| web | Key Vault Secrets User | `attendance-prod-kv` |
+| web | Key Vault Secrets User | `attendance-prod-keyvault` |
 | web | Storage Blob Data Contributor | `attendanceprodsa` |
 | face-ai | AcrPull | `attendanceprodacr` |
-| face-ai | Key Vault Secrets User | `attendance-prod-kv` |
+| face-ai | Key Vault Secrets User | `attendance-prod-keyvault` |
 
 No grant is at subscription or resource-group scope. No RBAC assignment
 belonging to any other project is read, modified or removed. face-ai receives no
@@ -433,7 +433,7 @@ az deployment group create \
   --parameters infra/azure/parameters/production.bicepparam
 
 # 4. Store the password, then forget it
-az keyvault secret set --vault-name attendance-prod-kv \
+az keyvault secret set --vault-name attendance-prod-keyvault \
   --name POSTGRES-ADMIN-PASSWORD --value "$ATTENDANCE_PG_ADMIN_PASSWORD"
 unset ATTENDANCE_PG_ADMIN_PASSWORD
 ```

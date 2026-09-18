@@ -52,8 +52,12 @@ param privateDnsZoneId string
 ])
 param postgresVersion string = '17'
 
-@description('Compute SKU. GP_Standard_D2s_v3 = 2 vCore / 8 GiB.')
-param skuName string = 'GP_Standard_D2s_v3'
+// The ARM API wants the bare VM size here and takes the tier from `skuTier`.
+// The `GP_` / `B_` / `MO_` prefixes belong to `az postgres flexible-server`,
+// not to Microsoft.DBforPostgreSQL — passing one fails with ParameterOutOfRange
+// and a 400-entry list of what it wanted instead.
+@description('Compute SKU. Standard_D2s_v3 = 2 vCore / 8 GiB.')
+param skuName string = 'Standard_D2s_v3'
 
 @description('Compute tier.')
 @allowed([

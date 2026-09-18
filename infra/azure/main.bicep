@@ -36,8 +36,8 @@ param location string = 'centralindia'
 @description('Prefix for all Attendance resources. Keep it Attendance-specific.')
 param namePrefix string = 'attendance-prod'
 
-@description('Key Vault name — globally unique, 3-24 chars.')
-param keyVaultName string = '${namePrefix}-kv'
+@description('Key Vault name — globally unique, 3-24 chars. `-kv` was taken.')
+param keyVaultName string = '${namePrefix}-keyvault'
 
 @description('Container Registry name — globally unique, alphanumeric only.')
 param registryName string = 'attendanceprodacr'
@@ -66,8 +66,8 @@ param postgresAdministratorPassword string
 ])
 param postgresVersion string = '17'
 
-@description('Compute SKU — GP_Standard_D2s_v3 is 2 vCore / 8 GiB.')
-param postgresSkuName string = 'GP_Standard_D2s_v3'
+@description('Compute SKU — Standard_D2s_v3 is 2 vCore / 8 GiB. Bare VM size, no GP_ prefix.')
+param postgresSkuName string = 'Standard_D2s_v3'
 
 @description('Compute tier.')
 param postgresSkuTier string = 'GeneralPurpose'

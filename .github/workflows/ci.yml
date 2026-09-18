@@ -1,8 +1,13 @@
 # ATTENDANCE PROJECT — validation
 #
-# Runs on every pull request, and is called by deploy.yml before anything is
-# built or deployed. Sharing one definition means production cannot be reached
-# by a path that skipped a check.
+# Runs on every pull request and on every push to main, and is called by
+# deploy.yml before anything is built or deployed. Sharing one definition
+# means production cannot be reached by a path that skipped a check.
+#
+# The `push` trigger matters now that deploy.yml is workflow_dispatch only:
+# without it, a commit pushed straight to main would be validated by nothing
+# until someone started a deployment, which is the wrong moment to find out.
+# Validation is automatic; deployment is not.
 #
 # This workflow touches no Azure resource and holds no Azure credential. It
 # needs none: nothing here talks to the cloud.
@@ -10,6 +15,8 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_call:

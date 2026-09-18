@@ -5,8 +5,10 @@ subscription *Pay-As-You-Go*). Architecture and rationale live in
 [`infra/azure/README.md`](../infra/azure/README.md); this file is what you read
 when something needs doing or undoing.
 
-> **Nothing described here has been run yet.** At the time of writing the
-> resource group exists and is empty. See §"Current state" at the end.
+> **Infrastructure is deployed; no application is.** Every resource below
+> exists and is empty of application code — the three container resources run a
+> Microsoft placeholder image, and no migration has been applied. See
+> §"Current state" at the end.
 
 ---
 
@@ -20,7 +22,7 @@ when something needs doing or undoing.
 | `attendance-prod-face-ai` | Container app — **internal** ingress only |
 | `attendance-prod-migrate` | Container Apps **job**, manual trigger |
 | `attendance-prod-psql` | PostgreSQL flexible server, private VNet only |
-| `attendance-prod-kv` | Key Vault |
+| `attendance-prod-keyvault` | Key Vault |
 
 Anything not in this table is another project's and is out of scope.
 
@@ -208,44 +210,128 @@ image into a ticket, a chat, or this repository.
 
 ---
 
-## One-time setup you must approve — GitHub OIDC
+## How production is deployed, and what stops it happening by accident
 
-`.github/workflows/deploy.yml` authenticates with **federated credentials**, so
-no Azure client secret ever exists in GitHub. Setting it up creates an Entra
-app registration, which is a **tenant-level object outside the resource
-group** — it is listed here rather than done silently.
+### Deployment is manual. There is no automatic trigger.
 
-1. Create the app registration and service principal.
-2. Add a federated credential for `repo:13-Manan/Attendance:ref:refs/heads/main`
-   (and one for `repo:13-Manan/Attendance:pull_request` only if PRs ever need
-   Azure access — with this pipeline they do not).
-3. Grant it, **scoped to `attendance-production-rg` and nothing wider**:
-   - `AcrPush` on `attendanceprodacr`
-   - `Contributor` on the resource group, or narrower roles covering
-     `Microsoft.App/containerApps/write` and `Microsoft.App/jobs/write`
-4. Add three GitHub repository secrets — none of which is a credential, all
-   three are identifiers:
-   - `AZURE_CLIENT_ID`
-   - `AZURE_TENANT_ID`
-   - `AZURE_SUBSCRIPTION_ID`
-5. Create a GitHub environment named **`production`** and add yourself as a
-   required reviewer. Every Azure-touching job in `deploy.yml` declares
-   `environment: production`, so this is what makes a push to `main` pause for
-   human approval instead of deploying on its own.
+`deploy.yml` is **`workflow_dispatch` only**. A commit reaching `main` runs CI
+and nothing else — it builds no image, runs no migration, and deploys nothing.
+Production moves only when a person starts the workflow deliberately:
 
-Until step 5 exists, do not merge to `main` expecting a safe no-op.
+```sh
+gh workflow run "Deploy (production)" --repo 13-Manan/Attendance --ref main
+```
+
+The intended gate was a **required reviewer** on the `production` environment.
+That is **not configured and cannot be** — GitHub does not offer environment
+protection rules on a private repository under the Free plan, and neither
+publishing an attendance system's source nor buying a plan is a reasonable way
+to obtain an approval prompt. The manual trigger is the gate instead. Anyone
+who can run workflows in this repository can start a production deployment;
+there is no second pair of eyes enforced by the platform.
+
+The branch restriction *is* enforced, twice:
+
+- the `production` environment has a deployment branch policy permitting only
+  `main`, and every Azure-touching job declares `environment: production`;
+- `guard` re-checks `GITHUB_REF` itself, so deleting that policy does not
+  silently re-open deployment from an arbitrary branch.
+
+### OIDC — configured
+
+Authentication is **GitHub federated credentials**. No Azure client secret
+exists, and none was ever created — the app registration has empty
+`passwordCredentials` and `keyCredentials`.
+
+| | |
+|---|---|
+| Entra app | `attendance-prod-github-deploy` |
+| Client ID | `cdb3ff1c-a376-435b-aff2-1000cdd11795` |
+| SP object ID | `74ced053-72b1-4295-94cf-936dbf01d84f` |
+| Federated subject | `repo:13-Manan/Attendance:ref:refs/heads/main` |
+| Issuer / audience | `token.actions.githubusercontent.com` / `api://AzureADTokenExchange` |
+
+The subject is a literal with no wildcard: a token from another repository,
+branch, tag, fork or pull request does not match it and the exchange fails.
+
+Its complete Azure footprint — six assignments, verified subscription-wide:
+
+| Role | Scope |
+|---|---|
+| `Reader` | `attendance-production-rg` |
+| `Contributor` | `attendance-prod-web` |
+| `Contributor` | `attendance-prod-face-ai` |
+| `Contributor` | `attendance-prod-migrate` |
+| `Container Registry Tasks Contributor` | `attendanceprodacr` |
+| `AcrPush` | `attendanceprodacr` |
+
+`Contributor` is pinned to three individual resources, never the subscription
+and never the resource group — no built-in role other than `Contributor`/`Owner`
+grants the bare `Microsoft.App/containerApps/write` that `az containerapp
+update` needs (`Container Apps Contributor` grants only
+`containerApps/*/write`, which does not match it). The identity has **no** Key
+Vault access, **no** PostgreSQL access, and cannot assign roles.
+
+`Container Registry Tasks Contributor` is required because `AcrPush` alone
+lacks `registries/scheduleRun/action` and therefore cannot run `az acr build`.
+
+### GitHub repository secrets
+
+Three, all **identifiers rather than credentials**: `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
 
 ---
 
 ## Current state
 
+As of GATE 4 (deployment `attendance-prod-infra-20260918-102727`, Succeeded):
+
 | | |
 |---|---|
-| `attendance-production-rg` | **Created**, empty |
-| Infrastructure (Bicep) | **Not deployed** |
-| `attendance-prod-psql` | **Does not exist** |
-| Images built or pushed | **None** |
-| Apps deployed | **None** |
+| `attendance-production-rg` | **Created**, 13 resources + 7 role assignments |
+| Infrastructure (Bicep) | **Deployed** — pass 1 of 2 |
+| `attendance-prod-psql` | **Ready**, `publicNetworkAccess: Disabled`, 0 firewall rules |
+| `attendance_prod` database | **Created**, **zero tables** — no migration has run |
+| pgvector | **Allow-listed** (`azure.extensions=VECTOR`); extension **not yet created** — `CREATE EXTENSION vector` is the first line of the baseline migration |
+| `enableKeyVaultSecretRefs` | **false** — pass 2 pending |
+| Key Vault secrets | **All four set** — `DATABASE-URL`, `AUTH-SECRET`, `API-KEY-PEPPER`, `FACE-AI-SERVICE-TOKEN` |
+| Images built and pushed | **All three**, tag `8acfde96…` — but **not deployed**; all three resources still run `mcr.microsoft.com/k8se/quickstart:latest` |
+| Apps serving the application | **None** |
 | Production traffic | **None** |
-| DNS | **Unchanged** |
-| GitHub OIDC | **Not configured** — see above |
+| DNS | **Unchanged** (no custom domain) |
+| GitHub OIDC | **Configured** — see above |
+| Required reviewer | **Not configured** — unavailable on this plan; see above |
+
+### Secrets
+
+All four runtime secrets exist in `attendance-prod-keyvault`. List them by
+**name only** — never by value:
+
+```sh
+az keyvault secret list --vault-name attendance-prod-keyvault \
+  --query "[].{name:name, enabled:attributes.enabled}" -o table
+```
+
+Writing them requires a **Key Vault Secrets Officer** assignment on the vault.
+Owner is not enough: the vault uses RBAC authorization, which grants Owner the
+management plane only, so `az keyvault secret list` returns `ForbiddenByRbac`
+without a data-plane role.
+
+#### Rotating the PostgreSQL password
+
+The administrator password is held only in `DATABASE-URL`. Rotation does not
+require knowing the old value, so a lost password is recoverable:
+
+```sh
+# Generate, rotate and store in one step, so the value never lands anywhere else
+PGPASS="$(openssl rand -base64 48 | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 32)Aa9"
+az postgres flexible-server update -n attendance-prod-psql \
+  -g attendance-production-rg --admin-password "$PGPASS"
+az keyvault secret set --vault-name attendance-prod-keyvault --name DATABASE-URL \
+  --value "postgresql://attendance_admin:$PGPASS@attendance-prod-psql.postgres.database.azure.com:5432/attendance_prod?sslmode=require&schema=public" \
+  --output none
+unset PGPASS
+```
+
+`--output none` matters: without it the CLI prints the secret it just set.
+Restart the web app afterwards so it picks up the new secret version.

@@ -19,14 +19,24 @@ param namePrefix = 'attendance-prod'
 param postgresAdministratorPassword = readEnvironmentVariable('ATTENDANCE_PG_ADMIN_PASSWORD')
 
 // Globally unique names, availability confirmed 2026-09-18.
-param keyVaultName = 'attendance-prod-kv'
+//
+// NOT `attendance-prod-kv`: that name is already taken in Key Vault's GLOBAL
+// namespace by a vault outside this tenant (checkNameAvailability →
+// AlreadyExists, and `az keyvault list-deleted` is empty here, so it is not a
+// soft-deleted vault of ours to purge). Someone else's name is not ours to
+// reclaim. `kv-attendance-prod` is taken too — it is a crowded namespace.
+param keyVaultName = 'attendance-prod-keyvault'
 param registryName = 'attendanceprodacr'
 param storageAccountName = 'attendanceprodsa'
 param postgresServerName = 'attendance-prod-psql'
 
 param postgresAdministratorLogin = 'attendance_admin'
 param postgresVersion = '17'
-param postgresSkuName = 'GP_Standard_D2s_v3'
+// `Standard_D2s_v3`, not `GP_Standard_D2s_v3`. The `GP_`/`B_`/`MO_` prefix is an
+// Azure *CLI* convention; the ARM API takes the bare VM size and reads the tier
+// from postgresSkuTier below. The prefixed form fails the whole deployment with
+// ParameterOutOfRange. Identical machine either way: 2 vCore / 8 GiB.
+param postgresSkuName = 'Standard_D2s_v3'
 param postgresSkuTier = 'GeneralPurpose'
 param postgresBackupRetentionDays = 14
 
