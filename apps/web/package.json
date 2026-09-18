@@ -12,6 +12,9 @@
     "prisma:validate": "prisma validate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "node --experimental-strip-types prisma/seed.ts",
+    "bootstrap:inspect": "node --import ./scripts/register-test-loader.mjs scripts/bootstrap-production.ts inspect",
+    "bootstrap:system": "node --import ./scripts/register-test-loader.mjs scripts/bootstrap-production.ts system",
+    "bootstrap:tenant": "node --import ./scripts/register-test-loader.mjs scripts/bootstrap-production.ts tenant",
     "test": "node --import ./scripts/register-test-loader.mjs --test \"src/**/*.test.ts\""
   },
   "prisma": {

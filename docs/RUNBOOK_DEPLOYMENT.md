@@ -161,8 +161,13 @@ az containerapp job logs show -n attendance-prod-migrate \
 **Never**, against production: `prisma db push`, `prisma migrate dev`,
 `prisma migrate reset`. The first two invent schema changes outside review; the
 third drops the database. The migration image contains only `schema.prisma` and
-the committed migration SQL — `prisma/seed.ts` is deliberately not in it, so
-production cannot be seeded even by accident.
+the committed migration SQL — `prisma/seed.ts` is deliberately not in it, so the
+migration job cannot write application rows even if something tried to make it.
+
+Migrations create the schema and stop there. A migrated database still holds no
+roles, no institution and no accounts, and nobody can sign in to it. Those rows
+arrive through a separate, explicitly-run bootstrap; see "First bootstrap of a
+new database" below.
 
 ### A failed migration
 
@@ -174,6 +179,130 @@ migrations until it is resolved. Read the logs, decide whether the migration
 partially applied, then use `prisma migrate resolve --applied|--rolled-back`
 from inside the VNet. The previous application revision keeps serving
 throughout: the pipeline halts before `deploy`, so nothing has changed yet.
+
+---
+
+## First bootstrap of a new database
+
+> **Status: designed, not built.** Neither the image nor the job below exists in
+> `attendance-production-rg`, and production has not been bootstrapped. The
+> local-side mechanism is implemented and tested; the Azure side is written down
+> here so it can be reviewed before anything is created. Do not run any of this
+> without explicit approval.
+
+A freshly migrated database has a complete schema and no rows. Two stages fill
+that gap, both from `apps/web/scripts/bootstrap-production.ts`, both explicit:
+`system` (roles and permission grants, idempotent) and `tenant` (the first
+institution, its administrator, and the assignment joining them, once).
+docs/DATABASE_OPERATIONS.md §4 covers what each writes and why they are separate.
+
+### Why a separate job rather than the migration job
+
+The database has no public endpoint, so a bootstrap has the same reachability
+problem a migration has and the same solution: run it inside the VNet as a
+Container Apps Job. The question is whether it is *the same* job.
+
+It should not be, for three reasons.
+
+**The deployment pipeline starts the migration job on every deploy.** That is
+the whole point of it. If the bootstrap lived in the same image, the only thing
+separating a routine deploy from a write to `Institution` would be which command
+the container happened to be running — and a command override left behind after
+a bootstrap would still be there the next time the pipeline pressed start. The
+blast radius of forgetting to undo something should not be "creates a tenant".
+
+**It would undo what makes the migration image trustworthy.** That image holds
+`schema.prisma`, the committed migration SQL and the Prisma CLI, and nothing
+else — no application source, no generated client, no password hasher. Its
+header says there is exactly one place to read to know what runs against
+production. Bootstrapping needs the application's own modules, its generated
+client and its scrypt implementation, which means the image stops being small
+and stops being only about schema.
+
+**The two have different lifetimes.** Migrations run forever, on a schedule set
+by the repository. `tenant` runs once, ever. A resource that is meant to be used
+once and then deleted should be separately deletable.
+
+Rejected alternatives: `az containerapp exec` into a running web revision (an
+unlogged interactive shell against the container currently serving traffic, and
+the standalone build has no Prisma CLI or `.ts` runtime anyway); running it from
+a laptop (needs the public endpoint and firewall rule this architecture exists to
+avoid); creating the job ad hoc at execution time (no reviewed image, no
+reproducible definition, no artifact to audit afterwards).
+
+### The shape of it
+
+A `apps/web/Dockerfile.bootstrap` image and an `attendance-prod-bootstrap`
+Container Apps Job in the same managed environment, mirroring
+`modules/migration-job.bicep`: `triggerType: Manual`, `replicaRetryLimit: 0`,
+`parallelism: 1`, `replicaCompletionCount: 1`, system-assigned identity with
+`get` on the `DATABASE-URL` secret and nothing more.
+
+The job template carries `DATABASE_URL` and no confirmation. That matters:
+`BOOTSTRAP_TARGET` and `BOOTSTRAP_CONFIRM` are both absent by default, so
+starting the job with no overrides runs a container that refuses and exits
+non-zero. The stage and the confirmation are supplied per execution:
+
+```sh
+# Stage A — roles and permissions. Idempotent; safe to repeat.
+az containerapp job start -n attendance-prod-bootstrap -g attendance-production-rg \
+  --args system \
+  --env-vars BOOTSTRAP_TARGET=production BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION
+```
+
+`--args` and `--env-vars` on `job start` are execution-scoped overrides: they
+apply to that one run and are not written back to the job template. Nothing a
+bootstrap sets can be left behind to affect a later one.
+
+Stage B needs the institution and administrator details, and a password. The
+password is the one input that must not appear in a command line, a shell
+history, a CI log or an activity-log entry, so it does not travel as a literal:
+
+```sh
+# Put the initial password in Key Vault, reference it, delete it afterwards.
+az keyvault secret set --vault-name <vault> -n BOOTSTRAP-ADMIN-PASSWORD \
+  --file <path>        # from a file, not an inline --value
+
+az containerapp job start -n attendance-prod-bootstrap -g attendance-production-rg \
+  --args tenant \
+  --env-vars BOOTSTRAP_TARGET=production BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION \
+             BOOTSTRAP_INSTITUTION_NAME="..." BOOTSTRAP_INSTITUTION_TYPE=SCHOOL \
+             BOOTSTRAP_ADMIN_NAME="..." BOOTSTRAP_ADMIN_EMAIL="..." \
+             BOOTSTRAP_ADMIN_PASSWORD=secretref:bootstrap-admin-password
+
+az keyvault secret delete --vault-name <vault> -n BOOTSTRAP-ADMIN-PASSWORD
+```
+
+`secretref:` resolves against a secret declared on the *job*, so the job's
+configuration needs a `bootstrap-admin-password` entry pointing at that Key Vault
+URL alongside the existing `database-url` one. That is the one part of this
+design to confirm against the API when the job is actually created: a Key Vault
+reference whose secret does not exist yet may be rejected at template-update
+time, in which case the secret is created first and deleted last, exactly as
+ordered above. If it proves awkward, `az containerapp job secret set` holds the
+value on the job instead of in Key Vault — same lifetime, one less resource,
+and it is removed the same way afterwards.
+
+Run `--args inspect` first. It reads and reports — how many institutions, users
+and role assignments exist, which system roles are present, and whether the
+tenant stage would be allowed to proceed — and writes nothing.
+
+The script prints the institution id, the administrator's id and the address
+they sign in with. It does not print the password, the hash, or `DATABASE_URL`,
+and it redacts anything URL-shaped from unexpected errors.
+
+After the first sign-in, the administrator should issue themselves a fresh
+password from the faculty directory (Dashboard → Faculty → Reset password),
+which replaces the bootstrap password and ends every existing session. Until
+that happens, the value that was briefly in Key Vault is a live credential.
+
+### If it refuses
+
+That is the design working. `tenant` will not run unless all eight system roles
+are present and the database holds zero institutions, zero users and zero role
+assignments. It does not repair a partial state — a database with an institution
+but no administrator is something to look at, not something for a script to
+guess at. Read the refusal, run `--args inspect`, and decide deliberately.
 
 ---
 

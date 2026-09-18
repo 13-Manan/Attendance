@@ -2,38 +2,27 @@
 // `prisma migrate dev` (wired via the "prisma.seed" key in package.json).
 // Requires a reachable DATABASE_URL — cannot be executed in an environment
 // without Postgres (see README's "cannot run here" verification notes).
+//
+// This creates the platform roles and their permission grants and nothing
+// else: no institution, no user, no student, no face template. Demo tenants
+// and rosters live in scripts/dev-fixture.ts, which refuses to run anywhere
+// but localhost.
+//
+// The logic itself is in src/modules/authorization/bootstrap.ts so that this
+// seed and the production bootstrap (scripts/bootstrap-production.ts) share
+// one implementation and one permission catalog. This file is a thin
+// development-facing wrapper: it is deliberately absent from the production
+// migration image (see apps/web/Dockerfile.migrate), so production reaches the
+// same code through the bootstrap script instead.
 import { PrismaClient } from "@prisma/client";
-import { SYSTEM_ROLES } from "../src/modules/authorization/permissions.ts";
+import { runSystemBootstrap } from "../src/modules/authorization/bootstrap.ts";
 
 const prisma = new PrismaClient();
 
 async function main() {
-  for (const roleDef of SYSTEM_ROLES) {
-    // Not `upsert` on the (institutionId, key) compound unique: SQL equality
-    // never matches NULL (`institutionId = NULL` is never true), so an
-    // upsert keyed on that compound value can never find an existing
-    // platform-wide (institutionId: null) role — it would always try to
-    // create, then violate the hand-patched partial unique index
-    // (docs/DATA_MODEL.md) on the second run. find-then-write instead.
-    const existing = await prisma.role.findFirst({
-      where: { institutionId: null, key: roleDef.key },
-    });
-
-    const role = existing
-      ? await prisma.role.update({ where: { id: existing.id }, data: { name: roleDef.name } })
-      : await prisma.role.create({
-          data: { institutionId: null, key: roleDef.key, name: roleDef.name, isSystem: true },
-        });
-
-    // Idempotent: always converge RolePermission rows to exactly match the
-    // current code catalog, so re-running the seed after editing
-    // permissions.ts never leaves stale grants behind.
-    await prisma.rolePermission.deleteMany({ where: { roleId: role.id } });
-    await prisma.rolePermission.createMany({
-      data: roleDef.permissions.map((permission) => ({ roleId: role.id, permission })),
-    });
-
-    console.log(`Seeded role ${roleDef.key} with ${roleDef.permissions.length} permissions`);
+  const result = await runSystemBootstrap(prisma);
+  for (const role of result.roles) {
+    console.log(`Seeded role ${role.key} with ${role.permissionCount} permissions`);
   }
 }
 

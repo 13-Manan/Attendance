@@ -1,10 +1,12 @@
 /**
  * Development fixture — demo tenants, logins and rosters for manual testing.
  *
- * This is NOT `prisma/seed.ts`. The real seed creates only the platform roles
- * and permission grants and is safe to run in production. This file creates
- * fake institutions, staff accounts and students, and must never touch a
- * production database — hence the localhost guard below.
+ * This is NOT `prisma/seed.ts`, which creates only the platform roles and
+ * permission grants, and NOT `scripts/bootstrap-production.ts`, which is how
+ * those same roles — and the first institution and administrator — reach a
+ * production database. This file creates fake institutions, staff accounts and
+ * students, and must never touch a production database — hence the localhost
+ * guard below. docs/DATABASE_OPERATIONS.md §4 sets the four apart.
  *
  * It deliberately creates NO FaceEmbedding rows. Biometric templates are never
  * faked (ADR-0008); enrol a face through the UI against the mock face-ai

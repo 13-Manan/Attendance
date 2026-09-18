@@ -241,23 +241,124 @@ server rather than in this repository.
 
 ---
 
-## 4. Seeding
+## 4. Bootstrap and seeding
+
+Four different things write rows that did not arrive as application traffic.
+They are routinely confused with each other, so they are named separately here.
+Three of them are required in production; the fourth must never reach it.
+
+| | What it writes | Runs where | How often |
+| --- | --- | --- | --- |
+| 1. Migrations | Schema only — tables, indexes, extensions | Every database | Every deployment that carries a new migration |
+| 2. System bootstrap | 8 `Role` + 116 `RolePermission` | Every database | Idempotent; safe to repeat |
+| 3. First-tenant bootstrap | 1 `Institution`, 1 admin `User`, 1 `UserRoleAssignment` | Every database | Exactly once, on an empty database |
+| 4. Development fixture | Demo institutions, staff, cohorts, students | localhost only | Any time |
+
+A database that has had 1 and 2 but not 3 is reachable and correct but has
+nobody who can sign in. A database that has had 1 but not 2 cannot resolve a
+single permission check, so even a user row would not get anyone in. The order
+is fixed: migrations, then system, then tenant.
+
+### 4.1 Migrations
+
+Section 1. `prisma migrate deploy`, and nothing else, ever, against production.
+
+### 4.2 System bootstrap — roles and permissions
+
+Eight platform-wide roles (`institutionId IS NULL`) and their permission grants.
+No institution, no user, no student, no face template. Idempotent by
+construction: it converges `RolePermission` to whatever `permissions.ts`
+currently declares, adding what is missing and removing what is stale, so
+re-running after editing the permission catalog does not layer new grants on top
+of old ones. Existing rows that are still correct keep their ids, so there is no
+window in which a role is missing a permission it is supposed to have.
+
+The logic lives in `src/modules/authorization/bootstrap.ts`. Two callers reach
+it, and which one you use depends only on which database you mean:
 
 ```bash
-cd apps/web && DATABASE_URL=... npm run prisma:seed
+# Development — also runs automatically after `prisma migrate dev`.
+cd apps/web && npm run prisma:seed
+
+# Any database, including production — see §4.5 for the production procedure.
+BOOTSTRAP_TARGET=local npm run bootstrap:system --workspace=web
 ```
 
-`prisma/seed.ts` creates the eight platform-wide system roles and their
-permission grants — 8 `Role` rows and 116 `RolePermission` rows — and nothing
-else. No institution, no user, no student, no face template. It is idempotent:
-it converges `RolePermission` to whatever `permissions.ts` currently declares, so
-re-running after editing the permission catalog removes stale grants rather than
-layering new ones on top.
+`prisma/seed.ts` is a thin wrapper around the same function. It is deliberately
+absent from the production migration image (`apps/web/Dockerfile.migrate`), so
+production is never reached by the seed path — it reaches the identical rows
+through the bootstrap script instead. The rows are the same because the code is
+the same; only the entry point and its guards differ.
 
-It is safe to run in production, and in fact has to be: without these rows no
-permission check can resolve and nobody can sign in. It is not a fixture
-generator. There is deliberately no fake-student or fake-embedding seed — see
-ADR-0008 on biometric data handling.
+### 4.3 First-tenant bootstrap — the first institution and its administrator
+
+The chicken-and-egg case. Every other account in the system is created by an
+authenticated administrator through the faculty directory, which needs an
+institution, a role assignment and a signed-in actor to already exist. The first
+one cannot be, so it is created out of band, once.
+
+```bash
+BOOTSTRAP_TARGET=local \
+BOOTSTRAP_INSTITUTION_NAME="..." \
+BOOTSTRAP_INSTITUTION_TYPE=SCHOOL \
+BOOTSTRAP_ADMIN_NAME="..." \
+BOOTSTRAP_ADMIN_EMAIL="..." \
+  npm run bootstrap:tenant --workspace=web
+```
+
+The password is prompted for, hidden, and confirmed. It is never taken from the
+command line. `BOOTSTRAP_ADMIN_PASSWORD` exists only for the non-interactive
+case (a Container Apps Job has no terminal), where it arrives as a Key Vault
+secret reference rather than a typed value.
+
+It refuses unless the system roles are complete **and** the database holds zero
+institutions, zero users and zero role assignments. A partial state is refused
+rather than repaired: a database with an institution but no admin, or an admin
+with no role, is a situation somebody needs to look at, not one a script should
+guess its way out of. Concurrent attempts are serialised on a transaction-scoped
+Postgres advisory lock, so two operators racing produce one tenant and one clear
+refusal, never two institutions.
+
+Nothing about it is automatic. No lifecycle hook calls it, no startup path calls
+it, no CI step calls it, and no deployment stage calls it. It writes when a
+person runs it and says which database they meant.
+
+### 4.4 Development fixture
+
+```bash
+cd apps/web && DATABASE_URL=postgresql://postgres@127.0.0.1:5433/attendance_dev \
+  node --import ./scripts/register-test-loader.mjs scripts/dev-fixture.ts
+```
+
+Demo institutions, staff, cohorts and students, for looking at a populated UI.
+`scripts/dev-fixture.ts` refuses to run against anything but localhost. There is
+deliberately no fake-student or fake-embedding seed for production — see
+ADR-0008 on biometric data handling. Production business data is entered through
+the application by the people it belongs to.
+
+### 4.5 Running a bootstrap against production
+
+Both bootstrap stages refuse to do anything until the operator has said, in two
+independent ways, that production is what they meant:
+
+```
+BOOTSTRAP_TARGET=production
+BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION
+```
+
+Production is never inferred from the shape of `DATABASE_URL`. Inference is the
+failure mode this is built against: a heuristic that is right a hundred times
+and wrong once, silently, on the database where being wrong matters. Declaring
+`local` while pointing at a non-localhost database is refused outright.
+
+The script prints identifiers and the address the administrator signs in with.
+It never prints the password, the password hash, or the connection string, and
+it strips anything URL-shaped out of unexpected errors before reporting them —
+this output is the kind that gets pasted into a ticket.
+
+For the production execution path — which job runs it, and how the inputs get
+there without landing in a shell history — see the bootstrap section of
+docs/RUNBOOK_DEPLOYMENT.md.
 
 ---
 
