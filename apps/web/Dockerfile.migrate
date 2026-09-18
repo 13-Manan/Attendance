@@ -1,0 +1,39 @@
+# ATTENDANCE PROJECT — Prisma migration image
+#
+# Runs as the attendance-prod-migrate Container Apps Job, inside the VNet, so
+# the production database never needs a public endpoint or a temporary firewall
+# rule to be migrated. See infra/azure/modules/migration-job.bicep.
+#
+# Build from the REPOSITORY ROOT:
+#   az acr build -r attendanceprodacr -f apps/web/Dockerfile.migrate -t migrate:<sha> .
+#
+# A separate, tiny image rather than reusing the web image: `output: "standalone"`
+# deliberately excludes the Prisma CLI and the migration SQL, so the web runtime
+# image cannot apply migrations even if something tried to make it. Splitting
+# them keeps schema authority in one place that does exactly one thing.
+
+FROM node:22-bookworm-slim
+WORKDIR /migrations
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Pinned to the same major as the repo's `prisma` devDependency (^6.9.0). The
+# migration engine must agree with the migrations it is applying.
+RUN npm install --no-save --no-audit --no-fund prisma@6
+
+# Only the schema and the committed migration SQL. prisma/seed.ts is
+# deliberately NOT copied: production is never seeded, and an image that does
+# not contain the seed script cannot run it by accident.
+COPY --chown=node:node apps/web/prisma/schema.prisma ./prisma/schema.prisma
+COPY --chown=node:node apps/web/prisma/migrations ./prisma/migrations
+
+USER node
+
+# `migrate deploy` is the only safe verb here. It applies committed migration
+# files in order and stops on the first failure. It never generates a
+# migration, never prompts, never resets, and never drops anything — unlike
+# `migrate dev`, `db push` and `migrate reset`, none of which may ever run
+# against this database.
+CMD ["npx", "prisma", "migrate", "deploy", "--schema=./prisma/schema.prisma"]

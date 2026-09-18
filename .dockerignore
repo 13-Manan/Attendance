@@ -1,0 +1,46 @@
+# Build context for the web and migration images (context = repo root).
+#
+# The first block is the one that matters: a build context is copied into the
+# daemon wholesale, and anything that lands in a layer is readable by anyone who
+# can pull the image. Real credentials live in .env / .env.local on a developer
+# machine, so they are excluded here as well as in .gitignore — the two files
+# protect against different accidents and neither substitutes for the other.
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Never needed at build time, and a large context is a slow one.
+node_modules
+**/node_modules
+.next
+**/.next
+out
+**/out
+dist
+build
+*.tsbuildinfo
+
+.git
+.gitignore
+.github
+
+# Documentation and infrastructure are not inputs to an application image.
+docs
+infra
+*.md
+!apps/web/AGENTS.md
+
+# The Python service builds from its own context (services/face-ai).
+services
+
+# Local tooling and OS noise.
+.claude
+.vscode
+.idea
+.DS_Store
+**/.DS_Store
+*.log
+**/__pycache__
+**/.pytest_cache
+**/.venv

@@ -1,0 +1,22 @@
+{
+  "name": "attendance-platform",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=web",
+    "build": "npm run build --workspace=web",
+    "lint": "npm run lint --workspace=web",
+    "typecheck": "npm run typecheck --workspace=web && npm run typecheck --workspace=@attendance/shared-types",
+    "prisma:generate": "npm run prisma:generate --workspace=web",
+    "prisma:validate": "npm run prisma:validate --workspace=web",
+    "prisma:migrate": "npm run prisma:migrate --workspace=web"
+  },
+  "devDependencies": {
+    "prisma": "^6.9.0",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,12 @@
+# Production-only additions for the container image.
+#
+# Kept separate from requirements.txt so the service's declared dependency
+# contract — the one the tests and local development run against — is not
+# changed by the act of containerising it.
+-r requirements.txt
+
+# Process supervisor in front of uvicorn workers. uvicorn alone is a perfectly
+# good production ASGI server, but gunicorn adds worker supervision and a
+# graceful-shutdown window, which is what lets an in-flight embedding request
+# finish when Container Apps replaces a revision.
+gunicorn>=23.0,<24.0

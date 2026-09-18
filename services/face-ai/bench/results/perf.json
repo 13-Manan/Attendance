@@ -1,0 +1,161 @@
+{
+  "generatedAt": "2026-09-17T00:19:00+0530",
+  "python": "3.11.16",
+  "disclaimer": "Measured against the `mock` backend, whose per-face compute is a hash. These are overhead floors, not total recognition latency. No model in this repository is licensed for production use.",
+  "candidateScan": [
+    {
+      "candidates": 10,
+      "reachableOverHttp": true,
+      "perCallUs": 14.255,
+      "mean_ms": 0.1426,
+      "p50_ms": 0.1419,
+      "p95_ms": 0.1453,
+      "max_ms": 0.1495,
+      "samples": 30
+    },
+    {
+      "candidates": 20,
+      "reachableOverHttp": true,
+      "perCallUs": 16.895,
+      "mean_ms": 0.3379,
+      "p50_ms": 0.3819,
+      "p95_ms": 0.3893,
+      "max_ms": 0.4146,
+      "samples": 30
+    },
+    {
+      "candidates": 50,
+      "reachableOverHttp": true,
+      "perCallUs": 17.375,
+      "mean_ms": 0.8688,
+      "p50_ms": 0.9522,
+      "p95_ms": 0.9587,
+      "max_ms": 1.1959,
+      "samples": 30
+    },
+    {
+      "candidates": 100,
+      "reachableOverHttp": true,
+      "perCallUs": 16.824,
+      "mean_ms": 1.6824,
+      "p50_ms": 1.6242,
+      "p95_ms": 1.9248,
+      "max_ms": 1.9626,
+      "samples": 30
+    },
+    {
+      "candidates": 500,
+      "reachableOverHttp": true,
+      "perCallUs": 14.636,
+      "mean_ms": 7.3182,
+      "p50_ms": 7.1458,
+      "p95_ms": 7.9953,
+      "max_ms": 10.6069,
+      "samples": 30
+    },
+    {
+      "candidates": 2000,
+      "reachableOverHttp": true,
+      "perCallUs": 14.835,
+      "mean_ms": 29.6703,
+      "p50_ms": 28.666,
+      "p95_ms": 34.9864,
+      "max_ms": 37.3878,
+      "samples": 30
+    },
+    {
+      "candidates": 5000,
+      "reachableOverHttp": false,
+      "perCallUs": 14.758,
+      "mean_ms": 73.7899,
+      "p50_ms": 72.2894,
+      "p95_ms": 82.7858,
+      "max_ms": 84.864,
+      "samples": 30
+    }
+  ],
+  "http": {
+    "modelInfo": {
+      "modelName": "mock",
+      "modelVersion": "0.1.0+pp1",
+      "weightsVersion": "0.1.0",
+      "preprocessingVersion": "1",
+      "embeddingDim": 512,
+      "embeddingNormalized": true,
+      "runtime": "numpy-hash-stub",
+      "commercialUse": "not-applicable",
+      "productionEligible": false,
+      "contractVersion": "v1"
+    },
+    "detectEmbed": [
+      {
+        "images": 1,
+        "imageKb": 711.9,
+        "requestBodyKb": 949.2,
+        "mean_ms": 3.086,
+        "p50_ms": 2.995,
+        "p95_ms": 3.491,
+        "max_ms": 3.698,
+        "samples": 15
+      },
+      {
+        "images": 2,
+        "imageKb": 711.9,
+        "requestBodyKb": 1898.4,
+        "mean_ms": 5.152,
+        "p50_ms": 5.118,
+        "p95_ms": 5.307,
+        "max_ms": 5.397,
+        "samples": 15
+      },
+      {
+        "images": 3,
+        "imageKb": 711.9,
+        "requestBodyKb": 2847.6,
+        "mean_ms": 7.598,
+        "p50_ms": 7.586,
+        "p95_ms": 7.826,
+        "max_ms": 7.854,
+        "samples": 15
+      }
+    ],
+    "match": [
+      {
+        "cohortSize": 10,
+        "requestBodyKb": 313.9,
+        "mean_ms": 3.255,
+        "p50_ms": 2.972,
+        "p95_ms": 3.028,
+        "max_ms": 7.24,
+        "samples": 15
+      },
+      {
+        "cohortSize": 20,
+        "requestBodyKb": 424.2,
+        "mean_ms": 4.759,
+        "p50_ms": 4.733,
+        "p95_ms": 4.813,
+        "max_ms": 4.958,
+        "samples": 15
+      },
+      {
+        "cohortSize": 50,
+        "requestBodyKb": 755.4,
+        "mean_ms": 10.222,
+        "p50_ms": 10.209,
+        "p95_ms": 10.282,
+        "max_ms": 10.509,
+        "samples": 15
+      },
+      {
+        "cohortSize": 100,
+        "requestBodyKb": 1307.5,
+        "mean_ms": 19.898,
+        "p50_ms": 19.887,
+        "p95_ms": 20.093,
+        "max_ms": 20.128,
+        "samples": 15
+      }
+    ]
+  }
+}

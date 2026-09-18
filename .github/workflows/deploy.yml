@@ -1,0 +1,369 @@
+# ATTENDANCE PROJECT — production deployment
+#
+# ---------------------------------------------------------------------------
+# Order, and why it is this order
+# ---------------------------------------------------------------------------
+#   validate -> build -> migrate -> deploy -> smoke
+#
+# The migration runs BEFORE the new application revision and the deployment
+# halts if it fails, because a container started against a schema that does not
+# yet have its columns fails on real attendance traffic rather than in a job
+# nobody is watching.
+#
+# The migration does NOT run on a GitHub runner. attendance-prod-psql has no
+# public endpoint, and it is not given one for the convenience of a deploy.
+# This workflow starts a Container Apps Job that already lives inside the VNet
+# and waits for its result. See infra/azure/modules/migration-job.bicep.
+#
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+# GitHub OIDC federated credentials. No Azure client secret, password or
+# connection string exists in this file, in the repository, or in a GitHub
+# secret — only the non-sensitive client/tenant/subscription identifiers
+# needed to request a short-lived token.
+#
+# ---------------------------------------------------------------------------
+# Blast radius
+# ---------------------------------------------------------------------------
+# Every Azure resource this workflow may touch is named literally below and
+# verified before use. Nothing is discovered by pattern matching, and the
+# `guard` job fails the run if the subscription, the resource group, or any
+# target resource is not the tagged Attendance one. A misconfigured secret
+# stops the deployment; it does not redirect it somewhere else.
+
+name: Deploy (production)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  # Required to request the OIDC token. Nothing else is granted.
+  id-token: write
+  contents: read
+
+# Never two production deployments at once. Not cancel-in-progress: a run that
+# is midway through a migration must be allowed to finish rather than be killed
+# between DDL statements.
+concurrency:
+  group: attendance-production-deploy
+  cancel-in-progress: false
+
+env:
+  # Attendance resource identifiers, pinned as literals on purpose. These are
+  # not secrets, and hardcoding them is the protection: a deployment can only
+  # ever address these exact resources.
+  AZURE_RESOURCE_GROUP: attendance-production-rg
+  AZURE_LOCATION: centralindia
+  ACR_NAME: attendanceprodacr
+  ACR_LOGIN_SERVER: attendanceprodacr.azurecr.io
+  WEB_APP: attendance-prod-web
+  FACE_AI_APP: attendance-prod-face-ai
+  MIGRATE_JOB: attendance-prod-migrate
+  EXPECTED_PROJECT_TAG: Attendance
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/ci.yml
+
+  guard:
+    name: Verify Azure target
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Require deployment configuration
+        env:
+          CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          missing=0
+          for name in CLIENT_ID TENANT_ID SUBSCRIPTION_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Required configuration AZURE_${name} is not set."
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Assert subscription, resource group and ownership tags
+        env:
+          EXPECTED_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+
+          actual=$(az account show --query id -o tsv)
+          if [ "$actual" != "$EXPECTED_SUBSCRIPTION" ]; then
+            echo "::error::Wrong subscription. Refusing to deploy."
+            exit 1
+          fi
+
+          if [ "$(az group exists -n "$AZURE_RESOURCE_GROUP")" != "true" ]; then
+            echo "::error::Resource group $AZURE_RESOURCE_GROUP does not exist."
+            exit 1
+          fi
+
+          # The name alone is not proof of ownership — an unrelated project
+          # could hold a similarly named group. The tag is what this workflow
+          # trusts.
+          tag=$(az group show -n "$AZURE_RESOURCE_GROUP" --query "tags.Project" -o tsv)
+          if [ "$tag" != "$EXPECTED_PROJECT_TAG" ]; then
+            echo "::error::$AZURE_RESOURCE_GROUP is not tagged Project=$EXPECTED_PROJECT_TAG (got '$tag'). Refusing."
+            exit 1
+          fi
+
+          loc=$(az group show -n "$AZURE_RESOURCE_GROUP" --query location -o tsv)
+          if [ "$loc" != "$AZURE_LOCATION" ]; then
+            echo "::error::$AZURE_RESOURCE_GROUP is in '$loc', expected '$AZURE_LOCATION'."
+            exit 1
+          fi
+
+          echo "Verified: $AZURE_RESOURCE_GROUP in $loc, Project=$tag"
+
+      - name: Assert every deployment target exists in that group
+        run: |
+          set -euo pipefail
+          fail=0
+
+          check() {
+            if ! az resource show -g "$AZURE_RESOURCE_GROUP" -n "$1" \
+                 --resource-type "$2" --query id -o tsv >/dev/null 2>&1; then
+              echo "::error::$2/$1 not found in $AZURE_RESOURCE_GROUP."
+              fail=1
+            else
+              echo "  ok: $1"
+            fi
+          }
+
+          check "$ACR_NAME"     "Microsoft.ContainerRegistry/registries"
+          check "$WEB_APP"      "Microsoft.App/containerApps"
+          check "$FACE_AI_APP"  "Microsoft.App/containerApps"
+          check "$MIGRATE_JOB"  "Microsoft.App/jobs"
+
+          [ "$fail" -eq 0 ] || exit 1
+
+      - id: sha
+        name: Pin the immutable tag
+        run: echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and push images
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [validate, guard]
+    env:
+      SHA: ${{ needs.guard.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Built by ACR Tasks inside Azure rather than pushed from the runner:
+      # the runner then never needs registry push credentials, and admin
+      # credentials on the registry stay disabled.
+      #
+      # Tagged with the commit SHA and nothing else. No `latest`, so every
+      # running revision names the exact commit it came from and no tag can
+      # ever be silently repointed at different bytes.
+      - name: Build web image
+        run: |
+          az acr build --registry "$ACR_NAME" \
+            --image "web:${SHA}" \
+            --file apps/web/Dockerfile .
+
+      - name: Build migration image
+        run: |
+          az acr build --registry "$ACR_NAME" \
+            --image "migrate:${SHA}" \
+            --file apps/web/Dockerfile.migrate .
+
+      - name: Build Face AI image
+        run: |
+          az acr build --registry "$ACR_NAME" \
+            --image "face-ai:${SHA}" \
+            --file services/face-ai/Dockerfile services/face-ai
+
+  migrate:
+    name: Migrate database (inside VNet)
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [guard, build]
+    env:
+      SHA: ${{ needs.guard.outputs.sha }}
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Point the job at this commit's migration image
+        run: |
+          set -euo pipefail
+          az containerapp job update \
+            --name "$MIGRATE_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "${ACR_LOGIN_SERVER}/migrate:${SHA}" \
+            --output none
+
+      - name: Run migrations and wait
+        run: |
+          set -euo pipefail
+
+          execution=$(az containerapp job start \
+            --name "$MIGRATE_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query name -o tsv)
+          echo "Execution: $execution"
+
+          # The job has replicaRetryLimit 0, so this resolves once.
+          for _ in $(seq 1 60); do
+            status=$(az containerapp job execution show \
+              --name "$MIGRATE_JOB" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --job-execution-name "$execution" \
+              --query properties.status -o tsv)
+            echo "  status: $status"
+            case "$status" in
+              Succeeded)
+                echo "Migrations applied."
+                exit 0
+                ;;
+              Failed|Degraded)
+                echo "::error::Migration job $execution finished as $status. Deployment halted; the previous revision keeps serving. Inspect with: az containerapp job logs show -n $MIGRATE_JOB -g $AZURE_RESOURCE_GROUP --execution $execution"
+                exit 1
+                ;;
+            esac
+            sleep 20
+          done
+
+          echo "::error::Migration job $execution did not finish within 20 minutes. Deployment halted; NOT retried automatically."
+          exit 1
+
+  deploy:
+    name: Deploy container apps
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [guard, build, migrate]
+    env:
+      SHA: ${{ needs.guard.outputs.sha }}
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Face AI first. The web app calls it, so upgrading the dependency before
+      # its caller avoids a window where new web code talks to an old service.
+      - name: Deploy Face AI (internal ingress)
+        run: |
+          set -euo pipefail
+          az containerapp update \
+            --name "$FACE_AI_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "${ACR_LOGIN_SERVER}/face-ai:${SHA}" \
+            --output none
+
+      - name: Deploy web
+        run: |
+          set -euo pipefail
+          az containerapp update \
+            --name "$WEB_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "${ACR_LOGIN_SERVER}/web:${SHA}" \
+            --output none
+
+      - name: Confirm Face AI has no public endpoint
+        run: |
+          set -euo pipefail
+          external=$(az containerapp show \
+            --name "$FACE_AI_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.configuration.ingress.external" -o tsv)
+          if [ "$external" != "false" ]; then
+            echo "::error::$FACE_AI_APP has external ingress '$external'. The biometric service must never be publicly reachable."
+            exit 1
+          fi
+          echo "Face AI ingress is internal."
+
+  smoke:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [guard, deploy]
+    env:
+      SHA: ${{ needs.guard.outputs.sha }}
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Revision is running and serving this commit
+        run: |
+          set -euo pipefail
+
+          revision=$(az containerapp show -n "$WEB_APP" -g "$AZURE_RESOURCE_GROUP" \
+            --query "properties.latestRevisionName" -o tsv)
+
+          for _ in $(seq 1 30); do
+            state=$(az containerapp revision show -n "$WEB_APP" -g "$AZURE_RESOURCE_GROUP" \
+              --revision "$revision" --query "properties.runningState" -o tsv)
+            echo "  $revision: $state"
+            [ "$state" = "Running" ] && break
+            if [ "$state" = "Failed" ]; then
+              echo "::error::Revision $revision failed to start. See docs/RUNBOOK_DEPLOYMENT.md to shift traffic back."
+              exit 1
+            fi
+            sleep 10
+          done
+
+          image=$(az containerapp show -n "$WEB_APP" -g "$AZURE_RESOURCE_GROUP" \
+            --query "properties.template.containers[0].image" -o tsv)
+          if [ "$image" != "${ACR_LOGIN_SERVER}/web:${SHA}" ]; then
+            echo "::error::Running image '$image' is not the expected ${ACR_LOGIN_SERVER}/web:${SHA}."
+            exit 1
+          fi
+          echo "Serving $image"
+
+      - name: HTTPS reachability
+        run: |
+          set -euo pipefail
+          fqdn=$(az containerapp show -n "$WEB_APP" -g "$AZURE_RESOURCE_GROUP" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+
+          for _ in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://${fqdn}/" || echo 000)
+            echo "  https://${fqdn}/ -> $code"
+            # Any served HTTP response proves TLS terminated and the container
+            # answered; an unauthenticated root may legitimately redirect.
+            case "$code" in
+              2*|3*|4*) echo "Web app is serving over HTTPS."; exit 0 ;;
+            esac
+            sleep 15
+          done
+
+          echo "::error::$fqdn did not serve an HTTPS response. See docs/RUNBOOK_DEPLOYMENT.md."
+          exit 1

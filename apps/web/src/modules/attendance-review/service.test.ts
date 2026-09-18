@@ -1,0 +1,1006 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  applyReviewDecision,
+  confirmAttendance,
+  countAttendance,
+  decideCandidate,
+  generateAttendanceCandidates,
+  getAttendanceReviewBoard,
+  resolveSessionRoster,
+} from "./service.ts";
+import type { AttendanceReviewDeps } from "./service.ts";
+import type { AttendanceRecordRow, SessionDetailRow } from "./repository.ts";
+import { ForbiddenError } from "../authorization/types.ts";
+import type { SessionUser } from "../auth-tenancy/types.ts";
+import type { AttendanceRecord } from "../attendance/types.ts";
+import type { Institution } from "../institutions/types.ts";
+import type { AttendanceRealtimeEvent } from "../realtime/types.ts";
+import type { RecognitionRunSummary, StudentRecognitionAggregate } from "../recognition-engine/types.ts";
+import type { AttendanceSession, SessionStatus } from "../sessions/types.ts";
+import type { WebhookEventEnvelope } from "../integrations/types.ts";
+import type { AttendanceRosterStudent } from "./types.ts";
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const ALL_PERMISSIONS = [
+  "cohort.read",
+  "student.read",
+  "attendanceSession.create",
+  "attendanceSession.capture",
+  "attendanceSession.finalize",
+  "attendanceRecord.correct",
+  "attendanceRecord.read",
+];
+
+function makeUser(
+  overrides: { permissions?: string[]; userId?: string; institutionId?: string } = {},
+): SessionUser {
+  return {
+    userId: overrides.userId ?? "user-faculty",
+    email: "faculty@example.com",
+    name: "Dr. Faculty",
+    institutionId: overrides.institutionId ?? "inst-A",
+    campusId: null,
+    roles: [
+      {
+        key: "FACULTY",
+        name: "Faculty",
+        institutionId: overrides.institutionId ?? "inst-A",
+        campusId: null,
+        permissions: (overrides.permissions ??
+          ALL_PERMISSIONS) as SessionUser["roles"][number]["permissions"],
+      },
+    ],
+  };
+}
+
+function makeSession(status: SessionStatus = "CAPTURING"): AttendanceSession {
+  return {
+    id: "sess-1",
+    institutionId: "inst-A",
+    cohortId: "coh-1",
+    cohortSubjectId: null,
+    facultyId: "user-faculty",
+    // A real row always has these; the fixture omitted them while nothing read
+    // them. The webhook payloads do, and a cast that hides a missing column is
+    // how a green test suite ships a TypeError.
+    sessionDate: new Date("2026-09-15T00:00:00Z"),
+    startedAt: new Date("2026-09-15T09:00:00Z"),
+    endedAt: null,
+    status,
+  } as unknown as AttendanceSession;
+}
+
+/** A class of `n` students, coded S001…S0nn. */
+function roster(n: number): AttendanceRosterStudent[] {
+  return Array.from({ length: n }, (_, i) => {
+    const num = String(i + 1).padStart(3, "0");
+    return {
+      studentId: `stu-${num}`,
+      studentCode: `S${num}`,
+      firstName: `Student${num}`,
+      lastName: `Class${num}`,
+    };
+  });
+}
+
+function aggregate(
+  studentId: string,
+  advisoryResult: "PRESENT" | "NEEDS_REVIEW" | "ABSENT",
+  bestSimilarity: number | null,
+  wasAmbiguous = false,
+): StudentRecognitionAggregate {
+  return {
+    studentId,
+    bestSimilarity,
+    bestDetectionConfidence: 0.99,
+    bestQualityScore: 0.8,
+    bestFaceId: "1:0",
+    advisoryResult,
+    matchStatus: advisoryResult === "PRESENT" ? "MATCHED" : advisoryResult === "ABSENT" ? "UNMATCHED" : "UNCERTAIN",
+    wasAmbiguous,
+  } as StudentRecognitionAggregate;
+}
+
+function runSummary(perStudent: StudentRecognitionAggregate[]): RecognitionRunSummary {
+  return {
+    sessionId: "sess-1",
+    cohortId: "coh-1",
+    candidateScope: "cohort",
+    candidatePoolSize: perStudent.length,
+    skippedIncompatibleCandidates: 0,
+    detectedFacesTotal: perStudent.length,
+    scoredFacesTotal: perStudent.length,
+    modelName: "stub",
+    modelVersion: "0.0.1",
+    productionEligible: false,
+    policy: {
+      presentMin: 0.62,
+      reviewMin: 0.45,
+      ambiguityMargin: 0.05,
+      minDetectionConfidence: 0.5,
+    },
+    perFace: [
+      { imageSequenceNumber: 1, qualityScore: 0.8 },
+      { imageSequenceNumber: 1, qualityScore: 0.6 },
+      { imageSequenceNumber: 2, qualityScore: 0.9 },
+    ] as RecognitionRunSummary["perFace"],
+    perStudent,
+    unmatchedStudentIds: [],
+  };
+}
+
+/**
+ * An in-memory attendance register that behaves like the real one: rows are
+ * keyed by (sessionId, studentId), corrections append, and `aiResult` is
+ * never overwritten by a correction.
+ */
+function makeStore(students: AttendanceRosterStudent[], sessionStatus: SessionStatus = "CAPTURING") {
+  const rows = new Map<string, AttendanceRecordRow>();
+  const corrections: Array<{
+    attendanceRecordId: string;
+    previousResult: string;
+    newResult: string;
+    changedByUserId: string;
+    source: string;
+    reason?: string;
+  }> = [];
+  const transitions: Array<[SessionStatus, SessionStatus]> = [];
+  const events: AttendanceRealtimeEvent[] = [];
+  const studentEvents: Array<{ studentId: string; event: AttendanceRealtimeEvent }> = [];
+  // Captured rather than left to the default, which is the real dispatcher: an
+  // un-injected emit sends every unit test at the webhook_endpoint table and
+  // logs a DATABASE_URL failure per assertion. Capturing keeps the suite
+  // offline and makes the outbound contract assertable.
+  const webhooks: WebhookEventEnvelope[] = [];
+  let metadata: Record<string, unknown> = {};
+  let status = sessionStatus;
+  let finalizedCalls = 0;
+
+  const deps: AttendanceReviewDeps = {
+    getSessionById: async () => ({ ...makeSession(status) }),
+    getSessionDetailRow: async () =>
+      ({
+        id: "sess-1",
+        institutionId: "inst-A",
+        cohortId: "coh-1",
+        cohortSubjectId: null,
+        facultyId: "user-faculty",
+        sessionDate: new Date("2026-09-15T00:00:00Z"),
+        startedAt: new Date("2026-09-15T09:00:00Z"),
+        endedAt: null,
+        status,
+        metadata,
+        faculty: { name: "Dr. Faculty" },
+        cohort: {
+          name: "Grade 10-A",
+          termLabel: null,
+          academicSessionId: "as-1",
+          academicSession: { name: "2026-27" },
+        },
+        cohortSubject: null,
+      }) as SessionDetailRow,
+    getInstitutionById: async () =>
+      ({ id: "inst-A", name: "Test School", type: "SCHOOL", settings: {} }) as unknown as Institution,
+    getUserNameById: async () => "Dr. Faculty",
+    requireCohortAccess: async () => {},
+    listCohortRoster: async () => students,
+    listCohortSubjectRoster: async () => [],
+    listComparableTemplates: async (ids) => ids,
+    listAnyTemplates: async (ids) => ids,
+    listAttendanceRecords: async () => Array.from(rows.values()),
+    upsertCandidates: async (incoming) => {
+      let created = 0;
+      let refreshed = 0;
+      for (const row of incoming) {
+        const existing = rows.get(row.studentId);
+        if (!existing) {
+          rows.set(row.studentId, {
+            id: `rec-${row.studentId}`,
+            sessionId: row.sessionId,
+            studentId: row.studentId,
+            aiResult: row.aiResult,
+            aiConfidence: row.aiConfidence,
+            finalResult: row.finalResult,
+            isManuallyCorrected: false,
+          });
+          created++;
+        } else if (!existing.isManuallyCorrected) {
+          existing.aiResult = row.aiResult;
+          existing.aiConfidence = row.aiConfidence;
+          existing.finalResult = row.finalResult;
+          refreshed++;
+        }
+      }
+      return { created, refreshed };
+    },
+    mergeSessionMetadata: async (_id, patch) => {
+      metadata = { ...metadata, ...patch };
+    },
+    transitionSessionStatus: async (_id, from, to) => {
+      if (status !== from) throw new Error("session_status_conflict");
+      transitions.push([from, to]);
+      status = to;
+      return { ...makeSession(status) };
+    },
+    getAttendanceRecordById: async (id) => {
+      const row = Array.from(rows.values()).find((r) => r.id === id);
+      return row ? ({ ...row, institutionId: "inst-A" } as unknown as AttendanceRecord) : null;
+    },
+    correctAttendanceRecord: async (input) => {
+      const row = Array.from(rows.values()).find((r) => r.id === input.attendanceRecordId);
+      if (!row) throw new Error("not_found");
+      corrections.push({
+        attendanceRecordId: row.id,
+        previousResult: row.finalResult,
+        newResult: input.newResult,
+        changedByUserId: input.changedByUserId,
+        source: input.source,
+        reason: input.reason,
+      });
+      // The storage primitive touches finalResult only — aiResult survives.
+      row.finalResult = input.newResult;
+      row.isManuallyCorrected = true;
+      return { ...row, institutionId: "inst-A" } as unknown as AttendanceRecord;
+    },
+    finalizeAttendanceSession: async (_actor, _id, finalizeDeps) => {
+      finalizedCalls++;
+      const records = await (finalizeDeps?.listAttendanceRecords?.("sess-1") ??
+        Promise.resolve(Array.from(rows.values())));
+      if (records.length === 0) throw new Error("no_attendance_records");
+      const unresolved = records.filter(
+        (r) => r.finalResult === "NEEDS_REVIEW" || r.finalResult === "NOT_EVALUATED",
+      ).length;
+      if (unresolved > 0) throw new Error(`unresolved_review_states:${unresolved}`);
+      status = "FINALIZED";
+      return { ...makeSession(status) };
+    },
+    recordAuditLog: async () => {},
+    publisher: {
+      publish: (event) => events.push(event),
+      subscribe: () => () => {},
+      publishToStudent: (studentId, event) => studentEvents.push({ studentId, event }),
+      subscribeToStudent: () => () => {},
+    },
+    emitWebhook: (envelope) => webhooks.push(envelope),
+    now: () => new Date("2026-09-15T10:00:00Z"),
+  };
+
+  return {
+    deps,
+    rows,
+    corrections,
+    transitions,
+    events,
+    studentEvents,
+    webhooks,
+    get status() {
+      return status;
+    },
+    get finalizedCalls() {
+      return finalizedCalls;
+    },
+    get metadata() {
+      return metadata;
+    },
+    recordIdFor: (studentId: string) => `rec-${studentId}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pure decision table
+// ---------------------------------------------------------------------------
+
+test("a student we could not compare is never marked absent", () => {
+  const noTemplate = decideCandidate({
+    aggregate: undefined,
+    recognitionRan: true,
+    hasComparableTemplate: false,
+    hasAnyTemplate: false,
+  });
+  assert.equal(noTemplate.finalResult, "NEEDS_REVIEW");
+  assert.equal(noTemplate.aiResult, "NOT_EVALUATED");
+  assert.equal(noTemplate.note.reason, "no_face_template");
+
+  // A template exists but under a superseded model build — the reviewer is
+  // told which of the two situations they are in.
+  const stale = decideCandidate({
+    aggregate: undefined,
+    recognitionRan: true,
+    hasComparableTemplate: false,
+    hasAnyTemplate: true,
+  });
+  assert.equal(stale.finalResult, "NEEDS_REVIEW");
+  assert.equal(stale.note.reason, "incompatible_face_template");
+});
+
+test("uncertainty is never promoted to present", () => {
+  const uncertain = decideCandidate({
+    aggregate: aggregate("stu-001", "NEEDS_REVIEW", 0.55, true),
+    recognitionRan: true,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+  });
+  assert.equal(uncertain.aiResult, "NEEDS_REVIEW");
+  assert.equal(uncertain.finalResult, "NEEDS_REVIEW");
+  assert.equal(uncertain.note.reason, "ambiguous_match");
+});
+
+test("a compared student with no candidate above the review floor is absent", () => {
+  const absent = decideCandidate({
+    aggregate: undefined,
+    recognitionRan: true,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+  });
+  assert.equal(absent.aiResult, "ABSENT");
+  assert.equal(absent.finalResult, "ABSENT");
+  assert.equal(absent.note.wasComparable, true);
+});
+
+test("when recognition did not run, nobody is presumed anything", () => {
+  const d = decideCandidate({
+    aggregate: undefined,
+    recognitionRan: false,
+    hasComparableTemplate: false,
+    hasAnyTemplate: false,
+  });
+  assert.equal(d.aiResult, "NOT_EVALUATED");
+  assert.equal(d.finalResult, "NEEDS_REVIEW");
+  assert.equal(d.note.reason, "recognition_unavailable");
+});
+
+test("countAttendance partitions a register exactly", () => {
+  const counts = countAttendance([
+    { finalResult: "PRESENT" },
+    { finalResult: "PRESENT" },
+    { finalResult: "ABSENT" },
+    { finalResult: "NEEDS_REVIEW" },
+    { finalResult: "NOT_EVALUATED" },
+  ]);
+  assert.deepEqual(counts, {
+    total: 5,
+    present: 2,
+    absent: 1,
+    needsReview: 1,
+    notEvaluated: 1,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Roster scoping
+// ---------------------------------------------------------------------------
+
+test("subject sessions use subject enrollment, falling back to the cohort", async () => {
+  const subjectOnly = await resolveSessionRoster(
+    { cohortId: "coh-1", cohortSubjectId: "cs-1" },
+    {
+      listCohortSubjectRoster: async () => roster(3),
+      listCohortRoster: async () => roster(40),
+    },
+  );
+  assert.equal(subjectOnly.scope, "cohortSubject");
+  assert.equal(subjectOnly.students.length, 3);
+
+  // A non-elective subject legitimately has no per-student enrollment rows;
+  // that must not produce an empty register for a full classroom.
+  const fallback = await resolveSessionRoster(
+    { cohortId: "coh-1", cohortSubjectId: "cs-1" },
+    {
+      listCohortSubjectRoster: async () => [],
+      listCohortRoster: async () => roster(40),
+    },
+  );
+  assert.equal(fallback.scope, "cohort");
+  assert.equal(fallback.students.length, 40);
+});
+
+// ---------------------------------------------------------------------------
+// Candidate generation — "do not lose them"
+// ---------------------------------------------------------------------------
+
+test("every enrolled student gets a row, including those recognition never returned", async () => {
+  const students = roster(50);
+  const store = makeStore(students);
+  // Recognition only reports on the 10 students it matched. The other 40 are
+  // absent from its output entirely — they must NOT be absent from ours.
+  const recognition = runSummary(
+    students.slice(0, 10).map((s) => aggregate(s.studentId, "PRESENT", 0.9)),
+  );
+
+  const result = await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition },
+    store.deps,
+  );
+
+  assert.equal(result.counts.total, 50);
+  assert.equal(store.rows.size, 50);
+  assert.equal(result.counts.present, 10);
+  assert.equal(result.counts.absent, 40);
+});
+
+test("generation walks the session CAPTURING → PROCESSING → REVIEW", async () => {
+  const store = makeStore(roster(3));
+  await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition: runSummary([]) },
+    store.deps,
+  );
+  assert.deepEqual(store.transitions, [
+    ["CAPTURING", "PROCESSING"],
+    ["PROCESSING", "REVIEW"],
+  ]);
+  assert.equal(store.status, "REVIEW");
+});
+
+test("a student matched in two images counts once", async () => {
+  const students = roster(2);
+  const store = makeStore(students);
+  // The engine deduplicates upstream (one aggregate per student); this
+  // asserts the register agrees — one row per student, never two.
+  await generateAttendanceCandidates(
+    makeUser(),
+    {
+      sessionId: "sess-1",
+      recognition: runSummary([aggregate("stu-001", "PRESENT", 0.91)]),
+    },
+    store.deps,
+  );
+  const rowsForStudent = Array.from(store.rows.values()).filter(
+    (r) => r.studentId === "stu-001",
+  );
+  assert.equal(rowsForStudent.length, 1);
+  assert.equal(store.rows.size, 2);
+});
+
+test("reprocessing refreshes untouched rows and preserves manual corrections", async () => {
+  const students = roster(3);
+  const store = makeStore(students);
+  await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition: runSummary([]) },
+    store.deps,
+  );
+  // Faculty corrects student 1 to PRESENT, then the class is re-photographed.
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor("stu-001"), newResult: "PRESENT" },
+    store.deps,
+  );
+
+  const second = await generateAttendanceCandidates(
+    makeUser(),
+    {
+      sessionId: "sess-1",
+      recognition: runSummary([aggregate("stu-002", "PRESENT", 0.88)]),
+    },
+    store.deps,
+  );
+
+  assert.equal(second.created, 0);
+  assert.equal(store.rows.get("stu-001")!.finalResult, "PRESENT");
+  assert.equal(store.rows.get("stu-001")!.isManuallyCorrected, true);
+  assert.equal(store.rows.get("stu-002")!.finalResult, "PRESENT");
+  assert.equal(store.rows.get("stu-003")!.finalResult, "ABSENT");
+});
+
+test("manual roll call puts the whole class in review and presumes nothing", async () => {
+  const store = makeStore(roster(50));
+  const result = await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition: null },
+    store.deps,
+  );
+  assert.equal(result.generationSource, "manual");
+  assert.equal(result.counts.needsReview, 50);
+  assert.equal(result.counts.present, 0);
+  assert.equal(result.counts.absent, 0);
+});
+
+test("generation refuses a finalized session", async () => {
+  const store = makeStore(roster(3), "FINALIZED");
+  await assert.rejects(
+    () =>
+      generateAttendanceCandidates(
+        makeUser(),
+        { sessionId: "sess-1", recognition: runSummary([]) },
+        store.deps,
+      ),
+    /session_locked:FINALIZED/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The Phase 6 scenario: 50 students, 43 recognized, 5 absent, 2 review
+// ---------------------------------------------------------------------------
+
+/** Builds the exact starting register the phase spec describes. */
+async function seedScenario() {
+  const students = roster(50);
+  const store = makeStore(students);
+  const recognition = runSummary([
+    ...students.slice(0, 43).map((s) => aggregate(s.studentId, "PRESENT", 0.88)),
+    // 44 and 45 are uncertain — a near-collision and a low score.
+    aggregate(students[43].studentId, "NEEDS_REVIEW", 0.58, true),
+    aggregate(students[44].studentId, "NEEDS_REVIEW", 0.51),
+    // 46–50 were compared and matched nobody.
+  ]);
+  const result = await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition },
+    store.deps,
+  );
+  return { store, students, result };
+}
+
+test("scenario: the generated register is 43 present / 5 absent / 2 review", async () => {
+  const { result } = await seedScenario();
+  assert.deepEqual(result.counts, {
+    total: 50,
+    present: 43,
+    absent: 5,
+    needsReview: 2,
+    notEvaluated: 0,
+  });
+});
+
+test("scenario: marking one absent student present gives 44 / 4 / 2", async () => {
+  const { store, students } = await seedScenario();
+  // students[45] is one of the five absent (indices 45–49).
+  const decision = await applyReviewDecision(
+    makeUser(),
+    {
+      attendanceRecordId: store.recordIdFor(students[45].studentId),
+      newResult: "PRESENT",
+      reason: "Was seated behind a pillar",
+    },
+    store.deps,
+  );
+
+  assert.deepEqual(decision.counts, {
+    total: 50,
+    present: 44,
+    absent: 4,
+    needsReview: 2,
+    notEvaluated: 0,
+  });
+  // The four lists still partition the class exactly — nobody duplicated,
+  // nobody dropped.
+  assert.equal(
+    decision.counts.present +
+      decision.counts.absent +
+      decision.counts.needsReview +
+      decision.counts.notEvaluated,
+    50,
+  );
+});
+
+test("scenario: resolving a review row moves exactly one student, either way", async () => {
+  // The phase text expects "Present 45, Absent 5, Review 1" after resolving
+  // one of the two review rows, but that totals 51 for a class of 50.
+  // Resolving a review row moves ONE student out of Review, so both
+  // consistent outcomes are asserted here.
+  const asPresent = await seedScenario();
+  await applyReviewDecision(
+    makeUser(),
+    {
+      attendanceRecordId: asPresent.store.recordIdFor(asPresent.students[45].studentId),
+      newResult: "PRESENT",
+    },
+    asPresent.store.deps,
+  );
+  const presentBranch = await applyReviewDecision(
+    makeUser(),
+    {
+      attendanceRecordId: asPresent.store.recordIdFor(asPresent.students[43].studentId),
+      newResult: "PRESENT",
+    },
+    asPresent.store.deps,
+  );
+  assert.deepEqual(presentBranch.counts, {
+    total: 50,
+    present: 45,
+    absent: 4,
+    needsReview: 1,
+    notEvaluated: 0,
+  });
+
+  const asAbsent = await seedScenario();
+  await applyReviewDecision(
+    makeUser(),
+    {
+      attendanceRecordId: asAbsent.store.recordIdFor(asAbsent.students[45].studentId),
+      newResult: "PRESENT",
+    },
+    asAbsent.store.deps,
+  );
+  const absentBranch = await applyReviewDecision(
+    makeUser(),
+    {
+      attendanceRecordId: asAbsent.store.recordIdFor(asAbsent.students[43].studentId),
+      newResult: "ABSENT",
+    },
+    asAbsent.store.deps,
+  );
+  assert.deepEqual(absentBranch.counts, {
+    total: 50,
+    present: 44,
+    absent: 5,
+    needsReview: 1,
+    notEvaluated: 0,
+  });
+});
+
+test("scenario: the register cannot be confirmed while a review row remains", async () => {
+  const { store, students } = await seedScenario();
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
+    store.deps,
+  );
+
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+  assert.equal(board.canFinalize, false);
+  assert.match(board.finalizeBlockedReason ?? "", /1 student still needs review/);
+
+  await assert.rejects(
+    () => confirmAttendance(makeUser(), "sess-1", store.deps),
+    /unresolved_review_states:1/,
+  );
+  assert.notEqual(store.status, "FINALIZED");
+});
+
+test("scenario: confirming after every row is resolved finalizes and fans out", async () => {
+  const { store, students } = await seedScenario();
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
+    store.deps,
+  );
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[44].studentId), newResult: "ABSENT" },
+    store.deps,
+  );
+
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+  assert.equal(board.canFinalize, true);
+  assert.equal(board.counts.total, 50);
+  assert.equal(board.counts.present, 44);
+  assert.equal(board.counts.absent, 6);
+  assert.equal(board.counts.needsReview, 0);
+
+  const confirmed = await confirmAttendance(makeUser(), "sess-1", store.deps);
+  assert.equal(store.status, "FINALIZED");
+  assert.equal(confirmed.counts.present, 44);
+  assert.equal(confirmed.finalizedByUserId, "user-faculty");
+
+  const finalizedEvent = store.events.find((e) => e.type === "attendance-session-finalized");
+  assert.ok(finalizedEvent, "session channel received the finalization");
+  // Every student learns their own result and nothing else.
+  const fanout = store.studentEvents.filter((e) => e.event.type === "student-attendance-updated");
+  assert.equal(fanout.length >= 50, true);
+  assert.equal(
+    fanout.every((e) => e.event.type === "student-attendance-updated" && e.event.studentId === e.studentId),
+    true,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Corrections
+// ---------------------------------------------------------------------------
+
+test("a correction preserves the original AI result and appends an audit row", async () => {
+  const { store, students } = await seedScenario();
+  const target = students[45].studentId;
+  assert.equal(store.rows.get(target)!.aiResult, "ABSENT");
+
+  await applyReviewDecision(
+    makeUser(),
+    {
+      attendanceRecordId: store.recordIdFor(target),
+      newResult: "PRESENT",
+      reason: "Late arrival",
+    },
+    store.deps,
+  );
+
+  const row = store.rows.get(target)!;
+  assert.equal(row.finalResult, "PRESENT");
+  // The machine's claim survives the human's disagreement.
+  assert.equal(row.aiResult, "ABSENT");
+  assert.equal(row.isManuallyCorrected, true);
+
+  assert.equal(store.corrections.length, 1);
+  assert.deepEqual(store.corrections[0], {
+    attendanceRecordId: `rec-${target}`,
+    previousResult: "ABSENT",
+    newResult: "PRESENT",
+    changedByUserId: "user-faculty",
+    source: "FACULTY_REVIEW",
+    reason: "Late arrival",
+  });
+});
+
+test("re-asserting the same result writes no correction row", async () => {
+  const { store, students } = await seedScenario();
+  const alreadyPresent = students[0].studentId;
+  const result = await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(alreadyPresent), newResult: "PRESENT" },
+    store.deps,
+  );
+  assert.equal(result.record.finalResult, "PRESENT");
+  assert.equal(store.corrections.length, 0);
+  assert.equal(store.rows.get(alreadyPresent)!.isManuallyCorrected, false);
+});
+
+test("a correction publishes to the session board and to the student alone", async () => {
+  const { store, students } = await seedScenario();
+  const target = students[45].studentId;
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(target), newResult: "PRESENT" },
+    store.deps,
+  );
+
+  const boardEvent = store.events.find((e) => e.type === "attendance-record-updated");
+  assert.ok(boardEvent);
+  assert.equal(boardEvent.type === "attendance-record-updated" && boardEvent.counts.present, 44);
+
+  assert.equal(store.studentEvents.length, 1);
+  assert.equal(store.studentEvents[0].studentId, target);
+});
+
+test("correcting requires attendanceRecord.correct", async () => {
+  const { store, students } = await seedScenario();
+  const readOnly = makeUser({ permissions: ["attendanceRecord.read", "cohort.read"] });
+  await assert.rejects(
+    () =>
+      applyReviewDecision(
+        readOnly,
+        { attendanceRecordId: store.recordIdFor(students[45].studentId), newResult: "PRESENT" },
+        store.deps,
+      ),
+    ForbiddenError,
+  );
+  assert.equal(store.corrections.length, 0);
+});
+
+test("after finalization only a finalizer may correct, and it is an override", async () => {
+  const { store, students } = await seedScenario();
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
+    store.deps,
+  );
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[44].studentId), newResult: "ABSENT" },
+    store.deps,
+  );
+  await confirmAttendance(makeUser(), "sess-1", store.deps);
+  const correctionsBefore = store.corrections.length;
+
+  // A faculty member without finalize rights (e.g. an operator-like role)
+  // cannot reopen a closed register.
+  const noFinalize = makeUser({
+    permissions: ["attendanceRecord.correct", "attendanceRecord.read", "cohort.read"],
+  });
+  await assert.rejects(
+    () =>
+      applyReviewDecision(
+        noFinalize,
+        { attendanceRecordId: store.recordIdFor(students[0].studentId), newResult: "ABSENT" },
+        store.deps,
+      ),
+    ForbiddenError,
+  );
+  assert.equal(store.corrections.length, correctionsBefore);
+
+  // Whoever may close the register may reopen a line in it — recorded as an
+  // ADMIN_OVERRIDE rather than routine review.
+  await applyReviewDecision(
+    makeUser(),
+    {
+      attendanceRecordId: store.recordIdFor(students[0].studentId),
+      newResult: "ABSENT",
+      reason: "Recorded in error",
+    },
+    store.deps,
+  );
+  const latest = store.corrections.at(-1)!;
+  assert.equal(latest.source, "ADMIN_OVERRIDE");
+  assert.equal(latest.previousResult, "PRESENT");
+});
+
+test("a cancelled session accepts no corrections", async () => {
+  const store = makeStore(roster(3), "CAPTURING");
+  await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition: runSummary([]) },
+    store.deps,
+  );
+  const cancelled: AttendanceReviewDeps = {
+    ...store.deps,
+    getSessionById: async () => makeSession("CANCELLED"),
+  };
+  await assert.rejects(
+    () =>
+      applyReviewDecision(
+        makeUser(),
+        { attendanceRecordId: store.recordIdFor("stu-001"), newResult: "PRESENT" },
+        cancelled,
+      ),
+    /session_cancelled/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Review board shape
+// ---------------------------------------------------------------------------
+
+test("the board explains why each reviewed student is there", async () => {
+  const { store, students } = await seedScenario();
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+
+  assert.equal(board.present.length, 43);
+  assert.equal(board.absent.length, 5);
+  assert.equal(board.needsReview.length, 2);
+
+  const ambiguous = board.needsReview.find((s) => s.studentId === students[43].studentId)!;
+  assert.equal(ambiguous.reason, "ambiguous_match");
+  assert.equal(ambiguous.wasAmbiguous, true);
+  assert.equal(ambiguous.aiConfidence, 0.58);
+  // Candidate information the reviewer needs to jump to the frame.
+  assert.equal(ambiguous.bestFaceId, "1:0");
+
+  const lowConfidence = board.needsReview.find((s) => s.studentId === students[44].studentId)!;
+  assert.equal(lowConfidence.reason, "low_confidence");
+
+  // Every row carries the identity fields the lists render.
+  for (const row of [...board.present, ...board.absent, ...board.needsReview]) {
+    assert.ok(row.studentCode.startsWith("S"));
+    assert.equal(row.initials.length, 2);
+    assert.equal(row.photoUrl, null);
+  }
+});
+
+test("the board reports finalization state and who closed the register", async () => {
+  const { store, students } = await seedScenario();
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
+    store.deps,
+  );
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[44].studentId), newResult: "ABSENT" },
+    store.deps,
+  );
+  await confirmAttendance(makeUser(), "sess-1", store.deps);
+
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+  assert.equal(board.session.processingStatus, "FINALIZED");
+  assert.equal(board.session.finalizedByUserId, "user-faculty");
+  assert.equal(board.session.finalizedAt, "2026-09-15T10:00:00.000Z");
+  assert.equal(board.session.finalizedByName, "Dr. Faculty");
+  assert.equal(board.canFinalize, false);
+  assert.match(board.finalizeBlockedReason ?? "", /already been finalized/);
+});
+
+test("the board records capture-image and model provenance", async () => {
+  const { store } = await seedScenario();
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+  assert.equal(board.session.generationSource, "recognition");
+  assert.equal(board.session.rosterScope, "cohort");
+  assert.deepEqual(board.session.captureImages, [
+    { sequenceNumber: 1, facesDetected: 2, qualityScore: 0.7 },
+    { sequenceNumber: 2, facesDetected: 1, qualityScore: 0.9 },
+  ]);
+  assert.equal(board.session.recognition?.productionEligible, false);
+  assert.equal(board.session.recognition?.presentMin, 0.62);
+});
+
+test("cross-institution access to a review board is denied", async () => {
+  const { store } = await seedScenario();
+  const outsider = makeUser({ institutionId: "inst-B" });
+  await assert.rejects(
+    () => getAttendanceReviewBoard(outsider, "sess-1", store.deps),
+    ForbiddenError,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Outbound webhooks
+// ---------------------------------------------------------------------------
+
+test("generation, correction and finalization each emit exactly one event", async () => {
+  const { store, students } = await seedScenario();
+
+  // One event for the whole generation, not one per student: a receiver wants
+  // "this register now exists", and 50 deliveries for one classroom would put
+  // a school's ERP behind a retry queue every period.
+  const created = store.webhooks.filter((e) => e.type === "attendance.created");
+  assert.equal(created.length, 1);
+  assert.equal((created[0].data as { sessionStatus: string }).sessionStatus, "REVIEW");
+  assert.equal((created[0].data as { sessionId: string }).sessionId, "sess-1");
+  assert.equal(created[0].institutionId, "inst-A");
+
+  await applyReviewDecision(
+    makeUser(),
+    {
+      attendanceRecordId: store.recordIdFor(students[44].studentId),
+      newResult: "ABSENT",
+      reason: "Not in the room",
+    },
+    store.deps,
+  );
+
+  const corrected = store.webhooks.filter((e) => e.type === "attendance.corrected");
+  assert.equal(corrected.length, 1);
+  const correction = corrected[0].data as Record<string, unknown>;
+  assert.equal(correction.studentId, students[44].studentId);
+  assert.equal(correction.previousResult, "NEEDS_REVIEW");
+  assert.equal(correction.result, "ABSENT");
+  assert.equal(correction.correctedByUserId, "user-faculty");
+  assert.equal(correction.afterFinalization, false);
+  assert.equal(correction.reason, "Not in the room");
+  // The more specific event only — an endpoint subscribed to both corrected
+  // and updated must not receive the same change twice.
+  assert.equal(store.webhooks.filter((e) => e.type === "attendance.updated").length, 0);
+
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
+    store.deps,
+  );
+  await confirmAttendance(makeUser(), "sess-1", store.deps);
+
+  const finalized = store.webhooks.filter((e) => e.type === "attendance.finalized");
+  assert.equal(finalized.length, 1);
+  const payload = finalized[0].data as {
+    counts: { present: number; absent: number; needsReview: number };
+    records: Array<{ studentId: string; result: string }>;
+    finalizedByUserId: string;
+  };
+  assert.equal(payload.finalizedByUserId, "user-faculty");
+  assert.equal(payload.counts.needsReview, 0);
+  assert.equal(payload.counts.present + payload.counts.absent, 50);
+  assert.equal(payload.records.length, 50);
+});
+
+test("no outbound payload carries an AI confidence, AI result or image", async () => {
+  const { store, students } = await seedScenario();
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
+    store.deps,
+  );
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(students[44].studentId), newResult: "ABSENT" },
+    store.deps,
+  );
+  await confirmAttendance(makeUser(), "sess-1", store.deps);
+
+  assert.equal(store.webhooks.length >= 3, true);
+  // Serialized, so a field nested anywhere in any payload is caught — the
+  // model's guess and a classroom photo are the two things that must never
+  // leave this system over a webhook.
+  const wire = JSON.stringify(store.webhooks);
+  for (const forbidden of [
+    "aiResult",
+    "aiConfidence",
+    "matchedEmbeddingId",
+    "embedding",
+    "imageUrl",
+    "storageKey",
+  ]) {
+    assert.equal(wire.includes(forbidden), false, `${forbidden} leaked into a webhook payload`);
+  }
+});

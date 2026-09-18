@@ -1,0 +1,12 @@
+# Pinned so `ruff check` means the same thing across ruff releases. Without a
+# config the enabled rule set is whatever the installed version defaults to,
+# which made the command fail on untouched, idiomatic code.
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+
+[lint.flake8-bugbear]
+# `def route(model: FaceModelProvider = Depends(get_model))` is how FastAPI
+# declares a dependency; it is not the mutable-default bug B008 looks for.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Body"]

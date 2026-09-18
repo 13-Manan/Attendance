@@ -1,0 +1,22 @@
+# Build context for the Face AI image (context = services/face-ai).
+.env
+.env.*
+**/.env
+**/.env.*
+
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+*.egg-info
+
+# Tests and benchmarks run in CI, not in the production image. Leaving them out
+# keeps the runtime surface to exactly the code that serves requests.
+tests
+bench
+requirements-dev.txt
+ruff.toml
+
+*.md
+.DS_Store

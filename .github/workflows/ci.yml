@@ -1,0 +1,160 @@
+# ATTENDANCE PROJECT — validation
+#
+# Runs on every pull request, and is called by deploy.yml before anything is
+# built or deployed. Sharing one definition means production cannot be reached
+# by a path that skipped a check.
+#
+# This workflow touches no Azure resource and holds no Azure credential. It
+# needs none: nothing here talks to the cloud.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+# Read-only. A validation run has no reason to write to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Prisma resolves datasource.url from the environment even for `validate` and
+  # `generate`, and errors with P1012 when it is unset. Nothing in this
+  # workflow opens a connection; this is a syntactically valid placeholder, not
+  # a credential, and it points at a host that does not exist.
+  DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci?schema=public
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  web:
+    name: Web — lint, typecheck, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      # Must precede typecheck and test: application code imports the
+      # generated client, which is not in the repository.
+      - name: Generate Prisma client
+        run: npx prisma generate --schema=apps/web/prisma/schema.prisma
+
+      - name: Validate Prisma schema
+        run: npx prisma validate --schema=apps/web/prisma/schema.prisma
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm run test --workspace=web
+
+      # Proves the production build — including `output: "standalone"` — still
+      # compiles. A broken build found here is far cheaper than one found while
+      # an image is being built for a release.
+      - name: Build
+        run: npm run build --workspace=web
+
+  face-ai:
+    name: Face AI — lint, test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/face-ai
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/face-ai/requirements-dev.txt
+
+      - name: Install (locked to declared ranges)
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q
+
+  integration:
+    name: Web ↔ Face AI contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          npm ci
+          pip install -r services/face-ai/requirements-dev.txt
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema=apps/web/prisma/schema.prisma
+
+      # The unit suites on both sides stub the other, which is exactly the
+      # arrangement in which a wire contract drifts unnoticed. This boots a real
+      # FastAPI process and runs the authenticated path against it.
+      - name: Integration test
+        run: ./scripts/integration-test.sh
+
+  images:
+    name: Container build validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build only — never pushed, never tagged for production, never given a
+      # registry. A pull request proves the images compile; only main may
+      # produce an artifact that can reach Azure.
+      - name: Build web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build migration image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile.migrate
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Face AI image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/face-ai
+          file: services/face-ai/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

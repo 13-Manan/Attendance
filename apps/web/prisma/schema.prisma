@@ -1,0 +1,636 @@
+// Foundation-phase schema. Core models only — proves the school/college
+// abstraction and the AI-advisory / faculty-authoritative attendance model.
+// See docs/DATA_MODEL.md for the full narrative and docs/adr/0003 for the
+// multi-tenancy rationale.
+//
+// NOTE on pgvector: Prisma has no native vector scalar type. FaceEmbedding.embedding
+// is declared with Unsupported("vector(512)") below, which means:
+//   - `prisma generate` will NOT produce a typed field for it on the Prisma Client.
+//   - `CREATE EXTENSION vector` must be added by hand to the generated migration SQL.
+//     It is done, at the top of migrations/20260917000000_init/migration.sql.
+//   - Any read of the column must go through `prisma.$queryRaw`. Today every such
+//     read is cohort- or subject-scoped and casts to text; see
+//     modules/recognition-results/repository.ts.
+//   - No ANN (HNSW/IVFFlat) index exists, deliberately. Nothing in this codebase
+//     uses the `<=>` operator, so an ANN index would have no reader and would only
+//     add write cost. docs/BENCHMARKS.md §4 records the measurement behind that
+//     choice and docs/DATABASE_OPERATIONS.md carries the exact statement to add if
+//     a future phase adopts `<=>` pre-filtering.
+//
+// NOTE on RBAC (Phase 2): `Role` rows with institutionId = null are platform-wide
+// system roles. Postgres does not treat two NULLs as equal in a unique index, so
+// `@@unique([institutionId, key])` below does NOT stop two platform-wide roles
+// sharing a key. The fix is a partial unique index, hand-patched into the same
+// baseline migration (same category of fix as the pgvector note above):
+//   CREATE UNIQUE INDEX role_key_platform_unique ON "Role"(key) WHERE "institutionId" IS NULL;
+// Prisma cannot express it, so `prisma migrate diff` will never regenerate it —
+// it must be carried forward by hand if the baseline is ever rebuilt.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum InstitutionType {
+  SCHOOL
+  COLLEGE
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// Discriminates the AcademicUnit tree so one schema serves both a school's
+// Grade -> Section hierarchy and a college's Department -> Semester -> Course
+// hierarchy without forking tables. See docs/MULTI_TENANCY.md.
+enum AcademicUnitKind {
+  DEPARTMENT
+  GRADE
+  SEMESTER
+  COURSE
+  SECTION
+  GENERIC
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  INACTIVE
+  TRANSFERRED
+  COMPLETED
+}
+
+enum SessionStatus {
+  OPEN
+  CAPTURING
+  PROCESSING
+  REVIEW
+  FINALIZED
+  CANCELLED
+}
+
+enum AttendanceResult {
+  PRESENT
+  ABSENT
+  NEEDS_REVIEW
+  NOT_EVALUATED
+}
+
+enum CorrectionSource {
+  FACULTY_REVIEW
+  ROLL_CALL
+  ADMIN_OVERRIDE
+  PUBLIC_API
+}
+
+enum CohortFacultyRole {
+  PRIMARY
+  ASSISTANT
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Institution {
+  id        String          @id @default(cuid())
+  name      String
+  type      InstitutionType
+  timezone  String          @default("UTC")
+  // e.g. { academicUnitLabels: { grade: "Grade", section: "Section" },
+  //        confidenceThresholds: { presentMin: 0.62, reviewMin: 0.45 },
+  //        attendanceMode: "DAILY" | "SUBJECT_WISE" }
+  settings  Json            @default("{}")
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  campuses         Campus[]
+  users            User[]
+  students         Student[]
+  academicUnits    AcademicUnit[]
+  academicSessions AcademicSession[]
+  subjects         Subject[]
+  cohorts          Cohort[]
+  roles            Role[]
+  roleAssignments  UserRoleAssignment[]
+  apiKeys          ApiKey[]
+  webhookEndpoints WebhookEndpoint[]
+  auditLogs        AuditLog[]
+}
+
+// A physical branch/campus of an institution. Nullable everywhere it's
+// referenced, so a single-campus institution is entirely unaffected — this
+// is "Campus/Branch where required," not a mandatory extra hop.
+model Campus {
+  id            String      @id @default(cuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id])
+  name          String
+  code          String
+  address       String?
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  academicUnits   AcademicUnit[]
+  users           User[]
+  students        Student[]
+  roleAssignments UserRoleAssignment[]
+
+  @@unique([institutionId, code])
+  @@index([institutionId])
+}
+
+model User {
+  id            String       @id @default(cuid())
+  // Nullable: null only for a platform-level user (holds a PLATFORM_SUPER_ADMIN
+  // assignment, which is itself institutionId-less). Every other user must have
+  // one — enforced in modules/auth-tenancy/service.ts, not by a DB constraint
+  // Prisma can't express (conditional NOT NULL).
+  institutionId String?
+  institution   Institution? @relation(fields: [institutionId], references: [id])
+  campusId      String?
+  campus        Campus?      @relation(fields: [campusId], references: [id])
+  email         String       @unique
+  name          String
+  status        UserStatus   @default(ACTIVE)
+  passwordHash  String?
+  employeeCode  String?
+  lastLoginAt   DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  roleAssignments UserRoleAssignment[]
+  sessions        Session[]
+  studentProfile  Student?
+  facultyCohorts  CohortFaculty[]
+  subjectLinks    CohortSubject[]
+  openedSessions  AttendanceSession[]    @relation("SessionFaculty")
+  corrections     AttendanceCorrection[] @relation("CorrectionActor")
+
+  @@index([institutionId])
+  @@index([campusId])
+}
+
+// Server-side, revocable session (ADR-0007). tokenHash is HMAC-SHA256 of the
+// random cookie value — the raw token is never stored, mirroring ApiKey.hashedKey.
+model Session {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  ipAddress  String?
+  userAgent  String?
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// RBAC core (ADR-0006). Permission keys are a code-level catalog
+// (modules/authorization/permissions.ts), validated in the service layer —
+// RolePermission.permission is a plain string, not an FK to a Permission
+// table, for the same reason Institution.settings is JSON-with-code-defaults
+// rather than a schema fork: the catalog is a deploy-time fact, but which
+// permissions a role grants is legitimately runtime-configurable.
+// ---------------------------------------------------------------------------
+
+model Role {
+  id            String       @id @default(cuid())
+  // null = platform-wide system role, seeded once, usable by every institution.
+  institutionId String?
+  institution   Institution? @relation(fields: [institutionId], references: [id])
+  key           String
+  name          String
+  isSystem      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  permissions RolePermission[]
+  assignments UserRoleAssignment[]
+
+  @@unique([institutionId, key])
+  @@index([institutionId])
+}
+
+model RolePermission {
+  id         String   @id @default(cuid())
+  roleId     String
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission String
+  createdAt  DateTime @default(now())
+
+  @@unique([roleId, permission])
+  @@index([roleId])
+}
+
+model UserRoleAssignment {
+  id            String       @id @default(cuid())
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId        String
+  role          Role         @relation(fields: [roleId], references: [id])
+  // null only alongside a PLATFORM_SUPER_ADMIN role assignment.
+  institutionId String?
+  institution   Institution? @relation(fields: [institutionId], references: [id])
+  // Narrows e.g. SCHOOL_ADMIN/COLLEGE_ADMIN to one campus; null = institution-wide.
+  campusId      String?
+  campus        Campus?      @relation(fields: [campusId], references: [id])
+  createdAt     DateTime     @default(now())
+
+  @@unique([userId, roleId, institutionId, campusId])
+  @@index([userId])
+  @@index([institutionId])
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+model Student {
+  id            String           @id @default(cuid())
+  institutionId String
+  institution   Institution      @relation(fields: [institutionId], references: [id])
+  campusId      String?
+  campus        Campus?          @relation(fields: [campusId], references: [id])
+  // Optional link to a login-capable User (a STUDENT-role account) for a
+  // future student portal. Nullable — most Student rows have no login yet.
+  userId        String?          @unique
+  user          User?            @relation(fields: [userId], references: [id])
+  studentCode   String
+  firstName     String
+  lastName      String
+  email         String?
+  phone         String?
+  status        EnrollmentStatus @default(ACTIVE)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  enrollments        Enrollment[]
+  subjectEnrollments StudentSubjectEnrollment[]
+  faceEmbeddings     FaceEmbedding[]
+  attendanceRecords  AttendanceRecord[]
+
+  @@unique([institutionId, studentCode])
+}
+
+// ---------------------------------------------------------------------------
+// School/college abstraction
+//
+// A school models: AcademicUnit(kind=GRADE) -> AcademicUnit(kind=SECTION, parent=grade) -> Cohort
+// A college models: AcademicUnit(kind=DEPARTMENT) -> (kind=SEMESTER) -> (kind=COURSE) -> Cohort
+// Same three tables (AcademicUnit, Cohort, Enrollment) serve both; institution-specific
+// labels come from Institution.settings.academicUnitLabels, not from schema forks.
+// ---------------------------------------------------------------------------
+
+model AcademicUnit {
+  id            String           @id @default(cuid())
+  institutionId String
+  institution   Institution      @relation(fields: [institutionId], references: [id])
+  campusId      String?
+  campus        Campus?          @relation(fields: [campusId], references: [id])
+  parentId      String?
+  parent        AcademicUnit?    @relation("AcademicUnitTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children      AcademicUnit[]   @relation("AcademicUnitTree")
+  kind          AcademicUnitKind
+  name          String
+  code          String?
+  sortOrder     Int              @default(0)
+  metadata      Json             @default("{}")
+  createdAt     DateTime         @default(now())
+
+  cohorts Cohort[]
+
+  @@index([institutionId])
+  @@index([parentId])
+}
+
+// A named academic period (e.g. "2026-2027"), replacing what used to be a
+// plain Cohort.academicYear string — needed as a first-class concept so
+// sessions can be created/archived independently of any one Cohort.
+model AcademicSession {
+  id            String      @id @default(cuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id])
+  name          String
+  startDate     DateTime
+  endDate       DateTime
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+
+  cohorts Cohort[]
+
+  @@unique([institutionId, name])
+  @@index([institutionId])
+}
+
+// The atomic, enrollable teaching group that attendance sessions are scoped to.
+model Cohort {
+  id                String          @id @default(cuid())
+  institutionId     String
+  institution       Institution     @relation(fields: [institutionId], references: [id])
+  academicUnitId    String
+  academicUnit      AcademicUnit    @relation(fields: [academicUnitId], references: [id])
+  academicSessionId String
+  academicSession   AcademicSession @relation(fields: [academicSessionId], references: [id])
+  name              String
+  termLabel         String?
+  createdAt         DateTime        @default(now())
+
+  enrollments  Enrollment[]
+  subjects     CohortSubject[]
+  sessions     AttendanceSession[]
+  facultyLinks CohortFaculty[]
+
+  @@index([institutionId])
+  @@index([academicUnitId])
+  @@index([academicSessionId])
+}
+
+model CohortFaculty {
+  id       String            @id @default(cuid())
+  cohortId String
+  cohort   Cohort            @relation(fields: [cohortId], references: [id])
+  userId   String
+  user     User              @relation(fields: [userId], references: [id])
+  role     CohortFacultyRole @default(PRIMARY)
+
+  @@unique([cohortId, userId])
+  // "Which classes do I teach?" — read on every faculty dashboard load
+  // (attendance-analytics/repository.ts). The compound unique above leads with
+  // cohortId, so it cannot answer a query filtered only by userId.
+  @@index([userId])
+}
+
+// A subject/course offered within a cohort (college requirement: "subjects").
+// Schema + types only this phase — no subject-management UI yet.
+model Subject {
+  id            String      @id @default(cuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id])
+  code          String
+  name          String
+  createdAt     DateTime    @default(now())
+
+  cohortLinks CohortSubject[]
+
+  @@unique([institutionId, code])
+  @@index([institutionId])
+}
+
+// Which subjects a cohort offers, and who teaches each one — distinct from
+// CohortFaculty's homeroom PRIMARY/ASSISTANT link. This is also the
+// attendance-engine discriminator: an AttendanceSession referencing a
+// CohortSubject is a college-style subject/lecture session; one with
+// cohortSubjectId = null is a school-style daily/class session. One engine,
+// one AttendanceSession table, branching on this field plus
+// Institution.settings.attendanceMode — never two parallel models.
+model CohortSubject {
+  id        String   @id @default(cuid())
+  cohortId  String
+  cohort    Cohort   @relation(fields: [cohortId], references: [id])
+  subjectId String
+  subject   Subject  @relation(fields: [subjectId], references: [id])
+  facultyId String?
+  faculty   User?    @relation(fields: [facultyId], references: [id])
+  createdAt DateTime @default(now())
+
+  studentEnrollments StudentSubjectEnrollment[]
+  attendanceSessions AttendanceSession[]
+
+  @@unique([cohortId, subjectId])
+  @@index([cohortId])
+}
+
+// Per-student subject enrollment (electives) — schema + types only this
+// phase, no enrollment-management UI yet.
+model StudentSubjectEnrollment {
+  id              String        @id @default(cuid())
+  studentId       String
+  student         Student       @relation(fields: [studentId], references: [id])
+  cohortSubjectId String
+  cohortSubject   CohortSubject @relation(fields: [cohortSubjectId], references: [id])
+  enrolledAt      DateTime      @default(now())
+
+  @@unique([studentId, cohortSubjectId])
+  // "Who is enrolled in this subject?" — subjects/repository.ts, and the
+  // subject-scoped candidate loader in recognition-results/repository.ts joins
+  // on this column. Not served by the compound unique, which leads with
+  // studentId.
+  @@index([cohortSubjectId])
+}
+
+model Enrollment {
+  id            String           @id @default(cuid())
+  institutionId String
+  studentId     String
+  student       Student          @relation(fields: [studentId], references: [id])
+  cohortId      String
+  cohort        Cohort           @relation(fields: [cohortId], references: [id])
+  status        EnrollmentStatus @default(ACTIVE)
+  enrolledAt    DateTime         @default(now())
+  unenrolledAt  DateTime?
+
+  @@unique([studentId, cohortId])
+  // "Which students are in this class?" — the roster read behind every capture
+  // session (attendance-capture/service.ts counts ACTIVE rows) and the class
+  // student list (enrollment/repository.ts). status is second so the same index
+  // serves both the filtered count and the unfiltered listing.
+  @@index([cohortId, status])
+  // Institution-wide enrollment reads: the face-coverage report and the
+  // /api/v1 enrollment listing, both of which scope by tenant first.
+  @@index([institutionId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Attendance capture pipeline
+// ---------------------------------------------------------------------------
+
+model AttendanceSession {
+  id              String         @id @default(cuid())
+  institutionId   String
+  cohortId        String
+  cohort          Cohort         @relation(fields: [cohortId], references: [id])
+  // null = school-style daily/class session; set = college-style
+  // subject/lecture-specific session. See CohortSubject's doc comment.
+  cohortSubjectId String?
+  cohortSubject   CohortSubject? @relation(fields: [cohortSubjectId], references: [id])
+  facultyId       String
+  faculty         User           @relation("SessionFaculty", fields: [facultyId], references: [id])
+  sessionDate     DateTime
+  startedAt       DateTime       @default(now())
+  endedAt         DateTime?
+  status          SessionStatus  @default(OPEN)
+  metadata        Json           @default("{}")
+
+  images            SessionImage[]
+  attendanceRecords AttendanceRecord[]
+
+  // Every reporting query drives off exactly this shape:
+  //   institutionId = ? AND status = 'FINALIZED' AND sessionDate >= ? AND < ?
+  // (attendance-reporting/repository.ts, `sessionConditions`). It replaces a
+  // bare institutionId index, which it still serves as a prefix — the
+  // "sessions awaiting review" count filters on institutionId + status alone.
+  @@index([institutionId, status, sessionDate])
+  // The per-class equivalent: a cohort's sessions, newest first, or within a
+  // date window. Replaces a bare cohortId index for the same prefix reason.
+  @@index([cohortId, sessionDate])
+  @@index([cohortSubjectId])
+}
+
+model SessionImage {
+  id             String            @id @default(cuid())
+  sessionId      String
+  session        AttendanceSession @relation(fields: [sessionId], references: [id])
+  sequenceNumber Int
+  storageUrl     String
+  qualityScore   Float?
+  capturedAt     DateTime          @default(now())
+
+  @@unique([sessionId, sequenceNumber])
+}
+
+// Stable contract row: whichever model produced this vector, dimension is
+// fixed at 512 for this phase. See docs/adr/0005 for the model-swap contract.
+model FaceEmbedding {
+  id             String                     @id @default(cuid())
+  institutionId  String
+  studentId      String
+  student        Student                    @relation(fields: [studentId], references: [id])
+  // vector(512) — Unsupported so the Prisma Client doesn't attempt to type it;
+  // populated/queried via $executeRaw / $queryRaw only.
+  embedding      Unsupported("vector(512)")
+  modelName      String
+  modelVersion   String
+  embeddingDim   Int                        @default(512)
+  sourceImageUrl String?
+  isActive       Boolean                    @default(true)
+  createdAt      DateTime                   @default(now())
+
+  matchedRecords AttendanceRecord[] @relation("MatchedEmbedding")
+
+  @@index([institutionId])
+  @@index([studentId])
+}
+
+// aiResult/aiConfidence are advisory and written once by the recognition
+// pipeline. finalResult is authoritative and faculty-owned; every mutation to
+// it must also append an AttendanceCorrection row (enforced in the service
+// layer, see apps/web/src/modules/attendance/service.ts).
+model AttendanceRecord {
+  id                  String            @id @default(cuid())
+  institutionId       String
+  sessionId           String
+  session             AttendanceSession @relation(fields: [sessionId], references: [id])
+  studentId           String
+  student             Student           @relation(fields: [studentId], references: [id])
+  aiResult            AttendanceResult  @default(NOT_EVALUATED)
+  aiConfidence        Float?
+  matchedEmbeddingId  String?
+  matchedEmbedding    FaceEmbedding?    @relation("MatchedEmbedding", fields: [matchedEmbeddingId], references: [id])
+  finalResult         AttendanceResult  @default(NOT_EVALUATED)
+  isManuallyCorrected Boolean           @default(false)
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  corrections AttendanceCorrection[]
+
+  // Per-session reads use the compound unique's sessionId prefix.
+  @@unique([sessionId, studentId])
+  @@index([institutionId])
+  // "Attendance by student" — a student's own history screen and the
+  // studentIds filter on the reporting record list.
+  @@index([studentId])
+  // Not a read pattern: this is the referencing side of a SET NULL foreign key,
+  // and the retention purge (privacy/repository.ts) deletes templates in
+  // batches. Postgres does not index foreign keys automatically, so without
+  // this every deleted embedding costs one sequential scan of this table.
+  @@index([matchedEmbeddingId])
+}
+
+// Append-only audit trail. Rows are inserted, never updated or deleted.
+model AttendanceCorrection {
+  id                 String           @id @default(cuid())
+  attendanceRecordId String
+  attendanceRecord   AttendanceRecord @relation(fields: [attendanceRecordId], references: [id])
+  previousResult     AttendanceResult
+  newResult          AttendanceResult
+  changedByUserId    String
+  changedBy          User             @relation("CorrectionActor", fields: [changedByUserId], references: [id])
+  reason             String?
+  source             CorrectionSource
+  changedAt          DateTime         @default(now())
+
+  @@index([attendanceRecordId])
+}
+
+// ---------------------------------------------------------------------------
+// Integration layer
+// ---------------------------------------------------------------------------
+
+model ApiKey {
+  id            String      @id @default(cuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id])
+  name          String
+  hashedKey     String      @unique
+  scopes        String[]
+  createdAt     DateTime    @default(now())
+  lastUsedAt    DateTime?
+  revokedAt     DateTime?
+
+  @@index([institutionId])
+}
+
+model WebhookEndpoint {
+  id            String      @id @default(cuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id])
+  url           String
+  secret        String
+  eventTypes    String[]
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+
+  @@index([institutionId])
+}
+
+// Generic, cross-entity audit trail (ADR-0006). Distinct from
+// AttendanceCorrection: this is a thin pointer usable for any entity type
+// ("show me everything for institution X or actor Y"), not a replacement for
+// the domain-rich, attendance-specific trail.
+model AuditLog {
+  id            String       @id @default(cuid())
+  institutionId String?
+  institution   Institution? @relation(fields: [institutionId], references: [id])
+  actorUserId   String?
+  actorApiKeyId String?
+  action        String
+  entityType    String
+  entityId      String
+  beforeJson    Json?
+  afterJson     Json?
+  ipAddress     String?
+  userAgent     String?
+  createdAt     DateTime     @default(now())
+
+  // The audit screen is always institution-scoped and always ordered
+  // `createdAt DESC, id DESC` with skip/take (audit/repository.ts). Matching
+  // the sort direction lets the paginated read walk the index instead of
+  // sorting an institution's entire log to return twenty-five rows. Serves the
+  // bare-institutionId lookups it replaces as a prefix.
+  @@index([institutionId, createdAt(sort: Desc)])
+  @@index([entityType, entityId])
+}

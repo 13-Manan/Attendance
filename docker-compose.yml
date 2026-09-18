@@ -1,0 +1,23 @@
+# Local development only. Not used for production deployment.
+# Provides Postgres with the pgvector extension pre-installed, since a bare
+# Homebrew/apt Postgres install cannot be assumed to have pgvector compiled in.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: attendance
+      POSTGRES_PASSWORD: attendance
+      POSTGRES_DB: attendance
+    ports:
+      - "5432:5432"
+    volumes:
+      - attendance_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U attendance -d attendance"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  attendance_postgres_data:

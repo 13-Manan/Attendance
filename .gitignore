@@ -1,0 +1,44 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Next.js
+.next/
+out/
+apps/*/next-env.d.ts
+
+# production
+build/
+dist/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# Prisma
+apps/web/prisma/migrations/**/migration_lock.toml.bak
+
+# Python
+services/*/.venv/
+services/*/__pycache__/
+services/*/**/__pycache__/
+services/*/*.egg-info/
+services/*/.pytest_cache/
+
+# logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+
+# editors
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# misc
+*.tsbuildinfo
+.turbo/

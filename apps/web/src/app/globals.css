@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/*
+ * Print rules — the "PDF-ready" half of report export. See
+ * src/app/dashboard/reports/print/page.tsx: rather than render PDFs on the
+ * server, the printable report is a real page and the browser's own print
+ * engine writes the file.
+ *
+ * Nothing here changes the screen. Every rule is inside `@media print`.
+ */
+@media print {
+  /* A dark-mode browser must not print white text onto white paper. */
+  :root {
+    --background: #ffffff;
+    --foreground: #171717;
+  }
+
+  body {
+    background: #ffffff;
+    color: #171717;
+    /* Attendance bars and the amber "below threshold" markings carry meaning.
+       Browsers strip backgrounds by default to save ink; here that would
+       remove the only visual distinction between a full bar and an empty
+       one. */
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  /* The page itself provides the margin, so the layout's screen padding does
+     not stack on top of it. */
+  @page {
+    margin: 14mm;
+  }
+
+  main {
+    padding: 0 !important;
+  }
+
+  /* A link in a printed report is a dead end; underlining it just adds noise
+     to text nobody can click. */
+  a {
+    text-decoration: none !important;
+    color: inherit !important;
+  }
+}

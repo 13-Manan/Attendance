@@ -1,0 +1,340 @@
+{
+  "generatedAt": "2026-09-16T19:05:25.233Z",
+  "browser": "Chrome/152.0.7977.84",
+  "base": "http://127.0.0.1:3100",
+  "runsPerRoute": 5,
+  "note": "Only routes that render without a database. /dashboard/* and /portal/* need a session and a seeded pgvector Postgres, which this environment does not have.",
+  "profiles": {
+    "desktop": {
+      "cpuThrottle": 1,
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "mobile": false
+      },
+      "network": null
+    },
+    "mobile": {
+      "cpuThrottle": 4,
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "deviceScaleFactor": 3,
+        "mobile": true
+      },
+      "network": {
+        "offline": false,
+        "latency": 150,
+        "downloadThroughput": 209715.2,
+        "uploadThroughput": 96000
+      }
+    }
+  },
+  "results": [
+    {
+      "profile": "desktop",
+      "route": "/",
+      "runs": 5,
+      "ttfbMs": {
+        "mean": 4.4,
+        "p50": 1.5,
+        "p95": 15.9
+      },
+      "firstContentfulPaintMs": {
+        "mean": 25.6,
+        "p50": 28,
+        "p95": 40
+      },
+      "largestContentfulPaintMs": {
+        "mean": 25.6,
+        "p50": 28,
+        "p95": 40
+      },
+      "domContentLoadedMs": {
+        "mean": 14.3,
+        "p50": 11.6,
+        "p95": 27.2
+      },
+      "loadMs": {
+        "mean": 34.9,
+        "p50": 29.7,
+        "p95": 56.3
+      },
+      "cumulativeLayoutShift": 0,
+      "requests": 12,
+      "servedFromCache": 0,
+      "transferKb": 198.4,
+      "decodedKb": 539.2,
+      "scriptTransferKb": 134.8,
+      "scriptDecodedKb": 446.2,
+      "domNodes": 40
+    },
+    {
+      "profile": "desktop",
+      "route": "/login",
+      "runs": 5,
+      "ttfbMs": {
+        "mean": 3.2,
+        "p50": 2.8,
+        "p95": 4.4
+      },
+      "firstContentfulPaintMs": {
+        "mean": 29.6,
+        "p50": 20,
+        "p95": 48
+      },
+      "largestContentfulPaintMs": {
+        "mean": 29.6,
+        "p50": 20,
+        "p95": 48
+      },
+      "domContentLoadedMs": {
+        "mean": 9.5,
+        "p50": 8.5,
+        "p95": 14.2
+      },
+      "loadMs": {
+        "mean": 31.3,
+        "p50": 30.9,
+        "p95": 33.3
+      },
+      "cumulativeLayoutShift": 0,
+      "requests": 13,
+      "servedFromCache": 0,
+      "transferKb": 201.5,
+      "decodedKb": 543.5,
+      "scriptTransferKb": 136.3,
+      "scriptDecodedKb": 448.7,
+      "domNodes": 54
+    },
+    {
+      "profile": "desktop",
+      "route": "/offline",
+      "runs": 5,
+      "ttfbMs": {
+        "mean": 1.7,
+        "p50": 1.6,
+        "p95": 2.3
+      },
+      "firstContentfulPaintMs": {
+        "mean": 21.6,
+        "p50": 24,
+        "p95": 28
+      },
+      "largestContentfulPaintMs": {
+        "mean": 21.6,
+        "p50": 24,
+        "p95": 28
+      },
+      "domContentLoadedMs": {
+        "mean": 9.1,
+        "p50": 6.9,
+        "p95": 12.8
+      },
+      "loadMs": {
+        "mean": 31,
+        "p50": 30.6,
+        "p95": 34.1
+      },
+      "cumulativeLayoutShift": 0.0013,
+      "requests": 14,
+      "servedFromCache": 0,
+      "transferKb": 213.1,
+      "decodedKb": 587.8,
+      "scriptTransferKb": 148.4,
+      "scriptDecodedKb": 489.7,
+      "domNodes": 60
+    },
+    {
+      "profile": "desktop",
+      "route": "/unauthorized",
+      "runs": 5,
+      "ttfbMs": {
+        "mean": 1.8,
+        "p50": 1.8,
+        "p95": 2.1
+      },
+      "firstContentfulPaintMs": {
+        "mean": 23.2,
+        "p50": 24,
+        "p95": 36
+      },
+      "largestContentfulPaintMs": {
+        "mean": 23.2,
+        "p50": 24,
+        "p95": 36
+      },
+      "domContentLoadedMs": {
+        "mean": 8.6,
+        "p50": 7.4,
+        "p95": 11.4
+      },
+      "loadMs": {
+        "mean": 29.9,
+        "p50": 29.5,
+        "p95": 31.4
+      },
+      "cumulativeLayoutShift": 0,
+      "requests": 14,
+      "servedFromCache": 0,
+      "transferKb": 202.8,
+      "decodedKb": 550.8,
+      "scriptTransferKb": 138.7,
+      "scriptDecodedKb": 454.9,
+      "domNodes": 41
+    },
+    {
+      "profile": "mobile",
+      "route": "/",
+      "runs": 5,
+      "ttfbMs": {
+        "mean": 1.7,
+        "p50": 1.6,
+        "p95": 2.3
+      },
+      "firstContentfulPaintMs": {
+        "mean": 670.4,
+        "p50": 672,
+        "p95": 676
+      },
+      "largestContentfulPaintMs": {
+        "mean": 670.4,
+        "p50": 672,
+        "p95": 676
+      },
+      "domContentLoadedMs": {
+        "mean": 545.7,
+        "p50": 543.7,
+        "p95": 551.5
+      },
+      "loadMs": {
+        "mean": 1350.8,
+        "p50": 1353.5,
+        "p95": 1354.4
+      },
+      "cumulativeLayoutShift": 0,
+      "requests": 12,
+      "servedFromCache": 0,
+      "transferKb": 198.4,
+      "decodedKb": 539.2,
+      "scriptTransferKb": 134.8,
+      "scriptDecodedKb": 446.2,
+      "domNodes": 40
+    },
+    {
+      "profile": "mobile",
+      "route": "/login",
+      "runs": 5,
+      "ttfbMs": {
+        "mean": 4.1,
+        "p50": 3.7,
+        "p95": 5.8
+      },
+      "firstContentfulPaintMs": {
+        "mean": 645.6,
+        "p50": 644,
+        "p95": 648
+      },
+      "largestContentfulPaintMs": {
+        "mean": 645.6,
+        "p50": 644,
+        "p95": 648
+      },
+      "domContentLoadedMs": {
+        "mean": 539,
+        "p50": 538.1,
+        "p95": 543.9
+      },
+      "loadMs": {
+        "mean": 1354.3,
+        "p50": 1351.6,
+        "p95": 1361
+      },
+      "cumulativeLayoutShift": 0,
+      "requests": 13,
+      "servedFromCache": 0,
+      "transferKb": 201.5,
+      "decodedKb": 543.5,
+      "scriptTransferKb": 136.3,
+      "scriptDecodedKb": 448.7,
+      "domNodes": 54
+    },
+    {
+      "profile": "mobile",
+      "route": "/offline",
+      "runs": 5,
+      "ttfbMs": {
+        "mean": 1.6,
+        "p50": 1.7,
+        "p95": 1.7
+      },
+      "firstContentfulPaintMs": {
+        "mean": 672,
+        "p50": 668,
+        "p95": 688
+      },
+      "largestContentfulPaintMs": {
+        "mean": 672,
+        "p50": 668,
+        "p95": 688
+      },
+      "domContentLoadedMs": {
+        "mean": 545.2,
+        "p50": 545.6,
+        "p95": 546
+      },
+      "loadMs": {
+        "mean": 1420.8,
+        "p50": 1420.8,
+        "p95": 1421.9
+      },
+      "cumulativeLayoutShift": 0.0055,
+      "requests": 14,
+      "servedFromCache": 0,
+      "transferKb": 213.1,
+      "decodedKb": 586,
+      "scriptTransferKb": 148.4,
+      "scriptDecodedKb": 489.7,
+      "domNodes": 60
+    },
+    {
+      "profile": "mobile",
+      "route": "/unauthorized",
+      "runs": 5,
+      "ttfbMs": {
+        "mean": 1.7,
+        "p50": 1.5,
+        "p95": 2.2
+      },
+      "firstContentfulPaintMs": {
+        "mean": 668,
+        "p50": 672,
+        "p95": 676
+      },
+      "largestContentfulPaintMs": {
+        "mean": 668,
+        "p50": 672,
+        "p95": 676
+      },
+      "domContentLoadedMs": {
+        "mean": 545.1,
+        "p50": 544.8,
+        "p95": 551.7
+      },
+      "loadMs": {
+        "mean": 1369.7,
+        "p50": 1369.8,
+        "p95": 1376.7
+      },
+      "cumulativeLayoutShift": 0,
+      "requests": 14,
+      "servedFromCache": 0,
+      "transferKb": 202.9,
+      "decodedKb": 549,
+      "scriptTransferKb": 138.7,
+      "scriptDecodedKb": 454.9,
+      "domNodes": 41
+    }
+  ]
+}
