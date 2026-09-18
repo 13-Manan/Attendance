@@ -64,6 +64,18 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
         name: postgresSubnetName
         properties: {
           addressPrefix: postgresSubnetPrefix
+          // Azure attaches this endpoint itself the first time a Flexible
+          // Server is provisioned into the subnet: it is how the server ships
+          // write-ahead log files to Azure Storage, and Microsoft documents
+          // that removing it "may disrupt connectivity". Declaring it changes
+          // nothing — it makes the template state what the platform already
+          // created, so redeploying the VNet (whose inline subnets array is a
+          // full PUT) cannot silently strip it back out.
+          serviceEndpoints: [
+            {
+              service: 'Microsoft.Storage'
+            }
+          ]
           delegations: [
             {
               name: 'postgres-delegation'

@@ -16,7 +16,7 @@ using '../main.bicep'
 param location = 'centralindia'
 param namePrefix = 'attendance-prod'
 
-param postgresAdministratorPassword = readEnvironmentVariable('ATTENDANCE_PG_ADMIN_PASSWORD')
+param postgresAdministratorPassword = readEnvironmentVariable('ATTENDANCE_PG_ADMIN_PASSWORD', '')
 
 // Globally unique names, availability confirmed 2026-09-18.
 //

@@ -16,8 +16,12 @@
 //   az deployment group create \
 //     --resource-group attendance-production-rg \
 //     --template-file infra/azure/main.bicep \
-//     --parameters infra/azure/parameters/production.bicepparam \
-//     --parameters postgresAdministratorPassword="$PGPASS"
+//     --parameters infra/azure/parameters/production.bicepparam
+//
+// Add `--parameters postgresAdministratorPassword="$PGPASS"` ONLY on the very
+// first deployment, the one that creates the server. Never on a redeploy: the
+// password is write-only, so passing the wrong value silently replaces the
+// live credential and nothing in `what-if` can warn you.
 //
 // Run `what-if` instead of `create` first. Always.
 //
@@ -53,11 +57,15 @@ param postgresServerName string = '${namePrefix}-psql'
 @description('PostgreSQL administrator login.')
 param postgresAdministratorLogin string = 'attendance_admin'
 
-@description('''PostgreSQL administrator password. Supply at deploy time:
+@description('''PostgreSQL administrator password. Supply it ONLY on the
+deployment that creates the server:
   --parameters postgresAdministratorPassword="$PGPASS"
+Leave it unset on every subsequent deployment. The property is then omitted
+from the request, so a redeploy cannot reset the password of a live server —
+which also means no deployment ever needs to know the existing one.
 Never commit it, never put it in the .bicepparam, never echo it.''')
 @secure()
-param postgresAdministratorPassword string
+param postgresAdministratorPassword string = ''
 
 @description('PostgreSQL major version.')
 @allowed([

@@ -35,9 +35,12 @@ param serverName string
 @description('Administrator login. Not a secret, but not a guessable default either.')
 param administratorLogin string
 
-@description('Administrator password. Passed at deploy time; never stored in source.')
+@description('''Administrator password. Required only when the server is being
+created. Leave it unset when redeploying an existing server: the property is
+then omitted from the request entirely, so ARM has nothing to reset the live
+password to and the running credential survives the deployment.''')
 @secure()
-param administratorPassword string
+param administratorPassword string = ''
 
 @description('Delegated subnet for VNet injection.')
 param delegatedSubnetId string
@@ -103,10 +106,9 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
     name: skuName
     tier: skuTier
   }
-  properties: {
+  properties: union({
     version: postgresVersion
     administratorLogin: administratorLogin
-    administratorLoginPassword: administratorPassword
     storage: {
       storageSizeGB: storageSizeGB
       autoGrow: 'Enabled'
@@ -127,7 +129,9 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
       activeDirectoryAuth: 'Enabled'
       tenantId: subscription().tenantId
     }
-  }
+  }, empty(administratorPassword) ? {} : {
+    administratorLoginPassword: administratorPassword
+  })
 }
 
 // Allow-list pgvector. Without this the baseline migration's CREATE EXTENSION
