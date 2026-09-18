@@ -30,11 +30,20 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Prisma resolves datasource.url from the environment even for `validate` and
-  # `generate`, and errors with P1012 when it is unset. Nothing in this
-  # workflow opens a connection; this is a syntactically valid placeholder, not
-  # a credential, and it points at a host that does not exist.
+  # Placeholders for the four variables apps/web/src/lib/env.ts validates at
+  # import time. `next build` imports that module while collecting page data,
+  # and Prisma independently resolves datasource.url from the environment even
+  # for `validate` and `generate`, erroring with P1012 when it is unset.
+  #
+  # None of these is a credential. Nothing in this workflow opens a connection
+  # or contacts a service: the database host does not exist, and the face-ai
+  # URL is only reached by the integration job, which overrides it with the
+  # address of the service it started itself. Same reasoning, and the same
+  # values, as the build stage of apps/web/Dockerfile.
   DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci?schema=public
+  FACE_AI_SERVICE_URL: http://127.0.0.1:8000
+  AUTH_SECRET: ci-placeholder-not-a-secret
+  API_KEY_PEPPER: ci-placeholder-not-a-secret
   NEXT_TELEMETRY_DISABLED: "1"
 
 jobs:
@@ -62,6 +71,15 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      # Same reason as the Prisma step above, for a different generator.
+      # `LayoutProps<"/">` and its siblings are global helpers Next.js emits
+      # into apps/web/.next/types, which is generated rather than committed.
+      # `next dev` and `next build` produce them as a side effect, so this only
+      # ever fails where neither has run — which is to say, in CI. `typegen` is
+      # the supported way to ask for just the types, without a full build.
+      - name: Generate Next.js route types
+        run: npx next typegen apps/web
 
       - name: Typecheck
         run: npm run typecheck
@@ -114,10 +132,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      # scripts/integration-test.sh boots the service from
+      # services/face-ai/.venv/bin/uvicorn, because that is the layout
+      # services/face-ai/README.md documents and the one a developer running
+      # the same script locally already has. Installing into the runner's
+      # system Python satisfies neither, so the venv is created here rather
+      # than the script being taught a second, CI-only layout.
       - name: Install
         run: |
           npm ci
-          pip install -r services/face-ai/requirements-dev.txt
+          python -m venv services/face-ai/.venv
+          services/face-ai/.venv/bin/pip install -r services/face-ai/requirements-dev.txt
 
       - name: Generate Prisma client
         run: npx prisma generate --schema=apps/web/prisma/schema.prisma
