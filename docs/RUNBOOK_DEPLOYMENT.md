@@ -42,6 +42,13 @@ An immutable tag is what makes rollback a one-line operation: the previous
 release is still sitting in the registry under its own SHA, byte-for-byte.
 A mutable `latest` would make "roll back" mean "rebuild and hope".
 
+The tag is how a human finds an image. What the pipeline actually deploys is
+the **digest** that tag resolved to at build time — `web@sha256:…` — because a
+tag is a pointer and a pointer can be moved, whereas a digest is the content.
+`deploy.yml` resolves all three digests immediately after building, hands those
+to Container Apps, and then reads the running image back and compares. So the
+revision that ends up serving is provably the artifact that run validated.
+
 Building by hand (no local Docker needed — ACR Tasks builds inside Azure):
 
 ```sh
@@ -58,10 +65,21 @@ az acr build -r attendanceprodacr -t face-ai:$SHA  -f services/face-ai/Dockerfil
 ```sh
 az containerapp show -n attendance-prod-web -g attendance-production-rg \
   --query "properties.template.containers[0].image" -o tsv
-# -> attendanceprodacr.azurecr.io/web:9f3c1ab...
+# -> attendanceprodacr.azurecr.io/web@sha256:aef0a63...
 ```
 
-The tag *is* the commit. `git show <sha>` tells you exactly what is running.
+That is a digest, so it names the bytes rather than the commit. One more hop
+gets the commit, because the same manifest still carries its SHA tag:
+
+```sh
+az acr repository show-tags -n attendanceprodacr --repository web --detail \
+  --query "[?digest=='sha256:aef0a63...'].name" -o tsv
+# -> ab8ef4358edd6c851d8db1b4fb7fd3e256590f80
+```
+
+`git show <sha>` then tells you exactly what is running. The deploying
+workflow run records the same commit → tag → digest → revision mapping in its
+job summary, which is the faster place to look when you know the run.
 
 Current and previous revisions, newest first:
 
@@ -426,21 +444,33 @@ image into a ticket, a chat, or this repository.
 
 ## How production is deployed, and what stops it happening by accident
 
-### Deployment is manual. There is no automatic trigger.
+### Deployment is automatic on `main`.
 
-`deploy.yml` is **`workflow_dispatch` only**. A commit reaching `main` runs CI
-and nothing else — it builds no image, runs no migration, and deploys nothing.
-Production moves only when a person starts the workflow deliberately:
+`deploy.yml` runs on **every push to `main`**, and `main` is the deployable
+line: merging into it is the deliberate act. The normal bug-fix loop is
+
+```
+code change -> git push origin main -> production
+```
+
+`workflow_dispatch` is kept alongside it for controlled redeploys — rolling a
+build forward without a new commit, or re-running a deploy after fixing
+something in Azure:
 
 ```sh
 gh workflow run "Deploy (production)" --repo 13-Manan/Attendance --ref main
 ```
 
-The intended gate was a **required reviewer** on the `production` environment.
-That is **not configured and cannot be** — GitHub does not offer environment
-protection rules on a private repository under the Free plan, and neither
-publishing an attendance system's source nor buying a plan is a reasonable way
-to obtain an approval prompt. The manual trigger is the gate instead. Anyone
+Nothing reaches Azure without passing CI first: `deploy.yml` calls `ci.yml` as
+a reusable workflow and the build job `needs` it, so a failing lint, type,
+test, integration or image check stops the run before an image is built.
+
+The intended gate was additionally a **required reviewer** on the `production`
+environment. That is **not configured and cannot be** — GitHub does not offer
+environment protection rules on a private repository under the Free plan, and
+neither publishing an attendance system's source nor buying a plan is a
+reasonable way to obtain an approval prompt. CI plus the branch is the gate
+instead, and that trade-off is accepted deliberately. Anyone
 who can run workflows in this repository can start a production deployment;
 there is no second pair of eyes enforced by the platform.
 
@@ -462,11 +492,36 @@ exists, and none was ever created — the app registration has empty
 | Entra app | `attendance-prod-github-deploy` |
 | Client ID | `cdb3ff1c-a376-435b-aff2-1000cdd11795` |
 | SP object ID | `74ced053-72b1-4295-94cf-936dbf01d84f` |
-| Federated subject | `repo:13-Manan/Attendance:ref:refs/heads/main` |
+| Credential name | `github-13-Manan-Attendance-environment-production` |
+| Federated subject | `repo:13-Manan@125882404/Attendance@1375678405:environment:production` |
 | Issuer / audience | `token.actions.githubusercontent.com` / `api://AzureADTokenExchange` |
 
 The subject is a literal with no wildcard: a token from another repository,
 branch, tag, fork or pull request does not match it and the exchange fails.
+
+Two things about its shape are easy to get wrong, and both were, originally:
+
+- **It is scoped to the environment, not the branch.** A job that declares
+  `environment: production` gets a `:environment:production` subject; only a
+  job without an environment gets `:ref:refs/heads/main`. Every Azure-touching
+  job in `deploy.yml` declares the environment, so `:ref:` never appears. A
+  credential registered for the ref form authenticates none of them.
+- **This repository has GitHub's immutable subject claims enabled**, so the
+  prefix is qualified by numeric owner and repository IDs rather than by name —
+  `13-Manan@125882404`, `Attendance@1375678405`. A credential written with the
+  plain `repo:13-Manan/Attendance` prefix matches nothing at all.
+
+Confirm the live values rather than trusting this table:
+
+```sh
+gh api repos/13-Manan/Attendance/actions/oidc/customization/sub
+az ad app federated-credential list --id cdb3ff1c-a376-435b-aff2-1000cdd11795 \
+  --query "[].{name:name, subject:subject}" -o table
+```
+
+A superseded credential for the old `repo:13-Manan/Attendance:ref:refs/heads/main`
+subject may still be listed. It authenticates nothing — GitHub no longer emits
+that subject for this repository — and it should be deleted when convenient.
 
 Its complete Azure footprint — six assignments, verified subscription-wide:
 

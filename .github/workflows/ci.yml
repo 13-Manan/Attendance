@@ -4,10 +4,11 @@
 # deploy.yml before anything is built or deployed. Sharing one definition
 # means production cannot be reached by a path that skipped a check.
 #
-# The `push` trigger matters now that deploy.yml is workflow_dispatch only:
-# without it, a commit pushed straight to main would be validated by nothing
-# until someone started a deployment, which is the wrong moment to find out.
-# Validation is automatic; deployment is not.
+# deploy.yml runs on every push to main and calls this workflow as its first
+# gate, so a push to main is validated either way. The standalone `push`
+# trigger is kept anyway: it records a CI result against main in its own right
+# rather than only as a stage inside a deployment, and it still covers a push
+# whose deployment never starts.
 #
 # This workflow touches no Azure resource and holds no Azure credential. It
 # needs none: nothing here talks to the cloud.
@@ -132,17 +133,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      # scripts/integration-test.sh boots the service from
-      # services/face-ai/.venv/bin/uvicorn, because that is the layout
-      # services/face-ai/README.md documents and the one a developer running
-      # the same script locally already has. Installing into the runner's
-      # system Python satisfies neither, so the venv is created here rather
-      # than the script being taught a second, CI-only layout.
+      # The same install as the face-ai job above, deliberately: one idiom for
+      # Python dependencies across this whole workflow. scripts/integration-test.sh
+      # resolves an interpreter rather than a fixed path, so the runner's
+      # Python — provisioned by setup-python and populated from the committed
+      # requirements file — is a first-class way to run it. Nothing here
+      # fabricates a developer's .venv, and no .venv is committed.
       - name: Install
         run: |
           npm ci
-          python -m venv services/face-ai/.venv
-          services/face-ai/.venv/bin/pip install -r services/face-ai/requirements-dev.txt
+          pip install -r services/face-ai/requirements-dev.txt
 
       - name: Generate Prisma client
         run: npx prisma generate --schema=apps/web/prisma/schema.prisma

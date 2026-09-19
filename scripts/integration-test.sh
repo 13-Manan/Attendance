@@ -33,9 +33,38 @@ BASE_URL="http://127.0.0.1:${PORT}"
 # The value is ephemeral and local to this run; it is not a secret anyone holds.
 SERVICE_TOKEN="${FACE_AI_AUTH_TOKEN:-integration-test-face-ai-token}"
 
-if [ ! -x "$SERVICE_DIR/.venv/bin/uvicorn" ]; then
-  echo "error: $SERVICE_DIR/.venv is missing or incomplete." >&2
-  echo "       See services/face-ai/README.md for setup." >&2
+# Which interpreter runs the service.
+#
+# What this needs is an interpreter that can import the service's
+# dependencies. It used to demand one specific *path* to one —
+# services/face-ai/.venv/bin/uvicorn — which is the layout
+# services/face-ai/README.md documents and the one a developer already has,
+# but it is not the only correct answer. A clean CI environment that has run
+# `pip install -r requirements-dev.txt` has every declared dependency and no
+# .venv directory, and this script used to reject it: the interpreter holding
+# the dependencies and the interpreter the script tried to launch were
+# different, so the run failed before a single test executed.
+#
+# So: honour an explicit override, prefer the developer venv when it exists,
+# and otherwise use whatever `python3` is on PATH — then verify that whichever
+# one was chosen can actually import uvicorn, which is the real precondition.
+# Nothing about the test is relaxed by this; it still boots a real FastAPI
+# process and still runs the authenticated path against it.
+PYTHON="${FACE_AI_PYTHON:-}"
+if [ -z "$PYTHON" ] && [ -x "$SERVICE_DIR/.venv/bin/python" ]; then
+  PYTHON="$SERVICE_DIR/.venv/bin/python"
+fi
+if [ -z "$PYTHON" ]; then
+  PYTHON="$(command -v python3 || command -v python || true)"
+fi
+
+if [ -z "$PYTHON" ] || ! "$PYTHON" -c 'import uvicorn' >/dev/null 2>&1; then
+  echo "error: no Python interpreter with the face-ai dependencies installed." >&2
+  echo "       tried: \${FACE_AI_PYTHON}=${FACE_AI_PYTHON:-<unset>}" >&2
+  echo "              $SERVICE_DIR/.venv/bin/python" >&2
+  echo "              python3/python on PATH" >&2
+  echo "       Install them with: pip install -r services/face-ai/requirements-dev.txt" >&2
+  echo "       See services/face-ai/README.md for the recommended venv setup." >&2
   exit 1
 fi
 
@@ -48,7 +77,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "==> starting face-ai (backend=$BACKEND) on $BASE_URL"
+echo "==> starting face-ai (backend=$BACKEND) on $BASE_URL using $PYTHON"
 # `exec` matters: without it $! is the subshell, and killing the subshell
 # leaves uvicorn orphaned holding this script's stdout. If that stdout is a
 # pipe (`./scripts/integration-test.sh | tail`), the reader then blocks
@@ -59,7 +88,7 @@ echo "==> starting face-ai (backend=$BACKEND) on $BASE_URL"
   exec env FACE_MODEL_BACKEND="$BACKEND" \
     FACE_AI_AUTH_TOKEN="$SERVICE_TOKEN" \
     FACE_AI_REQUIRE_AUTH=true \
-    .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port "$PORT" --log-level warning
+    "$PYTHON" -m uvicorn app.main:app --host 127.0.0.1 --port "$PORT" --log-level warning
 ) &
 SERVER_PID=$!
 

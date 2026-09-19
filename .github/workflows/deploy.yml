@@ -3,12 +3,17 @@
 # ---------------------------------------------------------------------------
 # Order, and why it is this order
 # ---------------------------------------------------------------------------
-#   validate -> build -> migrate -> deploy -> smoke
+#   validate -> build -> migrate -> deploy -> verify
 #
 # The migration runs BEFORE the new application revision and the deployment
 # halts if it fails, because a container started against a schema that does not
 # yet have its columns fails on real attendance traffic rather than in a job
 # nobody is watching.
+#
+# Within `deploy`, face-ai is replaced before web. The web app calls face-ai,
+# so upgrading the dependency ahead of its caller avoids a window in which new
+# web code talks to an old service. That is the inverse of the obvious order
+# and it is deliberate.
 #
 # The migration does NOT run on a GitHub runner. attendance-prod-psql has no
 # public endpoint, and it is not given one for the convenience of a deploy.
@@ -23,6 +28,18 @@
 # secret — only the non-sensitive client/tenant/subscription identifiers
 # needed to request a short-lived token.
 #
+# This repository has GitHub's *immutable* subject claims enabled, so the token
+# it presents is subject-scoped by numeric IDs rather than by name:
+#
+#   repo:13-Manan@125882404/Attendance@1375678405:environment:production
+#
+# which is the literal registered on attendance-prod-github-deploy. Every job
+# below that touches Azure declares `environment: production`, so every token
+# this workflow requests carries exactly that subject. A job that dropped the
+# environment would request a `:ref:` subject instead and simply fail to
+# authenticate — the credential is the floor under the branch policy, not a
+# duplicate of it. See docs/RUNBOOK_DEPLOYMENT.md.
+#
 # ---------------------------------------------------------------------------
 # Blast radius
 # ---------------------------------------------------------------------------
@@ -31,27 +48,44 @@
 # `guard` job fails the run if the subscription, the resource group, or any
 # target resource is not the tagged Attendance one. A misconfigured secret
 # stops the deployment; it does not redirect it somewhere else.
-
-# ---------------------------------------------------------------------------
-# Why this never runs on its own
-# ---------------------------------------------------------------------------
-# Production is deployed only when a person starts this workflow deliberately.
 #
-# The intended gate was a required reviewer on the `production` environment,
-# but GitHub does not offer environment protection rules on a private
-# repository under the Free plan, and neither making an attendance system's
-# repository public nor paying for a plan is an acceptable way to buy an
-# approval prompt. So the trigger itself is the gate: there is no `push:`
-# here, and a commit reaching `main` builds nothing and deploys nothing.
+# ---------------------------------------------------------------------------
+# What is deployed: digests, not tags
+# ---------------------------------------------------------------------------
+# Images are *tagged* with the commit SHA — `web:<sha>`, `face-ai:<sha>`,
+# `migrate:<sha>`, never `latest` — so the registry records which commit
+# produced which bytes. But what is handed to Container Apps is the resolved
+# `@sha256:` digest of the image this run just built. A tag is a pointer and a
+# pointer can be moved; a digest is the content. Deploying the digest means the
+# revision that ends up serving is provably the artifact this run validated,
+# and the verification stage re-reads it back and compares.
+#
+# ---------------------------------------------------------------------------
+# Triggers
+# ---------------------------------------------------------------------------
+# Every push to `main` deploys to production. The gate is the branch itself:
+# reaching `main` is the deliberate act. A manual `workflow_dispatch` is kept
+# for controlled redeploys — rolling a build forward without a new commit, or
+# re-running a deploy after an infrastructure fix — and can also be started
+# from a non-main ref, which the `guard` job below rejects.
+#
+# The earlier design used workflow_dispatch alone because environment
+# protection rules with a required reviewer are unavailable on private
+# repositories under GitHub's Free plan, and the manual trigger was the
+# nearest thing to an approval prompt. That trade-off has been accepted:
+# `main` is now the deployable line. The CI gate below still runs before any
+# image is built or pushed, so nothing that fails validation reaches Azure.
 #
 # The branch restriction is enforced twice over — by the environment's
 # deployment branch policy, which permits only `main`, and again by the
-# explicit check in `guard` below, so that deleting the policy does not
-# silently re-open deployment from an arbitrary branch.
+# explicit check in `guard`, so that deleting the policy does not silently
+# re-open deployment from an arbitrary branch.
 
 name: Deploy (production)
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -77,6 +111,7 @@ env:
   WEB_APP: attendance-prod-web
   FACE_AI_APP: attendance-prod-face-ai
   MIGRATE_JOB: attendance-prod-migrate
+  POSTGRES_SERVER: attendance-prod-psql
   EXPECTED_PROJECT_TAG: Attendance
 
 jobs:
@@ -190,6 +225,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     needs: [validate, guard]
+    outputs:
+      web: ${{ steps.digests.outputs.web }}
+      face_ai: ${{ steps.digests.outputs.face_ai }}
+      migrate: ${{ steps.digests.outputs.migrate }}
     env:
       SHA: ${{ needs.guard.outputs.sha }}
     steps:
@@ -207,8 +246,8 @@ jobs:
       # credentials on the registry stay disabled.
       #
       # Tagged with the commit SHA and nothing else. No `latest`, so every
-      # running revision names the exact commit it came from and no tag can
-      # ever be silently repointed at different bytes.
+      # image names the exact commit it came from and no tag can ever be
+      # silently repointed at different bytes.
       - name: Build web image
         run: |
           az acr build --registry "$ACR_NAME" \
@@ -227,6 +266,56 @@ jobs:
             --image "face-ai:${SHA}" \
             --file services/face-ai/Dockerfile services/face-ai
 
+      # The tag is how a human finds the image; the digest is what gets
+      # deployed. Resolving it here, once, means every later stage refers to
+      # the same immutable bytes and the run's own record says which.
+      #
+      # The digest comes from the ACR Tasks run record — what the build just
+      # pushed — rather than from `az acr repository show`, for two reasons.
+      # It is the stronger statement: "the manifest this run produced", not
+      # "whatever that tag resolves to by the time we ask". And it is the one
+      # this identity is actually allowed to make: reading a repository's
+      # metadata needs `registries/metadata/read`, which neither `AcrPush` nor
+      # `Container Registry Tasks Contributor` grants, while `runs/read` —
+      # which the latter does grant — is all this needs.
+      - id: digests
+        name: Resolve image digests
+        run: |
+          set -euo pipefail
+
+          {
+            echo "### Images built for \`${SHA}\`"
+            echo
+            echo "| Image | Digest |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          resolve() {
+            repo="$1"
+            output="$2"
+
+            # Runs come back newest first, so the first match is this run's.
+            digest=$(az acr task list-runs --registry "$ACR_NAME" --top 30 \
+              --query "[?status=='Succeeded'].outputImages[] | [?repository=='${repo}' && tag=='${SHA}'] | [0].digest" \
+              -o tsv)
+
+            case "$digest" in
+              sha256:*) ;;
+              *)
+                echo "::error::No digest recorded for a successful build of ${repo}:${SHA} (got '${digest}')."
+                exit 1
+                ;;
+            esac
+
+            echo "${output}=${digest}" >> "$GITHUB_OUTPUT"
+            echo "  ${repo}:${SHA} -> ${digest}"
+            echo "| \`${ACR_LOGIN_SERVER}/${repo}:${SHA}\` | \`${digest}\` |" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          resolve web     web
+          resolve face-ai face_ai
+          resolve migrate migrate
+
   migrate:
     name: Migrate database (inside VNet)
     runs-on: ubuntu-latest
@@ -234,6 +323,10 @@ jobs:
     needs: [guard, build]
     env:
       SHA: ${{ needs.guard.outputs.sha }}
+      # The image reference is composed in the shell rather than here: a
+      # job-level `env` block cannot read the `env` context, so interpolating
+      # ACR_LOGIN_SERVER at this level would silently yield an empty string.
+      MIGRATE_DIGEST: ${{ needs.build.outputs.migrate }}
     steps:
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -242,15 +335,24 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # Only --image. The job's identity, its Key Vault secret reference for
+      # DATABASE_URL, its retry limit and its VNet placement are left exactly
+      # as the Bicep defined them.
       - name: Point the job at this commit's migration image
         run: |
           set -euo pipefail
+          image="${ACR_LOGIN_SERVER}/migrate@${MIGRATE_DIGEST}"
+          echo "Migration image: ${image}"
           az containerapp job update \
             --name "$MIGRATE_JOB" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "${ACR_LOGIN_SERVER}/migrate:${SHA}" \
+            --image "$image" \
             --output none
 
+      # The image's CMD is `prisma migrate deploy` and nothing else — see
+      # apps/web/Dockerfile.migrate. It applies committed migrations in order
+      # and stops on the first failure. `db push`, `migrate reset` and the seed
+      # script are not in the image and cannot be reached from here.
       - name: Run migrations and wait
         run: |
           set -euo pipefail
@@ -260,6 +362,7 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --query name -o tsv)
           echo "Execution: $execution"
+          echo "MIGRATION_EXECUTION=$execution" >> "$GITHUB_ENV"
 
           # The job has replicaRetryLimit 0, so this resolves once.
           for _ in $(seq 1 60); do
@@ -272,10 +375,12 @@ jobs:
             case "$status" in
               Succeeded)
                 echo "Migrations applied."
+                echo "- Migration \`$execution\`: **Succeeded**" >> "$GITHUB_STEP_SUMMARY"
                 exit 0
                 ;;
               Failed|Degraded)
                 echo "::error::Migration job $execution finished as $status. Deployment halted; the previous revision keeps serving. Inspect with: az containerapp job logs show -n $MIGRATE_JOB -g $AZURE_RESOURCE_GROUP --execution $execution"
+                echo "- Migration \`$execution\`: **$status** — deployment halted, previous revision still serving" >> "$GITHUB_STEP_SUMMARY"
                 exit 1
                 ;;
             esac
@@ -283,6 +388,7 @@ jobs:
           done
 
           echo "::error::Migration job $execution did not finish within 20 minutes. Deployment halted; NOT retried automatically."
+          echo "- Migration \`$execution\`: **timed out** — deployment halted" >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
   deploy:
@@ -290,8 +396,16 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     needs: [guard, build, migrate]
+    outputs:
+      web_revision: ${{ steps.web.outputs.revision }}
+      face_ai_revision: ${{ steps.face_ai.outputs.revision }}
     env:
       SHA: ${{ needs.guard.outputs.sha }}
+      # Digests only. The full reference is composed in each step's shell,
+      # because a job-level `env` block cannot read the `env` context and
+      # ACR_LOGIN_SERVER would interpolate to nothing here.
+      WEB_DIGEST: ${{ needs.build.outputs.web }}
+      FACE_AI_DIGEST: ${{ needs.build.outputs.face_ai }}
     steps:
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -300,25 +414,42 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # Face AI first. The web app calls it, so upgrading the dependency before
-      # its caller avoids a window where new web code talks to an old service.
-      - name: Deploy Face AI (internal ingress)
+      # `az containerapp update --image` patches one field of the existing
+      # app and creates a revision from the rest of the template as it stands.
+      # Environment variables, Key Vault secret references, the system-assigned
+      # identity, the ACR pull identity, ingress, VNet placement, scale rules
+      # and probes are all carried forward untouched — which is the reason this
+      # is an update and not a `create` or an `az containerapp up`.
+      #
+      # Face AI first: web calls it, and the dependency should not be older
+      # than its caller during the changeover.
+      - id: face_ai
+        name: Deploy Face AI (internal ingress)
         run: |
           set -euo pipefail
-          az containerapp update \
+          image="${ACR_LOGIN_SERVER}/face-ai@${FACE_AI_DIGEST}"
+          echo "Face AI image: ${image}"
+          revision=$(az containerapp update \
             --name "$FACE_AI_APP" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "${ACR_LOGIN_SERVER}/face-ai:${SHA}" \
-            --output none
+            --image "$image" \
+            --query "properties.latestRevisionName" -o tsv)
+          echo "revision=${revision}" >> "$GITHUB_OUTPUT"
+          echo "Face AI revision: ${revision}"
 
-      - name: Deploy web
+      - id: web
+        name: Deploy web
         run: |
           set -euo pipefail
-          az containerapp update \
+          image="${ACR_LOGIN_SERVER}/web@${WEB_DIGEST}"
+          echo "Web image: ${image}"
+          revision=$(az containerapp update \
             --name "$WEB_APP" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "${ACR_LOGIN_SERVER}/web:${SHA}" \
-            --output none
+            --image "$image" \
+            --query "properties.latestRevisionName" -o tsv)
+          echo "revision=${revision}" >> "$GITHUB_OUTPUT"
+          echo "Web revision: ${revision}"
 
       - name: Confirm Face AI has no public endpoint
         run: |
@@ -333,13 +464,17 @@ jobs:
           fi
           echo "Face AI ingress is internal."
 
-  smoke:
-    name: Smoke test
+  verify:
+    name: Verify production
     runs-on: ubuntu-latest
     environment: production
-    needs: [guard, deploy]
+    needs: [guard, build, deploy]
     env:
       SHA: ${{ needs.guard.outputs.sha }}
+      WEB_DIGEST: ${{ needs.build.outputs.web }}
+      FACE_AI_DIGEST: ${{ needs.build.outputs.face_ai }}
+      WEB_REVISION: ${{ needs.deploy.outputs.web_revision }}
+      FACE_AI_REVISION: ${{ needs.deploy.outputs.face_ai_revision }}
     steps:
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -348,49 +483,223 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Revision is running and serving this commit
+      # The revision name is re-read from Azure rather than taken on trust from
+      # the deploy job. `deploy` reports the name the update call returned, and
+      # that is what gets recorded; this asks the platform what is actually
+      # live now, so a name that lagged the allocation cannot cause this stage
+      # to sit watching the wrong revision.
+      - name: Resolve the live revisions
+        run: |
+          set -euo pipefail
+          for pair in "WEB_REVISION:$WEB_APP" "FACE_AI_REVISION:$FACE_AI_APP"; do
+            var="${pair%%:*}"
+            app="${pair#*:}"
+            live=$(az containerapp show -n "$app" -g "$AZURE_RESOURCE_GROUP" \
+              --query "properties.latestRevisionName" -o tsv)
+            if [ -z "$live" ]; then
+              echo "::error::$app reports no latest revision."
+              exit 1
+            fi
+            echo "${var}=${live}" >> "$GITHUB_ENV"
+            echo "  $app: $live (deploy reported '${!var}')"
+          done
+
+      - name: Web revision is running and serving this commit's digest
         run: |
           set -euo pipefail
 
-          revision=$(az containerapp show -n "$WEB_APP" -g "$AZURE_RESOURCE_GROUP" \
-            --query "properties.latestRevisionName" -o tsv)
-
+          state=""
           for _ in $(seq 1 30); do
             state=$(az containerapp revision show -n "$WEB_APP" -g "$AZURE_RESOURCE_GROUP" \
-              --revision "$revision" --query "properties.runningState" -o tsv)
-            echo "  $revision: $state"
-            [ "$state" = "Running" ] && break
+              --revision "$WEB_REVISION" --query "properties.runningState" -o tsv)
+            echo "  $WEB_REVISION: $state"
+            if [ "$state" = "Running" ]; then
+              break
+            fi
             if [ "$state" = "Failed" ]; then
-              echo "::error::Revision $revision failed to start. See docs/RUNBOOK_DEPLOYMENT.md to shift traffic back."
+              echo "::error::Revision $WEB_REVISION failed to start. It was built from commit $SHA, digest $WEB_DIGEST. See docs/RUNBOOK_DEPLOYMENT.md to shift traffic back."
               exit 1
             fi
             sleep 10
           done
 
+          if [ "$state" != "Running" ]; then
+            echo "::error::Revision $WEB_REVISION did not reach Running (last state '$state'). Commit $SHA, digest $WEB_DIGEST."
+            exit 1
+          fi
+
           image=$(az containerapp show -n "$WEB_APP" -g "$AZURE_RESOURCE_GROUP" \
             --query "properties.template.containers[0].image" -o tsv)
-          if [ "$image" != "${ACR_LOGIN_SERVER}/web:${SHA}" ]; then
-            echo "::error::Running image '$image' is not the expected ${ACR_LOGIN_SERVER}/web:${SHA}."
+          if [ "$image" != "${ACR_LOGIN_SERVER}/web@${WEB_DIGEST}" ]; then
+            echo "::error::Running image '$image' is not the digest this run built (${WEB_DIGEST})."
             exit 1
           fi
           echo "Serving $image"
 
-      - name: HTTPS reachability
+      # face-ai has no public FQDN by design, so nothing outside the Container
+      # Apps environment can issue an HTTP probe against it — deliberately, and
+      # giving it one to make a smoke test convenient would defeat the point.
+      # What is observable from here is the platform's own view of the replica:
+      # Container Apps only reports a revision Running once its container has
+      # started and stayed up, and gunicorn imports app.main — and with it
+      # onnxruntime and the configured backend — during worker startup. A
+      # revision that is Running is one whose model loaded.
+      - name: Face AI revision is healthy and serving this commit's digest
+        run: |
+          set -euo pipefail
+
+          state=""
+          for _ in $(seq 1 30); do
+            state=$(az containerapp revision show -n "$FACE_AI_APP" -g "$AZURE_RESOURCE_GROUP" \
+              --revision "$FACE_AI_REVISION" --query "properties.runningState" -o tsv)
+            echo "  $FACE_AI_REVISION: $state"
+            if [ "$state" = "Running" ]; then
+              break
+            fi
+            if [ "$state" = "Failed" ]; then
+              echo "::error::Face AI revision $FACE_AI_REVISION failed to start. Commit $SHA, digest $FACE_AI_DIGEST."
+              exit 1
+            fi
+            sleep 10
+          done
+
+          if [ "$state" != "Running" ]; then
+            echo "::error::Face AI revision $FACE_AI_REVISION did not reach Running (last state '$state'). Commit $SHA, digest $FACE_AI_DIGEST."
+            exit 1
+          fi
+
+          health=$(az containerapp revision show -n "$FACE_AI_APP" -g "$AZURE_RESOURCE_GROUP" \
+            --revision "$FACE_AI_REVISION" --query "properties.healthState" -o tsv)
+          if [ "$health" = "Unhealthy" ]; then
+            echo "::error::Face AI revision $FACE_AI_REVISION reports healthState=Unhealthy. Commit $SHA, digest $FACE_AI_DIGEST."
+            exit 1
+          fi
+          echo "  healthState: $health"
+
+          image=$(az containerapp show -n "$FACE_AI_APP" -g "$AZURE_RESOURCE_GROUP" \
+            --query "properties.template.containers[0].image" -o tsv)
+          if [ "$image" != "${ACR_LOGIN_SERVER}/face-ai@${FACE_AI_DIGEST}" ]; then
+            echo "::error::Face AI is running '$image', not the digest this run built (${FACE_AI_DIGEST})."
+            exit 1
+          fi
+          echo "Serving $image"
+
+      - name: Web responds 200 on / and /api/health
         run: |
           set -euo pipefail
           fqdn=$(az containerapp show -n "$WEB_APP" -g "$AZURE_RESOURCE_GROUP" \
             --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "WEB_FQDN=$fqdn" >> "$GITHUB_ENV"
 
-          for _ in $(seq 1 20); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://${fqdn}/" || echo 000)
-            echo "  https://${fqdn}/ -> $code"
-            # Any served HTTP response proves TLS terminated and the container
-            # answered; an unauthenticated root may legitimately redirect.
-            case "$code" in
-              2*|3*|4*) echo "Web app is serving over HTTPS."; exit 0 ;;
-            esac
-            sleep 15
+          # Two separate assertions. `/` proves the Next.js app renders a page;
+          # /api/health proves a route handler executes. Either can fail while
+          # the other passes, so neither stands in for the other.
+          probe() {
+            path="$1"
+            code=""
+            for _ in $(seq 1 20); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://${fqdn}${path}" || echo 000)
+              echo "  GET https://${fqdn}${path} -> $code"
+              if [ "$code" = "200" ]; then
+                return 0
+              fi
+              sleep 15
+            done
+            echo "::error::GET ${path} did not return 200 (last '$code'). Commit $SHA, web digest $WEB_DIGEST, revision $WEB_REVISION. See docs/RUNBOOK_DEPLOYMENT.md."
+            return 1
+          }
+
+          probe "/"
+          probe "/api/health"
+
+      - name: PostgreSQL is Ready and still private
+        run: |
+          set -euo pipefail
+
+          state=$(az postgres flexible-server show -n "$POSTGRES_SERVER" -g "$AZURE_RESOURCE_GROUP" \
+            --query state -o tsv)
+          if [ "$state" != "Ready" ]; then
+            echo "::error::$POSTGRES_SERVER is '$state', expected Ready."
+            exit 1
+          fi
+
+          public=$(az postgres flexible-server show -n "$POSTGRES_SERVER" -g "$AZURE_RESOURCE_GROUP" \
+            --query network.publicNetworkAccess -o tsv)
+          if [ "$public" != "Disabled" ]; then
+            echo "::error::$POSTGRES_SERVER has publicNetworkAccess '$public'. The database must not be reachable from the internet."
+            exit 1
+          fi
+
+          echo "PostgreSQL: Ready, publicNetworkAccess Disabled."
+
+      # A deployment is not just "did it start" — it is also "did it start
+      # still configured the way it was". Each of these is a property the
+      # `--image`-only update is expected to have preserved, checked rather
+      # than assumed, because the failure mode is silent.
+      - name: Security posture is unchanged
+        run: |
+          set -euo pipefail
+          fail=0
+
+          for app in "$WEB_APP" "$FACE_AI_APP"; do
+            pull=$(az containerapp show -n "$app" -g "$AZURE_RESOURCE_GROUP" \
+              --query "properties.configuration.registries[?server=='${ACR_LOGIN_SERVER}'].identity | [0]" -o tsv)
+            if [ "$pull" != "system" ]; then
+              echo "::error::$app pulls from $ACR_LOGIN_SERVER as '$pull', not the system-assigned managed identity."
+              fail=1
+            else
+              echo "  ok: $app pulls via managed identity"
+            fi
+
+            idtype=$(az containerapp show -n "$app" -g "$AZURE_RESOURCE_GROUP" \
+              --query "identity.type" -o tsv)
+            if [ "$idtype" != "SystemAssigned" ]; then
+              echo "::error::$app identity is '$idtype', expected SystemAssigned."
+              fail=1
+            fi
+
+            # Secret *names* and their Key Vault URIs only. No value is read
+            # here and none is readable — this identity has no Key Vault role.
+            total=$(az containerapp show -n "$app" -g "$AZURE_RESOURCE_GROUP" \
+              --query "length(properties.configuration.secrets)" -o tsv)
+            kv=$(az containerapp show -n "$app" -g "$AZURE_RESOURCE_GROUP" \
+              --query "length(properties.configuration.secrets[?keyVaultUrl!=null])" -o tsv)
+            if [ "$total" = "0" ] || [ "$total" != "$kv" ]; then
+              echo "::error::$app has $total secrets of which $kv are Key Vault references. Every secret must remain a Key Vault reference."
+              fail=1
+            else
+              echo "  ok: $app has $kv/$total secrets as Key Vault references"
+            fi
           done
 
-          echo "::error::$fqdn did not serve an HTTPS response. See docs/RUNBOOK_DEPLOYMENT.md."
-          exit 1
+          external=$(az containerapp show -n "$FACE_AI_APP" -g "$AZURE_RESOURCE_GROUP" \
+            --query "properties.configuration.ingress.external" -o tsv)
+          if [ "$external" != "false" ]; then
+            echo "::error::$FACE_AI_APP ingress.external is '$external'. It must stay internal-only."
+            fail=1
+          else
+            echo "  ok: $FACE_AI_APP is internal-only"
+          fi
+
+          [ "$fail" -eq 0 ] || exit 1
+
+      # Runs whether the checks above passed or failed. If a revision is
+      # unhealthy, the one thing an operator needs first is which commit and
+      # which bytes are on it — so this records that unconditionally rather
+      # than only on the happy path.
+      - name: Record what was deployed
+        if: always()
+        run: |
+          {
+            echo
+            echo "### Deployed"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Commit | \`${SHA}\` |"
+            echo "| Web revision | \`${WEB_REVISION}\` |"
+            echo "| Web image | \`${ACR_LOGIN_SERVER}/web@${WEB_DIGEST}\` |"
+            echo "| Face AI revision | \`${FACE_AI_REVISION}\` |"
+            echo "| Face AI image | \`${ACR_LOGIN_SERVER}/face-ai@${FACE_AI_DIGEST}\` |"
+            echo "| URL | https://${WEB_FQDN:-unknown} |"
+          } >> "$GITHUB_STEP_SUMMARY"
