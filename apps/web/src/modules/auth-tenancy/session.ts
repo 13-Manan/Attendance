@@ -1,8 +1,9 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { hasPermission } from "@/modules/authorization/service";
 import type { PermissionKey } from "@/modules/authorization/permissions";
 import { getSessionUserByRawToken } from "./service";
+import { loginPathFor, REQUESTED_PATH_HEADER } from "./redirect";
 import type { SessionUser } from "./types";
 
 export const SESSION_COOKIE_NAME = "attendance_session";
@@ -31,8 +32,18 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 
 export async function requireUser(): Promise<SessionUser> {
   const user = await getCurrentUser();
-  if (!user) redirect("/login");
-  return user;
+  if (user) return user;
+
+  // The case the proxy cannot catch: a cookie that is present but dead —
+  // expired, revoked, or forged. It waves those through (no DB lookup, by
+  // design), so the refusal happens here, several components deep, with no
+  // access to the URL bar. The proxy leaves the path in a header so this
+  // redirect can carry it, and the user keeps their place across an expiry
+  // rather than being dumped at a bare /login.
+  //
+  // redirect() signals by throwing, so it stays outside any try/catch.
+  const requestedPath = (await headers()).get(REQUESTED_PATH_HEADER);
+  redirect(loginPathFor(requestedPath));
 }
 
 /**

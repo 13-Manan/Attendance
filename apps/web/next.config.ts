@@ -51,6 +51,56 @@ const nextConfig: NextConfig = {
      */
     useOffline: true,
   },
+
+  /**
+   * Security response headers.
+   *
+   * Deliberately the conservative set — the ones that cannot break a page
+   * that works today. Each is here for a reason specific to this app:
+   *
+   *  - `X-Frame-Options` / `frame-ancestors 'none'`: nothing embeds this app,
+   *    and a framed attendance register is a clickjacking target — a teacher
+   *    could be made to confirm one. `frame-ancestors` is the modern control;
+   *    `X-Frame-Options` is kept alongside it for older browsers, which is the
+   *    only place it still does anything.
+   *  - `nosniff`: the API returns JSON and the app serves user-supplied
+   *    filenames in report exports. Content-type sniffing is how one of those
+   *    becomes script.
+   *  - `Referrer-Policy`: dashboard URLs carry cohort and session ids. Those
+   *    are not secrets, but they are an institution's data and have no reason
+   *    to travel to another origin in a Referer header.
+   *  - `Permissions-Policy`: the camera is granted to `self` because face
+   *    capture needs it; microphone and geolocation are denied outright,
+   *    because nothing in this product has ever asked for them and a
+   *    compromised dependency should not be able to start.
+   *
+   * Deliberately NOT here: a full Content-Security-Policy. A script-src
+   * policy strict enough to be worth having needs per-request nonces threaded
+   * through the framework's inline bootstrap, and a half-strict one
+   * (`unsafe-inline`) buys nothing while risking a blank production page.
+   * That is its own piece of work, not a line in this config.
+   *
+   * HSTS is also absent on purpose: TLS terminates at Azure Container Apps
+   * ingress, so the header belongs to whatever fronts the app, and setting it
+   * from here would apply it to plain-HTTP local development too.
+   */
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          {
+            key: "Permissions-Policy",
+            value: "camera=(self), microphone=(), geolocation=()",
+          },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

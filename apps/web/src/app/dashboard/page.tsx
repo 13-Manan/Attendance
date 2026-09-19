@@ -3,7 +3,11 @@ import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { getFacultyDashboard } from "@/modules/attendance-analytics/service";
 import { hasPermission } from "@/modules/authorization/service";
+import { getFaceServiceStatus, getInstitutionCounts } from "@/modules/institutions/overview";
+import { getInstitutionType } from "@/modules/institutions/repository";
 import { SessionRow } from "@/components/attendance/session-list";
+import { QuickActionsPanel } from "@/components/dashboard/quick-actions-panel";
+import { SystemStatusPanel } from "@/components/dashboard/system-status-panel";
 import { StatCard, StatGrid, formatSessionDate } from "@/components/ui/attendance-stat";
 import { EmptyState, Panel } from "@/components/ui/panel";
 
@@ -30,16 +34,41 @@ export default async function DashboardHomePage() {
     // shell is a worse answer than their own attendance.
     if (hasPermission(user, "attendanceRecord.read.own")) redirect("/portal");
 
-    const roleNames = user.roles.map((role) => role.name).join(", ") || "No role assigned";
+    // Neither staff nor student — a role exists but grants no attendance view
+    // at all. Rare, and previously a bare line of text; an account in this
+    // state needs to be told what to do about it, not just what it is.
+    const roleNames = user.roles.map((role) => role.name);
     return (
-      <div className="flex flex-col gap-2">
+      <div className="flex w-full max-w-2xl flex-col gap-4">
         <h1 className="text-xl font-semibold text-neutral-900">Welcome, {user.name}</h1>
-        <p className="text-sm text-neutral-500">Roles: {roleNames}</p>
+        <Panel title="Nothing is assigned to you yet">
+          <EmptyState>
+            Your account is active
+            {roleNames.length > 0 ? ` with the role ${roleNames.join(", ")}` : ""}, but it
+            does not currently grant access to any attendance records. Ask your
+            institution administrator to assign you to a class or grant the
+            permissions your role needs.
+          </EmptyState>
+        </Panel>
       </div>
     );
   }
 
-  const dashboard = await getFacultyDashboard(user);
+  // `institution.read` is the administrator's gate, and the same permission
+  // getInstitutionCounts enforces for itself — checked here only to decide
+  // what to render, never as the thing that protects the data.
+  const isInstitutionAdmin = hasPermission(user, "institution.read");
+
+  // Independent reads, issued together. The two additions cannot take the
+  // page down: counts are skipped entirely without the permission, and
+  // getFaceServiceStatus resolves to "unavailable" rather than throwing.
+  const [dashboard, counts, faceService, institutionKind] = await Promise.all([
+    getFacultyDashboard(user),
+    isInstitutionAdmin ? getInstitutionCounts(user) : Promise.resolve(null),
+    isInstitutionAdmin ? getFaceServiceStatus() : Promise.resolve(null),
+    user.institutionId ? getInstitutionType(user.institutionId) : Promise.resolve(null),
+  ]);
+
   const isAdmin = dashboard.scope === "institution";
   const isCollege = dashboard.attendanceMode === "SUBJECT_WISE";
   const pendingStudents = dashboard.pendingReview.reduce((n, s) => n + s.counts.needsReview, 0);
@@ -90,6 +119,37 @@ export default async function DashboardHomePage() {
           hint={isCollege ? undefined : "Daily attendance"}
         />
       </StatGrid>
+
+      <QuickActionsPanel user={user} institutionKind={institutionKind} />
+
+      {counts ? (
+        <Panel
+          title="Institution"
+          description="Active records across this institution."
+          action={
+            <Link
+              href="/dashboard/students"
+              className="text-xs text-neutral-600 hover:underline"
+            >
+              Manage students
+            </Link>
+          }
+        >
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <StatCard
+              label="Students"
+              value={String(counts.students)}
+              hint="Active enrolments"
+            />
+            <StatCard
+              label="Faculty & staff"
+              value={String(counts.faculty)}
+              hint="Accounts with a role"
+            />
+            <StatCard label="Classes" value={String(counts.cohorts)} />
+          </div>
+        </Panel>
+      ) : null}
 
       {dashboard.pendingReview.length > 0 ? (
         <Panel
@@ -218,6 +278,21 @@ export default async function DashboardHomePage() {
           </ul>
         )}
       </Panel>
+
+      {faceService ? (
+        // Last, because it is reference rather than a task — and admin-only,
+        // because which model a deployment runs is operational detail a
+        // classroom teacher has no action to take on.
+        <SystemStatusPanel
+          status={{
+            // The counts above came back, so the database answered. Probing it
+            // again to render a green dot would be a second round trip to
+            // learn something this page has already proven.
+            database: "operational",
+            faceService,
+          }}
+        />
+      ) : null}
     </div>
   );
 }

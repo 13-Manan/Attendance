@@ -6,7 +6,11 @@ import { recordAuditLog } from "@/modules/audit/service";
 import type { PermissionKey } from "@/modules/authorization/permissions";
 import { hashPassword, verifyPassword } from "./password";
 import { findUserByEmail, findActiveSessionByTokenHash } from "./repository";
+import { checkSessionUsable } from "./session-policy";
 import type { ResolvedRole, SessionUser } from "./types";
+
+export { checkSessionUsable };
+export type { SessionRejection } from "./session-policy";
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -142,7 +146,7 @@ export { hashPassword };
 export async function getSessionUserByRawToken(rawToken: string): Promise<SessionUser | null> {
   const tokenHash = hmacHash(env.AUTH_SECRET, rawToken);
   const session = await findActiveSessionByTokenHash(tokenHash);
-  if (!session || session.revokedAt || session.expiresAt < new Date()) return null;
-  if (session.user.status !== "ACTIVE") return null;
+  if (!session) return null;
+  if (checkSessionUsable(session)) return null;
   return toSessionUser(session.user);
 }
