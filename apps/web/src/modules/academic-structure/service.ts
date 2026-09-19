@@ -24,6 +24,7 @@ export interface CreateAcademicUnitInput {
 export interface CreateAcademicUnitDeps {
   getInstitutionType?: (institutionId: string) => Promise<InstitutionType | null>;
   getParentUnit?: (id: string) => Promise<AcademicUnit | null>;
+  getCampus?: (id: string) => Promise<{ institutionId: string } | null>;
 }
 
 async function defaultGetInstitutionType(institutionId: string): Promise<InstitutionType | null> {
@@ -32,6 +33,10 @@ async function defaultGetInstitutionType(institutionId: string): Promise<Institu
     select: { type: true },
   });
   return inst?.type ?? null;
+}
+
+async function defaultGetCampus(id: string): Promise<{ institutionId: string } | null> {
+  return prisma.campus.findUnique({ where: { id }, select: { institutionId: true } });
 }
 
 /**
@@ -66,6 +71,19 @@ export async function createAcademicUnitForRequest(
       // Cross-institution nesting would silently smuggle a parent from
       // another tenant into this tenant's tree — reject before writing.
       throw new Error("cross_institution_parent");
+    }
+  }
+
+  if (input.campusId) {
+    // Same reasoning as the parent, and the same reason it cannot be skipped:
+    // `campusId` arrives from a form, and an id belonging to another tenant
+    // would put their campus's name on this institution's screens — and on
+    // every register taken under the unit.
+    const getCampus = deps.getCampus ?? defaultGetCampus;
+    const campus = await getCampus(input.campusId);
+    if (!campus) throw new Error("campus_not_found");
+    if (campus.institutionId !== input.institutionId) {
+      throw new Error("cross_institution_campus");
     }
   }
 
@@ -123,6 +141,18 @@ export interface RenameAcademicUnitDeps {
   updateAcademicUnit?: (id: string, data: { name?: string; code?: string | null; sortOrder?: number }) => Promise<AcademicUnit>;
 }
 
+/**
+ * Renames a unit, or changes its code or its place in the order.
+ *
+ * What it does not change is the kind, the parent or the campus. Those decide
+ * where every cohort underneath it sits, and moving a GRADE under another
+ * campus would re-file the attendance taken for every class in it — so a unit
+ * in the wrong place is created again in the right one.
+ *
+ * The audit row records the whole row before and after rather than the fields
+ * that were sent: "name was 'Grade 8'" is what somebody reading the log six
+ * months later needs, and a diff of the submitted form does not say it.
+ */
 export async function renameAcademicUnitForRequest(
   actor: SessionUser,
   input: RenameAcademicUnitInput,
@@ -136,7 +166,19 @@ export async function renameAcademicUnitForRequest(
 
   const updateFn = deps.updateAcademicUnit ?? updateAcademicUnitRepo;
   const { id, ...data } = input;
-  return updateFn(id, data);
+  const updated = await updateFn(id, data);
+
+  await recordAuditLog({
+    action: "academic_unit.updated",
+    entityType: "AcademicUnit",
+    entityId: updated.id,
+    institutionId: existing.institutionId,
+    actorUserId: actor.userId,
+    beforeJson: existing,
+    afterJson: updated,
+  });
+
+  return updated;
 }
 
 /**

@@ -1,50 +1,19 @@
 "use server";
 
 import { z } from "zod";
-import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import {
   attachSubjectToCohortForRequest,
-  createSubjectForRequest,
   enrollStudentInSubjectForRequest,
 } from "./service";
 
-const createSubjectSchema = z.object({
-  code: z.string().min(1),
-  name: z.string().min(1),
-});
-
-export interface CreateSubjectFormState {
-  error?: string;
-}
-
-export async function createSubjectForm(
-  _prev: CreateSubjectFormState,
-  formData: FormData,
-): Promise<CreateSubjectFormState> {
-  const actor = await requireUser();
-  if (!actor.institutionId) return { error: "Platform accounts cannot create subjects." };
-
-  const parsed = createSubjectSchema.safeParse({
-    code: formData.get("code"),
-    name: formData.get("name"),
-  });
-  if (!parsed.success) return { error: "Please fill in all fields." };
-
-  try {
-    await createSubjectForRequest(actor, {
-      institutionId: actor.institutionId,
-      code: parsed.data.code,
-      name: parsed.data.name,
-    });
-  } catch (e) {
-    if (e instanceof Error && e.message === "subjects_are_college_only") {
-      return { error: "Subjects can only be created for a COLLEGE institution." };
-    }
-    return { error: "Could not create subject. Check the code is unique for this institution." };
-  }
-  redirect("/dashboard/academic/subjects");
-}
+/**
+ * Creating a subject used to live here too. It now lives in
+ * `directory-actions.ts#createSubjectAction`, which validates in sentences
+ * rather than in a single "fill in all fields", names the subject already using
+ * a code instead of guessing at a unique-constraint failure, and redisplays
+ * what was typed after a refusal.
+ */
 
 const attachSchema = z.object({
   cohortId: z.string().min(1),

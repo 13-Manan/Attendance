@@ -118,7 +118,11 @@ test("no query-string value can change the institution searched", () => {
 test("a module filter expands to that module's actions", () => {
   const where = buildAuditWhere("inst-1", parseAuditFilters({ module: "settings" }));
   assert.deepEqual(where.action, {
-    in: ["institution.attendance_policy_updated", "institution.face_policy_updated"],
+    in: [
+      "institution.profile_updated",
+      "institution.attendance_policy_updated",
+      "institution.face_policy_updated",
+    ],
   });
 });
 

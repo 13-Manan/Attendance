@@ -1,52 +1,16 @@
 "use server";
 
 import { z } from "zod";
-import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
-import {
-  assignFacultyToCohortForRequest,
-  createCohortForRequest,
-} from "./service";
+import { assignFacultyToCohortForRequest } from "./service";
 
-const createSchema = z.object({
-  academicUnitId: z.string().min(1),
-  academicSessionId: z.string().min(1),
-  name: z.string().min(1),
-  termLabel: z.string().min(1).optional(),
-});
-
-export interface CreateCohortFormState {
-  error?: string;
-}
-
-export async function createCohortForm(
-  _prev: CreateCohortFormState,
-  formData: FormData,
-): Promise<CreateCohortFormState> {
-  const actor = await requireUser();
-  if (!actor.institutionId) return { error: "Platform accounts cannot create cohorts." };
-
-  const parsed = createSchema.safeParse({
-    academicUnitId: formData.get("academicUnitId"),
-    academicSessionId: formData.get("academicSessionId"),
-    name: formData.get("name"),
-    termLabel: formData.get("termLabel") || undefined,
-  });
-  if (!parsed.success) return { error: "Please fill in all required fields." };
-
-  try {
-    await createCohortForRequest(actor, {
-      institutionId: actor.institutionId,
-      academicUnitId: parsed.data.academicUnitId,
-      academicSessionId: parsed.data.academicSessionId,
-      name: parsed.data.name,
-      termLabel: parsed.data.termLabel ?? null,
-    });
-  } catch {
-    return { error: "Could not create cohort. Check the academic unit and session are in your institution." };
-  }
-  redirect("/dashboard/academic/cohorts");
-}
+/**
+ * Creating a class used to live here too. It now lives in
+ * `directory-actions.ts#createCohortAction`, which validates in sentences
+ * rather than in a single "fill in all required fields", redisplays what was
+ * typed after a refusal, and lands on the class it just made. This file kept
+ * only the faculty assignment.
+ */
 
 const assignSchema = z.object({
   cohortId: z.string().min(1),

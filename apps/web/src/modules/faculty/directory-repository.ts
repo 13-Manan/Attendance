@@ -1,7 +1,18 @@
 import { prisma } from "@/lib/prisma";
+import {
+  buildStaffWhere,
+  clampFacultyPage,
+  facultyOrderBy,
+  facultyPageSkip,
+  FACULTY_PAGE_SIZE,
+  type FacultyFilters,
+} from "./directory-filters";
 import type {
+  AssignableMember,
+  ClassTeacherRow,
   CohortOption,
   CohortSubjectOption,
+  DepartmentOption,
   FacultyClassLink,
   FacultyMember,
   FacultySubjectLink,
@@ -31,6 +42,8 @@ const USER_SELECT = {
   employeeCode: true,
   status: true,
   lastLoginAt: true,
+  departmentId: true,
+  department: { select: { name: true } },
   roleAssignments: { select: { role: { select: { key: true } } } },
 } as const;
 
@@ -41,29 +54,115 @@ type UserRow = {
   employeeCode: string | null;
   status: string;
   lastLoginAt: Date | null;
+  departmentId: string | null;
+  department: { name: string } | null;
   roleAssignments: Array<{ role: { key: string } }>;
 };
 
+export interface StaffPageRows {
+  rows: UserRow[];
+  /** Rows matching the filter. */
+  total: number;
+  /** Every staff account, whatever the filter says. */
+  totalAll: number;
+  activeAll: number;
+  page: number;
+}
+
 /**
- * Staff accounts, which is every account in the institution that is not a
- * student.
+ * A page of staff accounts, which is every account in the institution that is
+ * not a student.
  *
  * Defined by exclusion rather than by listing the staff role keys, so an
  * account whose role was renamed or whose assignment was removed still appears
  * here. A person with a login who is invisible to the screen that manages
- * logins is exactly the account nobody revokes.
+ * logins is exactly the account nobody revokes — the `none: { role: { key:
+ * "STUDENT" } }` clause is written into `buildStaffWhere` unconditionally for
+ * the same reason.
+ *
+ * The count runs against the same `where` as the rows, and the page is clamped
+ * to it afterwards, so "page 7 of 2" shows the last page rather than an empty
+ * table under a heading that says there are forty results.
  */
-export async function listStaffRows(institutionId: string): Promise<UserRow[]> {
+export async function searchStaffRows(
+  institutionId: string,
+  filters: FacultyFilters,
+): Promise<StaffPageRows> {
+  const where = buildStaffWhere(institutionId, filters);
+  const unfiltered = { institutionId, AND: where.AND.slice(0, 1) };
+
+  const [total, totalAll, activeAll] = await Promise.all([
+    prisma.user.count({ where }),
+    prisma.user.count({ where: unfiltered }),
+    prisma.user.count({ where: { ...unfiltered, status: "ACTIVE" } }),
+  ]);
+
+  const page = clampFacultyPage(filters.page, total);
   const rows = await prisma.user.findMany({
-    where: {
-      institutionId,
-      roleAssignments: { none: { role: { key: "STUDENT" } } },
-    },
+    where,
     select: USER_SELECT,
+    orderBy: facultyOrderBy(filters.sort),
+    skip: facultyPageSkip(page),
+    take: FACULTY_PAGE_SIZE,
+  });
+
+  return { rows: rows as UserRow[], total, totalAll, activeAll, page };
+}
+
+/**
+ * Everyone who could be handed a class or a subject.
+ *
+ * Separate from the table's page, and deliberately three columns wide: the
+ * dropdowns need every name, but nothing on that path needs an email address
+ * or an employee code, and what is not selected cannot end up in the HTML.
+ */
+export async function listAssignableStaff(institutionId: string): Promise<AssignableMember[]> {
+  const rows = await prisma.user.findMany({
+    where: { institutionId, roleAssignments: { none: { role: { key: "STUDENT" } } } },
+    select: { id: true, name: true, status: true },
     orderBy: [{ status: "asc" }, { name: "asc" }],
     take: 1000,
   });
-  return rows as UserRow[];
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    status: row.status === "INACTIVE" ? "INACTIVE" : "ACTIVE",
+  }));
+}
+
+/**
+ * The departments a staff member may belong to.
+ *
+ * A `DEPARTMENT` node of this institution's academic tree, not a table of its
+ * own — see the note on `User.departmentId` in the schema. A school has none,
+ * so the dropdown that uses this is simply absent there.
+ */
+export async function listDepartmentOptions(institutionId: string): Promise<DepartmentOption[]> {
+  const rows = await prisma.academicUnit.findMany({
+    where: { institutionId, kind: "DEPARTMENT" },
+    select: { id: true, name: true, code: true },
+    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    take: 500,
+  });
+  return rows;
+}
+
+/**
+ * One academic unit of this institution, for the department check.
+ *
+ * Returns the kind rather than filtering on it, so the service can tell "that
+ * is not a department" from "that does not exist here" and say the useful one.
+ * Scoped by `institutionId`: a unit id pasted from another college reads as
+ * missing.
+ */
+export async function getUnitForDepartmentCheck(
+  institutionId: string,
+  unitId: string,
+): Promise<{ id: string; name: string; kind: string } | null> {
+  return prisma.academicUnit.findFirst({
+    where: { id: unitId, institutionId },
+    select: { id: true, name: true, kind: true },
+  });
 }
 
 export async function getStaffRow(institutionId: string, id: string): Promise<UserRow | null> {
@@ -71,12 +170,21 @@ export async function getStaffRow(institutionId: string, id: string): Promise<Us
   return (row as UserRow | null) ?? null;
 }
 
-/** Ids of accounts that have a password set. Selects ids, never the hash. */
-export async function listUserIdsWithPassword(institutionId: string): Promise<string[]> {
+/**
+ * Which of these accounts have a password set. Selects ids, never the hash.
+ *
+ * Asked about a specific list — the page on screen — rather than the whole
+ * institution, so the answer is exact however many staff there are rather than
+ * right up to some `take` limit and quietly wrong after it.
+ */
+export async function listUserIdsWithPassword(
+  institutionId: string,
+  ids: readonly string[],
+): Promise<string[]> {
+  if (ids.length === 0) return [];
   const rows = await prisma.user.findMany({
-    where: { institutionId, passwordHash: { not: null } },
+    where: { institutionId, id: { in: [...ids] }, passwordHash: { not: null } },
     select: { id: true },
-    take: 1000,
   });
   return rows.map((row) => row.id);
 }
@@ -109,6 +217,7 @@ export async function createStaffRow(input: {
   name: string;
   email: string;
   employeeCode: string | null;
+  departmentId: string | null;
   passwordHash: string;
   roleId: string;
 }): Promise<UserRow> {
@@ -123,6 +232,7 @@ export async function createStaffRow(input: {
         name: input.name,
         email: input.email,
         employeeCode: input.employeeCode,
+        departmentId: input.departmentId,
         passwordHash: input.passwordHash,
       },
       select: { id: true },
@@ -145,13 +255,17 @@ export async function createStaffRow(input: {
 export async function updateStaffRow(
   institutionId: string,
   id: string,
-  data: { name?: string; employeeCode?: string | null },
+  data: { name?: string; employeeCode?: string | null; departmentId?: string | null },
 ): Promise<UserRow | null> {
   const result = await prisma.user.updateMany({
     where: { id, institutionId },
     data: {
       ...(data.name !== undefined ? { name: data.name } : {}),
       ...(data.employeeCode !== undefined ? { employeeCode: data.employeeCode } : {}),
+      // Absent means "leave it alone"; null means "clear it". A school never
+      // sends the field at all, so nothing here can quietly null a column the
+      // screen was not showing.
+      ...(data.departmentId !== undefined ? { departmentId: data.departmentId } : {}),
     },
   });
   if (result.count === 0) return null;
@@ -198,22 +312,26 @@ export async function endSessionsForUser(id: string): Promise<void> {
 // Assignments
 // ---------------------------------------------------------------------------
 
-export async function listClassLinks(
-  institutionId: string,
-): Promise<Array<FacultyClassLink & { userId: string }>> {
+export async function listClassLinks(institutionId: string): Promise<ClassTeacherRow[]> {
   const rows = await prisma.cohortFaculty.findMany({
     where: { cohort: { institutionId } },
     select: {
       id: true,
       userId: true,
       role: true,
+      // The name is read here rather than looked up against the staff table,
+      // because that table is now one page at a time and the class a teacher
+      // owns must not disappear from this panel because their row is on page 2.
+      user: { select: { name: true } },
       cohort: { select: { id: true, name: true, termLabel: true } },
     },
+    orderBy: { cohort: { name: "asc" } },
     take: 2000,
   });
   return rows.map((row) => ({
     linkId: row.id,
     userId: row.userId,
+    userName: row.user.name,
     cohortId: row.cohort.id,
     cohortName: row.cohort.name,
     termLabel: row.cohort.termLabel,
@@ -358,6 +476,8 @@ export function assembleMembers(
       email: row.email,
       employeeCode: row.employeeCode,
       status: row.status === "INACTIVE" ? "INACTIVE" : "ACTIVE",
+      departmentId: row.departmentId ?? null,
+      departmentName: row.department?.name ?? null,
       lastLoginAt: row.lastLoginAt,
       canSignIn: hasPassword.has(row.id),
       roleKeys: row.roleAssignments.map((assignment) => assignment.role.key),

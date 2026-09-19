@@ -4,6 +4,7 @@ import {
   assignFacultyToCohortForRequest,
   createCohortForRequest,
   listCohortsForInstitutionRequest,
+  updateCohortForRequest,
 } from "./service.ts";
 import { ForbiddenError } from "../authorization/types.ts";
 import type { SessionUser } from "../auth-tenancy/types.ts";
@@ -122,6 +123,76 @@ test("assigning faculty rejects a user from a different institution", async () =
     /cross_institution_user/,
   );
   assert.equal(upsertCalled, false);
+});
+
+test("renaming a cohort from another institution is rejected before the write", async () => {
+  // The id is a cuid off a URL. Without this check, an administrator at inst-A
+  // could rename inst-B's class — and the audit row would be written against
+  // inst-B by an actor who was never there.
+  const admin = makeUser({ institutionId: "inst-A", permissions: ["cohort.manage"] });
+  let updateCalled = false;
+  await assert.rejects(
+    () =>
+      updateCohortForRequest(
+        admin,
+        { cohortId: "coh-1", name: "10-B" },
+        {
+          getCohortById: async () => ({ id: "coh-1", institutionId: "inst-B" } as Cohort),
+          updateCohort: async () => {
+            updateCalled = true;
+            return {} as Cohort;
+          },
+        },
+      ),
+    ForbiddenError,
+  );
+  assert.equal(updateCalled, false);
+});
+
+test("renaming a cohort that does not exist is rejected rather than creating one", async () => {
+  const admin = makeUser({ institutionId: "inst-A", permissions: ["cohort.manage"] });
+  let updateCalled = false;
+  await assert.rejects(
+    () =>
+      updateCohortForRequest(
+        admin,
+        { cohortId: "coh-gone", name: "10-B" },
+        {
+          getCohortById: async () => null,
+          updateCohort: async () => {
+            updateCalled = true;
+            return {} as Cohort;
+          },
+        },
+      ),
+    /cohort_not_found/,
+  );
+  assert.equal(updateCalled, false);
+});
+
+test("a faculty without cohort.manage cannot rename a cohort", async () => {
+  const faculty = makeUser({
+    roleKey: "FACULTY",
+    institutionId: "inst-A",
+    permissions: ["cohort.read", "student.read"],
+  });
+  let read = false;
+  await assert.rejects(
+    () =>
+      updateCohortForRequest(
+        faculty,
+        { cohortId: "coh-1", name: "10-B" },
+        {
+          getCohortById: async () => {
+            read = true;
+            return { id: "coh-1", institutionId: "inst-A" } as Cohort;
+          },
+          updateCohort: async () => ({} as Cohort),
+        },
+      ),
+    ForbiddenError,
+  );
+  assert.equal(read, false, "the permission is checked before anything is read");
 });
 
 test("a faculty without cohort.manage cannot assign class teachers", async () => {

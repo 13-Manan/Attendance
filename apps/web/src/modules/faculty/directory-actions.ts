@@ -69,6 +69,18 @@ function text(formData: FormData, field: string): string {
   return String(formData.get(field) ?? "");
 }
 
+/**
+ * A field the form may not have rendered at all.
+ *
+ * Absent and empty are different answers: a school's edit form has no
+ * department control, so it sends nothing and the stored value is left alone,
+ * while a college's form sending an empty select means "no department". Reading
+ * both as "" would make the first case clear a column nobody was shown.
+ */
+function optionalText(formData: FormData, field: string): string | undefined {
+  return formData.has(field) ? String(formData.get(field) ?? "") : undefined;
+}
+
 export async function inviteFacultyAction(
   _prev: FacultyActionState,
   formData: FormData,
@@ -79,6 +91,7 @@ export async function inviteFacultyAction(
       name: text(formData, "name"),
       email: text(formData, "email"),
       employeeCode: text(formData, "employeeCode"),
+      departmentId: text(formData, "departmentId"),
       roleKey: text(formData, "roleKey"),
     });
     refresh();
@@ -104,6 +117,7 @@ export async function updateFacultyAction(
     const updated = await updateFacultyDetails(actor, id, {
       name: text(formData, "name"),
       employeeCode: text(formData, "employeeCode"),
+      departmentId: optionalText(formData, "departmentId"),
     });
     refresh();
     return { message: `Saved. ${updated.name}'s details are updated.` };

@@ -5,6 +5,7 @@ import { requirePermission } from "@/modules/authorization/service";
 import type { PermissionKey } from "@/modules/authorization/permissions";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { hashPassword } from "@/modules/auth-tenancy/password";
+import { getInstitutionType } from "@/modules/institutions/repository";
 import * as repo from "./directory-repository";
 import {
   validateEmployeeCode,
@@ -12,6 +13,12 @@ import {
   validateFacultyName,
   validateFacultyRole,
 } from "./directory-policy";
+import {
+  EMPTY_FACULTY_FILTERS,
+  FACULTY_PAGE_SIZE,
+  facultyPageCount,
+  type FacultyFilters,
+} from "./directory-filters";
 import {
   FacultyError,
   TEMP_PASSWORD_NOTICE,
@@ -41,6 +48,14 @@ import {
  *
  * The tenant comes from the session. No function here takes an institution id.
  *
+ * ## Departments
+ *
+ * `User.departmentId` points at an `AcademicUnit`, and the database can only
+ * enforce that the row exists — not that it is a DEPARTMENT, and not that it
+ * belongs to the same institution as the person. Both checks live in
+ * `resolveDepartment` below, which is the enforcement point the schema comment
+ * on that column names. A school never sends the field at all.
+ *
  * ## Passwords
  *
  * This service is the only place in the product that sets a staff password.
@@ -56,19 +71,9 @@ import {
  */
 
 export interface FacultyDeps {
-  listStaff?: (institutionId: string) => Promise<
-    Array<{
-      id: string;
-      name: string;
-      email: string;
-      employeeCode: string | null;
-      status: string;
-      lastLoginAt: Date | null;
-      roleAssignments: Array<{ role: { key: string } }>;
-    }>
-  >;
+  searchStaff?: typeof repo.searchStaffRows;
   getStaff?: typeof repo.getStaffRow;
-  idsWithPassword?: (institutionId: string) => Promise<string[]>;
+  idsWithPassword?: (institutionId: string, ids: readonly string[]) => Promise<string[]>;
   findByEmail?: (email: string) => Promise<{ id: string } | null>;
   findRole?: (institutionId: string, key: string) => Promise<{ id: string; key: string } | null>;
   createStaff?: typeof repo.createStaffRow;
@@ -76,9 +81,13 @@ export interface FacultyDeps {
   setStatus?: typeof repo.setStaffStatusRow;
   setPassword?: (institutionId: string, id: string, hash: string) => Promise<boolean>;
   endSessions?: (id: string) => Promise<void>;
+  listAssignable?: typeof repo.listAssignableStaff;
   listClassLinks?: typeof repo.listClassLinks;
   listSubjectLinks?: typeof repo.listSubjectLinks;
   listCohorts?: typeof repo.listCohortOptions;
+  listDepartments?: typeof repo.listDepartmentOptions;
+  getUnit?: typeof repo.getUnitForDepartmentCheck;
+  institutionType?: (institutionId: string) => Promise<"SCHOOL" | "COLLEGE" | null>;
   getClassLink?: typeof repo.getClassLink;
   deleteClassLink?: (linkId: string) => Promise<void>;
   getCohortSubject?: typeof repo.getCohortSubject;
@@ -103,7 +112,7 @@ function defaultNewPassword(): string {
 
 function deps(overrides: FacultyDeps) {
   return {
-    listStaff: overrides.listStaff ?? repo.listStaffRows,
+    searchStaff: overrides.searchStaff ?? repo.searchStaffRows,
     getStaff: overrides.getStaff ?? repo.getStaffRow,
     idsWithPassword: overrides.idsWithPassword ?? repo.listUserIdsWithPassword,
     findByEmail: overrides.findByEmail ?? repo.findUserByEmailAnywhere,
@@ -113,9 +122,13 @@ function deps(overrides: FacultyDeps) {
     setStatus: overrides.setStatus ?? repo.setStaffStatusRow,
     setPassword: overrides.setPassword ?? repo.setStaffPasswordRow,
     endSessions: overrides.endSessions ?? repo.endSessionsForUser,
+    listAssignable: overrides.listAssignable ?? repo.listAssignableStaff,
     listClassLinks: overrides.listClassLinks ?? repo.listClassLinks,
     listSubjectLinks: overrides.listSubjectLinks ?? repo.listSubjectLinks,
     listCohorts: overrides.listCohorts ?? repo.listCohortOptions,
+    listDepartments: overrides.listDepartments ?? repo.listDepartmentOptions,
+    getUnit: overrides.getUnit ?? repo.getUnitForDepartmentCheck,
+    institutionType: overrides.institutionType ?? getInstitutionType,
     getClassLink: overrides.getClassLink ?? repo.getClassLink,
     deleteClassLink: overrides.deleteClassLink ?? repo.deleteClassLink,
     getCohortSubject: overrides.getCohortSubject ?? repo.getCohortSubject,
@@ -140,36 +153,101 @@ function requireInstitution(actor: SessionUser, permission: PermissionKey): stri
 // Reading
 // ---------------------------------------------------------------------------
 
+/**
+ * The screen, in one call.
+ *
+ * `members` is one page of a filtered, sorted query; `assignable`,
+ * `classTeachers` and `cohortSubjects` are institution-wide, because the panels
+ * that use them are about the institution rather than about the page on screen.
+ * A teacher on page 3 still owns their class, and the dropdown that hands out a
+ * subject still has to offer them.
+ */
 export async function getFacultyDirectory(
   actor: SessionUser,
+  filters: FacultyFilters = EMPTY_FACULTY_FILTERS,
   overrides: FacultyDeps = {},
 ): Promise<FacultyDirectory> {
   const d = deps(overrides);
   const institutionId = requireInstitution(actor, "institution.read");
 
-  const [rows, withPassword, classLinks, subjectLinks, cohorts] = await Promise.all([
-    d.listStaff(institutionId),
-    d.idsWithPassword(institutionId),
-    d.listClassLinks(institutionId),
-    d.listSubjectLinks(institutionId),
-    d.listCohorts(institutionId),
-  ]);
+  const [staffPage, classLinks, subjectLinks, cohorts, departments, type, assignable] =
+    await Promise.all([
+      d.searchStaff(institutionId, filters),
+      d.listClassLinks(institutionId),
+      d.listSubjectLinks(institutionId),
+      d.listCohorts(institutionId),
+      d.listDepartments(institutionId),
+      d.institutionType(institutionId),
+      d.listAssignable(institutionId),
+    ]);
+
+  // Asked about this page's rows only, so the answer stays exact as the staff
+  // list grows rather than right up to a `take` limit and silently wrong after.
+  const withPassword = await d.idsWithPassword(
+    institutionId,
+    staffPage.rows.map((row) => row.id),
+  );
 
   return {
-    members: repo.assembleMembers(rows, withPassword, classLinks, subjectLinks),
+    members: repo.assembleMembers(staffPage.rows, withPassword, classLinks, subjectLinks),
+    total: staffPage.total,
+    totalAll: staffPage.totalAll,
+    activeAll: staffPage.activeAll,
+    page: staffPage.page,
+    pageCount: facultyPageCount(staffPage.total),
+    pageSize: FACULTY_PAGE_SIZE,
+    assignable,
+    classTeachers: classLinks,
     cohorts,
     cohortSubjects: subjectLinks,
+    departments,
+    isCollege: type === "COLLEGE",
   };
 }
+
+type StaffRow = NonNullable<Awaited<ReturnType<typeof repo.getStaffRow>>>;
 
 async function requireMember(
   d: ReturnType<typeof deps>,
   institutionId: string,
   id: string,
-): Promise<{ id: string; name: string; email: string; employeeCode: string | null; status: string }> {
+): Promise<StaffRow> {
   const row = await d.getStaff(institutionId, id);
   if (!row) throw new FacultyError("That account does not belong to this institution.");
   return row;
+}
+
+/**
+ * Turns a submitted department into something safe to write.
+ *
+ * Two refusals, and they say different things because they send an
+ * administrator to different places: a unit that is not in this institution
+ * does not exist as far as this screen is concerned, and a unit that is a
+ * semester or a section exists but is not a department.
+ *
+ * This is the enforcement point the schema comment on `User.departmentId`
+ * names. Postgres can hold the foreign key but not the condition "and only to
+ * rows whose kind says DEPARTMENT", so if this check is not here it is nowhere.
+ */
+async function resolveDepartment(
+  d: ReturnType<typeof deps>,
+  institutionId: string,
+  raw: string,
+): Promise<string | null> {
+  const id = raw.trim();
+  if (id === "") return null;
+
+  const unit = await d.getUnit(institutionId, id);
+  if (!unit) {
+    throw new FacultyError("That department does not exist at this institution.");
+  }
+  if (unit.kind !== "DEPARTMENT") {
+    throw new FacultyError(
+      `"${unit.name}" is not a department, so somebody cannot belong to it. ` +
+        "Choose a department, or leave it blank.",
+    );
+  }
+  return unit.id;
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +260,13 @@ export interface InvitedFaculty extends IssuedPassword {
 
 export async function inviteFaculty(
   actor: SessionUser,
-  input: { name: string; email: string; employeeCode?: string; roleKey: string },
+  input: {
+    name: string;
+    email: string;
+    employeeCode?: string;
+    departmentId?: string;
+    roleKey: string;
+  },
   overrides: FacultyDeps = {},
 ): Promise<InvitedFaculty> {
   const d = deps(overrides);
@@ -192,6 +276,7 @@ export async function inviteFaculty(
   const email = validateFacultyEmail(input.email);
   const employeeCode = validateEmployeeCode(input.employeeCode);
   const roleKey = validateFacultyRole(input.roleKey);
+  const departmentId = await resolveDepartment(d, institutionId, input.departmentId ?? "");
 
   const existing = await d.findByEmail(email);
   if (existing) {
@@ -224,6 +309,7 @@ export async function inviteFaculty(
     name,
     email,
     employeeCode,
+    departmentId,
     passwordHash,
     roleId: role.id,
   });
@@ -235,7 +321,7 @@ export async function inviteFaculty(
     institutionId,
     actorUserId: actor.userId,
     // Who, what access, and nothing that could be used to sign in as them.
-    afterJson: { name, email, employeeCode, roleKey },
+    afterJson: { name, email, employeeCode, departmentId, roleKey },
   });
 
   return {
@@ -245,10 +331,23 @@ export async function inviteFaculty(
   };
 }
 
+/**
+ * Edits a staff member's own details.
+ *
+ * `departmentId` is optional in the TypeScript sense and that distinction is
+ * load-bearing: absent means "this screen was not showing a department, leave
+ * it alone" — which is what a school sends — and an empty string means "clear
+ * it". Treating the two alike would have a school's edit form quietly
+ * unassigning every department the day an institution changed type.
+ *
+ * The email address is not here. Changing what somebody signs in with is an
+ * account move, not an edit; doing it in place would break their open sessions
+ * and detach them from their own audit trail.
+ */
 export async function updateFacultyDetails(
   actor: SessionUser,
   id: string,
-  input: { name: string; employeeCode?: string },
+  input: { name: string; employeeCode?: string; departmentId?: string },
   overrides: FacultyDeps = {},
 ): Promise<FacultyMember> {
   const d = deps(overrides);
@@ -257,8 +356,16 @@ export async function updateFacultyDetails(
   const before = await requireMember(d, institutionId, id);
   const name = validateFacultyName(input.name);
   const employeeCode = validateEmployeeCode(input.employeeCode);
+  const departmentId =
+    input.departmentId === undefined
+      ? undefined
+      : await resolveDepartment(d, institutionId, input.departmentId);
 
-  const updated = await d.updateStaff(institutionId, id, { name, employeeCode });
+  const updated = await d.updateStaff(institutionId, id, {
+    name,
+    employeeCode,
+    ...(departmentId === undefined ? {} : { departmentId }),
+  });
   if (!updated) throw new FacultyError("That account does not belong to this institution.");
 
   await d.audit({
@@ -267,8 +374,16 @@ export async function updateFacultyDetails(
     entityId: id,
     institutionId,
     actorUserId: actor.userId,
-    beforeJson: { name: before.name, employeeCode: before.employeeCode },
-    afterJson: { name: updated.name, employeeCode: updated.employeeCode },
+    beforeJson: {
+      name: before.name,
+      employeeCode: before.employeeCode,
+      departmentId: before.departmentId,
+    },
+    afterJson: {
+      name: updated.name,
+      employeeCode: updated.employeeCode,
+      departmentId: updated.departmentId,
+    },
   });
 
   return repo.assembleMembers([updated], [], [], [])[0];

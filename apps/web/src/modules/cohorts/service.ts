@@ -12,6 +12,7 @@ import {
   getCohortById as getCohortByIdRepo,
   listCohortsByInstitution as listCohortsByInstitutionRepo,
   listCohortsForFaculty as listCohortsForFacultyRepo,
+  updateCohort as updateCohortRepo,
   upsertCohortFaculty as upsertCohortFacultyRepo,
 } from "./repository";
 import type { Cohort, CohortFaculty, CohortFacultyRole } from "./types";
@@ -71,6 +72,54 @@ export async function createCohortForRequest(
     afterJson: created,
   });
   return created;
+}
+
+export interface UpdateCohortInput {
+  cohortId: string;
+  name?: string;
+  termLabel?: string | null;
+}
+
+export interface UpdateCohortDeps {
+  getCohortById?: (id: string) => Promise<Cohort | null>;
+  updateCohort?: (id: string, data: { name?: string; termLabel?: string | null }) => Promise<Cohort>;
+}
+
+/**
+ * Renames a cohort. Only the label moves: the academic unit and the academic
+ * session are what the cohort *is*, and enrollments, attendance sessions and
+ * face-review rows already point at this row on that understanding. Moving
+ * "Grade 8 A, 2026-27" onto another year would silently re-file a year of
+ * attendance, so a class in the wrong year is created again in the right one
+ * rather than edited across.
+ */
+export async function updateCohortForRequest(
+  actor: SessionUser,
+  input: UpdateCohortInput,
+  deps: UpdateCohortDeps = {},
+): Promise<Cohort> {
+  requirePermission(actor, "cohort.manage");
+
+  const getCohort = deps.getCohortById ?? getCohortByIdRepo;
+  const before = await getCohort(input.cohortId);
+  if (!before) throw new Error("cohort_not_found");
+  requireSameInstitution(actor, before.institutionId);
+
+  const updateFn = deps.updateCohort ?? updateCohortRepo;
+  const after = await updateFn(input.cohortId, {
+    ...(input.name === undefined ? {} : { name: input.name }),
+    ...(input.termLabel === undefined ? {} : { termLabel: input.termLabel }),
+  });
+  await recordAuditLog({
+    action: "cohort.updated",
+    entityType: "Cohort",
+    entityId: after.id,
+    institutionId: before.institutionId,
+    actorUserId: actor.userId,
+    beforeJson: before,
+    afterJson: after,
+  });
+  return after;
 }
 
 export interface ListCohortsDeps {

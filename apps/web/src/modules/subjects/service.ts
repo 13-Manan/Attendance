@@ -15,6 +15,7 @@ import {
   getSubjectById as getSubjectByIdRepo,
   listCohortSubjectsByCohort as listCohortSubjectsByCohortRepo,
   listSubjectsByInstitution as listSubjectsByInstitutionRepo,
+  updateSubject as updateSubjectRepo,
 } from "./repository";
 import type { CohortSubject, StudentSubjectEnrollment, Subject } from "./types";
 
@@ -66,6 +67,63 @@ export async function createSubjectForRequest(
     afterJson: created,
   });
   return created;
+}
+
+export interface UpdateSubjectInput {
+  id: string;
+  code: string;
+  name: string;
+}
+
+export interface UpdateSubjectDeps {
+  getSubjectById?: (id: string) => Promise<Subject | null>;
+  updateSubject?: (id: string, data: { code: string; name: string }) => Promise<Subject>;
+}
+
+/**
+ * Renames a subject, or corrects its code.
+ *
+ * The institution is not editable and is not an argument: a subject moving
+ * between institutions is not a correction, it is a different subject, and the
+ * cohorts that offer this one plus every register taken for them point here on
+ * the understanding that it stays put.
+ *
+ * The code is editable, which is a deliberate difference from the academic
+ * unit's kind: a code is a label printed on a timetable, not a thing the data
+ * model hangs off — nothing joins on it. Changing it to one already in use is
+ * refused by the database's own `@@unique([institutionId, code])`, which is the
+ * only check that cannot race.
+ *
+ * The audit row records the whole row before and after rather than the fields
+ * that were sent: "code was PHY101" is what somebody reading the log six months
+ * later needs.
+ */
+export async function updateSubjectForRequest(
+  actor: SessionUser,
+  input: UpdateSubjectInput,
+  deps: UpdateSubjectDeps = {},
+): Promise<Subject> {
+  requirePermission(actor, "academicStructure.manage");
+
+  const getFn = deps.getSubjectById ?? getSubjectByIdRepo;
+  const existing = await getFn(input.id);
+  if (!existing) throw new Error("subject_not_found");
+  requireSameInstitution(actor, existing.institutionId);
+
+  const updateFn = deps.updateSubject ?? updateSubjectRepo;
+  const updated = await updateFn(input.id, { code: input.code, name: input.name });
+
+  await recordAuditLog({
+    action: "subject.updated",
+    entityType: "Subject",
+    entityId: updated.id,
+    institutionId: existing.institutionId,
+    actorUserId: actor.userId,
+    beforeJson: existing,
+    afterJson: updated,
+  });
+
+  return updated;
 }
 
 export interface ListSubjectsDeps {

@@ -70,6 +70,8 @@ export const AUDIT_MODULES: readonly AuditModule[] = [
     actions: [
       "student.created",
       "student.updated",
+      "student.archived",
+      "student.restored",
       "enrollment.created",
       "enrollment.updated",
       "student_subject_enrollment.created",
@@ -80,12 +82,23 @@ export const AUDIT_MODULES: readonly AuditModule[] = [
     label: "Academic structure",
     actions: [
       "academic_unit.created",
+      "academic_unit.updated",
       "academic_session.created",
+      "academic_session.updated",
+      "academic_session.activated",
       "academic_session.archived",
+      "academic_session.restored",
       "cohort.created",
+      "cohort.updated",
       "subject.created",
+      "subject.updated",
       "cohort_subject.attached",
     ],
+  },
+  {
+    key: "campuses",
+    label: "Campuses",
+    actions: ["campus.created", "campus.updated", "campus.closed", "campus.reopened"],
   },
   {
     key: "attendance",
@@ -114,7 +127,11 @@ export const AUDIT_MODULES: readonly AuditModule[] = [
   {
     key: "settings",
     label: "Institution settings",
-    actions: ["institution.attendance_policy_updated", "institution.face_policy_updated"],
+    actions: [
+      "institution.profile_updated",
+      "institution.attendance_policy_updated",
+      "institution.face_policy_updated",
+    ],
   },
   {
     key: "api",

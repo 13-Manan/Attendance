@@ -15,14 +15,17 @@ import {
 import {
   FACULTY_ROLE_DESCRIPTIONS,
   FACULTY_ROLE_KEYS,
+  type AssignableMember,
   type CohortOption,
   type CohortSubjectOption,
+  type DepartmentOption,
   type FacultyMember,
 } from "@/modules/faculty/directory-types";
 import { Panel } from "@/components/ui/panel";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { useConfirm } from "@/components/ui/use-confirm";
 
 const initialState: FacultyActionState = {};
 
@@ -64,6 +67,21 @@ function Banner({ state }: { state: FacultyActionState }) {
   return null;
 }
 
+/**
+ * One outcome from the stop/restore pair, kept on screen only while it is
+ * still true of the row.
+ *
+ * Each half holds its own action state, and a state outlives the click that
+ * produced it. An error always belongs on screen: it explains a row that did
+ * not change. A success message belongs there only while the row still matches
+ * it — otherwise stopping somebody leaves the green "can sign in again" from
+ * the restore before it sitting directly under the word "Stopped".
+ */
+function stillTrue(state: FacultyActionState, matchesRow: boolean): FacultyActionState {
+  if (state.error) return state;
+  return matchesRow ? state : {};
+}
+
 function Note({ children }: { children: ReactNode }) {
   return <p className="text-xs text-neutral-500">{children}</p>;
 }
@@ -100,7 +118,40 @@ function PasswordReveal({ state }: { state: FacultyActionState }) {
 // Accounts
 // ---------------------------------------------------------------------------
 
-export function InviteFacultyForm() {
+/**
+ * The department control, rendered only where departments exist.
+ *
+ * A school has none, and the field is then absent from the form rather than
+ * present and empty — the action reads "absent" as "leave it alone", so a
+ * school's edit can never clear a column it was never shown. See
+ * `optionalText` in `directory-actions.ts`.
+ */
+function DepartmentField({
+  departments,
+  id,
+  defaultValue = "",
+}: {
+  departments: DepartmentOption[];
+  id: string;
+  defaultValue?: string;
+}) {
+  if (departments.length === 0) return null;
+  return (
+    <Field label="Department (optional)" htmlFor={id}>
+      <Select id={id} name="departmentId" defaultValue={defaultValue}>
+        <option value="">Not recorded</option>
+        {departments.map((department) => (
+          <option key={department.id} value={department.id}>
+            {department.name}
+            {department.code ? ` (${department.code})` : ""}
+          </option>
+        ))}
+      </Select>
+    </Field>
+  );
+}
+
+export function InviteFacultyForm({ departments }: { departments: DepartmentOption[] }) {
   const [state, formAction, pending] = useActionState(inviteFacultyAction, initialState);
   const [open, setOpen] = useState(false);
 
@@ -154,6 +205,8 @@ export function InviteFacultyForm() {
             <Input id="employeeCode" name="employeeCode" maxLength={40} placeholder="T-14" />
           </Field>
 
+          <DepartmentField departments={departments} id="departmentId" />
+
           <fieldset className="flex flex-col gap-2">
             <legend className="text-sm font-medium text-neutral-700">What may they do?</legend>
             {FACULTY_ROLE_KEYS.map((key, index) => (
@@ -196,16 +249,31 @@ export function InviteFacultyForm() {
  * because a hurried "stop this account" should not require getting the name
  * field right first. Stopping asks for confirmation and says what it does and
  * does not erase; that sentence is the whole reason the confirm step exists.
+ *
+ * Stopping and restoring hold one `useActionState` each rather than sharing
+ * one whose action is picked from `member.status`. A row that has just been
+ * stopped re-renders in place, and `useActionState` keeps the action it was
+ * mounted with: the shared version left "Restore access" wired to the stop
+ * action, so the click that was meant to undo the stop came back "that account
+ * is already stopped" and the person stayed locked out. Two constant actions
+ * cannot drift that way.
  */
-export function MemberActions({ member }: { member: FacultyMember }) {
+export function MemberActions({
+  member,
+  departments,
+}: {
+  member: FacultyMember;
+  departments: DepartmentOption[];
+}) {
   const [editState, editAction, editing] = useActionState(updateFacultyAction, initialState);
   const [resetState, resetAction, resetting] = useActionState(resetPasswordAction, initialState);
-  const [statusState, statusAction, changing] = useActionState(
-    member.status === "ACTIVE" ? deactivateFacultyAction : reactivateFacultyAction,
+  const [stopState, stopAction, stopping] = useActionState(deactivateFacultyAction, initialState);
+  const [restoreState, restoreAction, restoring] = useActionState(
+    reactivateFacultyAction,
     initialState,
   );
   const [open, setOpen] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useConfirm(member.status === "ACTIVE");
 
   return (
     <div className="flex flex-col gap-2">
@@ -229,25 +297,25 @@ export function MemberActions({ member }: { member: FacultyMember }) {
             </Button>
           )
         ) : (
-          <form action={statusAction}>
+          <form action={restoreAction}>
             <input type="hidden" name="id" value={member.id} />
-            <Button type="submit" disabled={changing}>
-              {changing ? "Restoring…" : "Restore access"}
+            <Button type="submit" disabled={restoring}>
+              {restoring ? "Restoring…" : "Restore access"}
             </Button>
           </form>
         )}
       </div>
 
-      {confirming && member.status === "ACTIVE" ? (
-        <form action={statusAction} className="flex flex-col items-start gap-1.5">
+      {confirming ? (
+        <form action={stopAction} className="flex flex-col items-start gap-1.5">
           <input type="hidden" name="id" value={member.id} />
           <p className="text-xs text-neutral-600">
             {member.name} will be signed out now and unable to sign in. The registers they took and
             the corrections they made are kept, and so is their name on them.
           </p>
           <div className="flex gap-2">
-            <Button type="submit" variant="danger" disabled={changing}>
-              {changing ? "Stopping…" : "Stop access"}
+            <Button type="submit" variant="danger" disabled={stopping}>
+              {stopping ? "Stopping…" : "Stop access"}
             </Button>
             <Button type="button" variant="secondary" onClick={() => setConfirming(false)}>
               Cancel
@@ -256,7 +324,8 @@ export function MemberActions({ member }: { member: FacultyMember }) {
         </form>
       ) : null}
 
-      <Banner state={statusState} />
+      <Banner state={stillTrue(stopState, member.status !== "ACTIVE")} />
+      <Banner state={stillTrue(restoreState, member.status === "ACTIVE")} />
       <Banner state={resetState} />
       <PasswordReveal state={resetState} />
 
@@ -281,6 +350,11 @@ export function MemberActions({ member }: { member: FacultyMember }) {
               defaultValue={member.employeeCode ?? ""}
             />
           </Field>
+          <DepartmentField
+            departments={departments}
+            id={`department-${member.id}`}
+            defaultValue={member.departmentId ?? ""}
+          />
           <Note>
             The email address is not editable here. Changing what somebody signs in with is an
             account move, not an edit, and doing it in place would silently break their sessions
@@ -306,7 +380,8 @@ export function AssignClassTeacherForm({
   members,
 }: {
   cohorts: CohortOption[];
-  members: FacultyMember[];
+  /** Everyone assignable, not the page of the table on screen. */
+  members: AssignableMember[];
 }) {
   const [state, formAction, pending] = useActionState(assignClassTeacherAction, initialState);
   const active = members.filter((member) => member.status === "ACTIVE");
@@ -316,6 +391,17 @@ export function AssignClassTeacherForm({
       <Note>
         There are no classes yet. Create one under Academic management, then come back to say who
         teaches it.
+      </Note>
+    );
+  }
+
+  if (active.length === 0) {
+    // An empty dropdown next to an Assign button is a trap: it looks usable and
+    // cannot succeed. Say which half is missing instead.
+    return (
+      <Note>
+        There is nobody to assign. Every staff account is stopped — add one, or restore an existing
+        account, and it will appear here.
       </Note>
     );
   }
@@ -395,7 +481,7 @@ export function SubjectFacultySelect({
   members,
 }: {
   offering: CohortSubjectOption;
-  members: FacultyMember[];
+  members: AssignableMember[];
 }) {
   const [state, formAction, pending] = useActionState(setSubjectFacultyAction, initialState);
   const active = members.filter(

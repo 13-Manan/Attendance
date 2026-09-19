@@ -31,6 +31,27 @@ export const FACULTY_ROLE_KEYS = ["FACULTY", "CLASS_TEACHER", "ATTENDANCE_OPERAT
 export type FacultyRoleKey = (typeof FACULTY_ROLE_KEYS)[number];
 
 /**
+ * Every role a staff account in an institution can hold — which is a longer
+ * list than the three this screen may *grant*.
+ *
+ * Used by the role filter, so an administrator can find the people who already
+ * hold a role this form would not hand out. PLATFORM_SUPER_ADMIN is absent
+ * because such an account has no institution and so never appears in an
+ * institution-scoped list; STUDENT is absent because the directory is defined
+ * as everyone who is not one.
+ */
+export const STAFF_ROLE_KEYS = [
+  "INSTITUTION_ADMIN",
+  "SCHOOL_ADMIN",
+  "COLLEGE_ADMIN",
+  "FACULTY",
+  "CLASS_TEACHER",
+  "ATTENDANCE_OPERATOR",
+] as const;
+
+export type StaffRoleKey = (typeof STAFF_ROLE_KEYS)[number];
+
+/**
  * What each role means in a sentence, for the invite form.
  *
  * The role names themselves are editable per institution (`Role.name`), so
@@ -73,6 +94,16 @@ export interface FacultyMember {
   email: string;
   employeeCode: string | null;
   status: "ACTIVE" | "INACTIVE";
+  /**
+   * The department this person belongs to, at a college.
+   *
+   * Null at a school, where the concept does not exist, and null at a college
+   * until somebody records it — an unassigned teacher is a real state, not a
+   * missing field. The id points at an `AcademicUnit` of kind DEPARTMENT; the
+   * service is what enforces the kind, because the database cannot.
+   */
+  departmentId: string | null;
+  departmentName: string | null;
   lastLoginAt: Date | null;
   /**
    * Whether a password has been set. Derived from a separate query that
@@ -102,10 +133,54 @@ export interface CohortOption {
   termLabel: string | null;
 }
 
+/** A department a staff member can belong to. Colleges only. */
+export interface DepartmentOption {
+  id: string;
+  name: string;
+  code: string | null;
+}
+
+/**
+ * Somebody who can be handed a class or a subject.
+ *
+ * Deliberately thinner than a `FacultyMember`: the assignment dropdowns need a
+ * name and whether the account still works, and they need *everybody* rather
+ * than the page of the table currently on screen. Sending the full member for
+ * each would put every teacher's email and employee code into the HTML of a
+ * screen that is only choosing between names.
+ */
+export interface AssignableMember {
+  id: string;
+  name: string;
+  status: "ACTIVE" | "INACTIVE";
+}
+
+/** A class-teacher link with the name of the person it belongs to. */
+export interface ClassTeacherRow extends FacultyClassLink {
+  userId: string;
+  userName: string;
+}
+
 export interface FacultyDirectory {
+  /** The current page of the staff table, already filtered and sorted. */
   members: FacultyMember[];
+  /** Matching the current filter. */
+  total: number;
+  /** Every staff account, however the list is filtered — the honest headline. */
+  totalAll: number;
+  activeAll: number;
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  /** Everyone who can be assigned, not only the page on screen. */
+  assignable: AssignableMember[];
+  /** Every class-teacher link in the institution, for its own panel. */
+  classTeachers: ClassTeacherRow[];
   cohorts: CohortOption[];
   cohortSubjects: CohortSubjectOption[];
+  departments: DepartmentOption[];
+  /** Departments are a college idea. A school is not shown the column. */
+  isCollege: boolean;
 }
 
 /**

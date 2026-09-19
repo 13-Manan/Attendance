@@ -12,6 +12,35 @@ export interface AcademicUnitLabels {
   GENERIC: string;
 }
 
+/**
+ * The wording a school gets before anybody customises it.
+ *
+ * In `types.ts` rather than beside its resolver in `service.ts` for the reason
+ * spelled out under `DEFAULT_LOW_ATTENDANCE_THRESHOLD` below: this file
+ * imports nothing but a type, so a form, a component or a pure policy module
+ * can compare against the defaults without dragging Prisma into the bundle or
+ * into the test runner. `service.ts` re-exports it, so existing import paths
+ * are unchanged.
+ */
+export const DEFAULT_ACADEMIC_UNIT_LABELS: AcademicUnitLabels = {
+  DEPARTMENT: "Department",
+  GRADE: "Grade",
+  SEMESTER: "Semester",
+  COURSE: "Course",
+  SECTION: "Section",
+  GENERIC: "Group",
+};
+
+/** The keys of `AcademicUnitLabels`, in the order a form should show them. */
+export const ACADEMIC_UNIT_LABEL_KEYS = [
+  "DEPARTMENT",
+  "GRADE",
+  "SEMESTER",
+  "COURSE",
+  "SECTION",
+  "GENERIC",
+] as const;
+
 export interface ConfidenceThresholds {
   /** aiConfidence >= presentMin => PRESENT */
   presentMin: number;

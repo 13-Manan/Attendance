@@ -1,7 +1,7 @@
 import { requirePermission, requireSameInstitution } from "@/modules/authorization/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { getInstitutionById as getInstitutionByIdRepo } from "./repository";
-import { DEFAULT_LOW_ATTENDANCE_THRESHOLD } from "./types";
+import { DEFAULT_ACADEMIC_UNIT_LABELS, DEFAULT_LOW_ATTENDANCE_THRESHOLD } from "./types";
 import type { Institution } from "./types";
 import type {
   AcademicUnitLabels,
@@ -9,17 +9,6 @@ import type {
   ConfidenceThresholds,
   InstitutionSettings,
 } from "./types";
-
-// Defaults keep the platform usable before an institution admin customizes
-// labels — a school and a college both get sane out-of-the-box wording.
-const DEFAULT_ACADEMIC_UNIT_LABELS: AcademicUnitLabels = {
-  DEPARTMENT: "Department",
-  GRADE: "Grade",
-  SEMESTER: "Semester",
-  COURSE: "Course",
-  SECTION: "Section",
-  GENERIC: "Group",
-};
 
 const DEFAULT_CONFIDENCE_THRESHOLDS: ConfidenceThresholds = {
   presentMin: 0.62,
@@ -63,7 +52,7 @@ export function resolveAttendanceMode(institution: Institution): AttendanceMode 
 
 /** Re-exported so existing callers keep their import path. Defined in
  * `types.ts`, which components can import without pulling in Prisma. */
-export { DEFAULT_LOW_ATTENDANCE_THRESHOLD };
+export { DEFAULT_ACADEMIC_UNIT_LABELS, DEFAULT_LOW_ATTENDANCE_THRESHOLD };
 
 /**
  * Clamped to 0-100: a threshold outside that range cannot describe a

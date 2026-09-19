@@ -4,6 +4,7 @@ import {
   attachSubjectToCohortForRequest,
   createSubjectForRequest,
   enrollStudentInSubjectForRequest,
+  updateSubjectForRequest,
 } from "./service.ts";
 import { ForbiddenError } from "../authorization/types.ts";
 import type { SessionUser } from "../auth-tenancy/types.ts";
@@ -145,4 +146,83 @@ test("a faculty without enrollment.manage cannot enroll a student in a subject",
       ),
     ForbiddenError,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Renaming
+//
+// The institution is not an argument, so the only way to reach another tenant's
+// subject is by id — which is why the row is read and checked before anything
+// is written. All three refusals below happen before the update, so the denial
+// paths never touch the database.
+// ---------------------------------------------------------------------------
+
+test("renaming a subject from another institution is denied before the write", async () => {
+  const admin = makeUser({ institutionId: "inst-A", permissions: ["academicStructure.manage"] });
+  let written = false;
+
+  await assert.rejects(
+    () =>
+      updateSubjectForRequest(
+        admin,
+        { id: "sub-from-inst-B", code: "PHY301", name: "Quantum Mechanics" },
+        {
+          getSubjectById: async () =>
+            ({ id: "sub-from-inst-B", institutionId: "inst-B" }) as Subject,
+          updateSubject: async () => {
+            written = true;
+            return {} as Subject;
+          },
+        },
+      ),
+    ForbiddenError,
+  );
+  assert.equal(written, false);
+});
+
+test("renaming a subject that does not exist is refused", async () => {
+  const admin = makeUser({ institutionId: "inst-A", permissions: ["academicStructure.manage"] });
+  let written = false;
+
+  await assert.rejects(
+    () =>
+      updateSubjectForRequest(
+        admin,
+        { id: "gone", code: "PHY301", name: "Quantum Mechanics" },
+        {
+          getSubjectById: async () => null,
+          updateSubject: async () => {
+            written = true;
+            return {} as Subject;
+          },
+        },
+      ),
+    /subject_not_found/,
+  );
+  assert.equal(written, false);
+});
+
+test("a faculty cannot rename a subject", async () => {
+  const faculty = makeUser({
+    roleKey: "FACULTY",
+    institutionId: "inst-A",
+    permissions: ["cohort.read", "student.read"],
+  });
+  let read = false;
+
+  await assert.rejects(
+    () =>
+      updateSubjectForRequest(
+        faculty,
+        { id: "sub-1", code: "PHY301", name: "Quantum Mechanics" },
+        {
+          getSubjectById: async () => {
+            read = true;
+            return { id: "sub-1", institutionId: "inst-A" } as Subject;
+          },
+        },
+      ),
+    ForbiddenError,
+  );
+  assert.equal(read, false, "the permission is checked before anything is read");
 });

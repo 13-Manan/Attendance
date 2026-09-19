@@ -1,7 +1,16 @@
 "use server";
 
+/**
+ * The typed, non-form entry points for student writes.
+ *
+ * The screens under /dashboard/students use `directory-actions.ts`, which reads
+ * a FormData and returns a sentence. These two stay because they are the shape
+ * a programmatic caller wants — an object in, the student out, errors thrown —
+ * and both go through the service, so permission, tenancy, audit and the
+ * webhook apply to them exactly as they do to everything else.
+ */
+
 import { z } from "zod";
-import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { createStudent as createStudentService, updateStudent as updateStudentService } from "./service";
 
@@ -34,35 +43,4 @@ export async function updateStudent(input: z.infer<typeof updateStudentSchema>) 
   const actor = await requireUser();
   const parsed = updateStudentSchema.parse(input);
   return updateStudentService(actor, parsed);
-}
-
-export interface CreateStudentFormState {
-  error?: string;
-}
-
-/** Form-bound wrapper for the students/new page's useActionState form. */
-export async function createStudentForm(
-  _prevState: CreateStudentFormState,
-  formData: FormData,
-): Promise<CreateStudentFormState> {
-  const actor = await requireUser();
-  const parsed = createStudentSchema.safeParse({
-    institutionId: formData.get("institutionId"),
-    studentCode: formData.get("studentCode"),
-    firstName: formData.get("firstName"),
-    lastName: formData.get("lastName"),
-    email: formData.get("email") || null,
-    phone: formData.get("phone") || null,
-  });
-  if (!parsed.success) {
-    return { error: "Please fill in all required fields." };
-  }
-
-  try {
-    await createStudentService(actor, parsed.data);
-  } catch {
-    return { error: "Could not create student. Check the student code is unique for this institution." };
-  }
-
-  redirect("/dashboard/students");
 }

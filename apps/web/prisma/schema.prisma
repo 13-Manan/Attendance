@@ -101,16 +101,26 @@ enum CohortFacultyRole {
 // ---------------------------------------------------------------------------
 
 model Institution {
-  id        String          @id @default(cuid())
-  name      String
-  type      InstitutionType
-  timezone  String          @default("UTC")
+  id           String          @id @default(cuid())
+  name         String
+  type         InstitutionType
+  timezone     String          @default("UTC")
+  // Contact details for the institution itself — the address a report is
+  // headed with and the number a parent rings. Columns rather than keys in
+  // `settings` because they are profile facts about the tenant, not knobs
+  // that change how the software behaves: everything in `settings` alters
+  // product behaviour, and mixing the two makes it impossible to say which
+  // changes are safe. All nullable: an institution created before this
+  // existed is not incomplete, it simply has not filled them in.
+  contactEmail String?
+  contactPhone String?
+  addressLine  String?
   // e.g. { academicUnitLabels: { grade: "Grade", section: "Section" },
   //        confidenceThresholds: { presentMin: 0.62, reviewMin: 0.45 },
   //        attendanceMode: "DAILY" | "SUBJECT_WISE" }
-  settings  Json            @default("{}")
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
+  settings     Json            @default("{}")
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
 
   campuses         Campus[]
   users            User[]
@@ -150,23 +160,35 @@ model Campus {
 }
 
 model User {
-  id            String       @id @default(cuid())
+  id            String        @id @default(cuid())
   // Nullable: null only for a platform-level user (holds a PLATFORM_SUPER_ADMIN
   // assignment, which is itself institutionId-less). Every other user must have
   // one — enforced in modules/auth-tenancy/service.ts, not by a DB constraint
   // Prisma can't express (conditional NOT NULL).
   institutionId String?
-  institution   Institution? @relation(fields: [institutionId], references: [id])
+  institution   Institution?  @relation(fields: [institutionId], references: [id])
   campusId      String?
-  campus        Campus?      @relation(fields: [campusId], references: [id])
-  email         String       @unique
+  campus        Campus?       @relation(fields: [campusId], references: [id])
+  email         String        @unique
   name          String
-  status        UserStatus   @default(ACTIVE)
+  status        UserStatus    @default(ACTIVE)
   passwordHash  String?
   employeeCode  String?
+  // The department a faculty member belongs to, at a college. Points at an
+  // AcademicUnit rather than a new Department table for the reason the whole
+  // school/college abstraction exists (see the note above AcademicUnit): a
+  // department is already a node in that tree, and a parallel table would be
+  // a second answer to "what departments does this institution have".
+  //
+  // Nullable and unenforced by kind at the database level — the service layer
+  // (modules/faculty/directory-service.ts) is what refuses a unit that is not
+  // a DEPARTMENT of this institution, because Prisma cannot express "FK, but
+  // only to rows whose kind column says DEPARTMENT".
+  departmentId  String?
+  department    AcademicUnit? @relation(fields: [departmentId], references: [id])
   lastLoginAt   DateTime?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 
   roleAssignments UserRoleAssignment[]
   sessions        Session[]
@@ -178,6 +200,9 @@ model User {
 
   @@index([institutionId])
   @@index([campusId])
+  // Postgres does not index a foreign key on its own, and the faculty
+  // directory filters staff by department.
+  @@index([departmentId])
 }
 
 // Server-side, revocable session (ADR-0007). tokenHash is HMAC-SHA256 of the
@@ -260,23 +285,32 @@ model UserRoleAssignment {
 // ---------------------------------------------------------------------------
 
 model Student {
-  id            String           @id @default(cuid())
-  institutionId String
-  institution   Institution      @relation(fields: [institutionId], references: [id])
-  campusId      String?
-  campus        Campus?          @relation(fields: [campusId], references: [id])
+  id              String           @id @default(cuid())
+  institutionId   String
+  institution     Institution      @relation(fields: [institutionId], references: [id])
+  campusId        String?
+  campus          Campus?          @relation(fields: [campusId], references: [id])
   // Optional link to a login-capable User (a STUDENT-role account) for a
   // future student portal. Nullable — most Student rows have no login yet.
-  userId        String?          @unique
-  user          User?            @relation(fields: [userId], references: [id])
-  studentCode   String
-  firstName     String
-  lastName      String
-  email         String?
-  phone         String?
-  status        EnrollmentStatus @default(ACTIVE)
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
+  userId          String?          @unique
+  user            User?            @relation(fields: [userId], references: [id])
+  studentCode     String
+  firstName       String
+  lastName        String
+  email           String?
+  phone           String?
+  // Admission record. Distinct from `studentCode`, which is this system's
+  // handle for the row: an admission number is the institution's own, issued
+  // once at intake, and the two are the same string at some institutions and
+  // unrelated at others. Deliberately NOT unique — a re-admission legitimately
+  // reuses a number at some institutions, and a constraint that blocks a
+  // clerk from recording what the register says is a constraint that gets
+  // worked around with a fake value.
+  admissionNumber String?
+  admissionDate   DateTime?
+  status          EnrollmentStatus @default(ACTIVE)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
 
   enrollments        Enrollment[]
   subjectEnrollments StudentSubjectEnrollment[]
@@ -311,7 +345,11 @@ model AcademicUnit {
   metadata      Json             @default("{}")
   createdAt     DateTime         @default(now())
 
-  cohorts Cohort[]
+  cohorts        Cohort[]
+  /**
+   * Faculty whose department this unit is. Only ever set on a DEPARTMENT.
+   */
+  facultyMembers User[]
 
   @@index([institutionId])
   @@index([parentId])
@@ -327,7 +365,24 @@ model AcademicSession {
   name          String
   startDate     DateTime
   endDate       DateTime
+  // Not archived. A session stays active until somebody archives it, and it is
+  // never deleted: Cohorts point at it and the attendance history under them
+  // has to stay readable.
   isActive      Boolean     @default(true)
+  // The academic year the institution is actually in right now — what a new
+  // student is enrolled into and what a report means by "this year".
+  //
+  // Separate from `isActive` because an institution routinely has two sessions
+  // that are both un-archived: the one running and the one it has already set
+  // up for next year. Overloading `isActive` would make creating next year's
+  // session in March silently move every default onto it.
+  //
+  // At most one per institution. Enforced in a transaction by
+  // `setCurrentAcademicSessionForRequest`, not by the database: Prisma cannot
+  // express a partial unique index (`UNIQUE (institutionId) WHERE isCurrent`),
+  // and a plain unique index on (institutionId, isCurrent) would also forbid
+  // the many rows that are legitimately false.
+  isCurrent     Boolean     @default(false)
   createdAt     DateTime    @default(now())
 
   cohorts Cohort[]

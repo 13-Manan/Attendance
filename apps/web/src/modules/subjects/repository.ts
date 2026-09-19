@@ -22,6 +22,18 @@ export function createSubject(data: CreateSubjectData): Promise<Subject> {
   return prisma.subject.create({ data });
 }
 
+/**
+ * By id alone, because the only caller has already read the row through
+ * `getSubjectById` and checked the institution on it. `institutionId` is not
+ * in the `data`, so this cannot move a subject between tenants.
+ */
+export function updateSubject(
+  id: string,
+  data: { code: string; name: string },
+): Promise<Subject> {
+  return prisma.subject.update({ where: { id }, data });
+}
+
 export function getCohortSubjectById(id: string): Promise<CohortSubject | null> {
   return prisma.cohortSubject.findUnique({ where: { id } });
 }

@@ -56,6 +56,13 @@ export interface CreateStudentInput {
   lastName: string;
   email?: string | null;
   phone?: string | null;
+  /**
+   * The institution's own admission record, optional at both ends: some
+   * institutions issue a number at intake and some use the student code for
+   * everything. Absent means "not on file", never "".
+   */
+  admissionNumber?: string | null;
+  admissionDate?: Date | null;
 }
 
 /** The only code path that creates a Student — always inside a transaction
@@ -92,11 +99,33 @@ export async function createStudent(
 
 export interface UpdateStudentInput {
   studentId: string;
+  studentCode?: string;
   firstName?: string;
   lastName?: string;
   email?: string | null;
   phone?: string | null;
+  campusId?: string | null;
+  admissionNumber?: string | null;
+  admissionDate?: Date | null;
   status?: EnrollmentStatus;
+}
+
+/**
+ * The audit action for a status change, or an ordinary edit.
+ *
+ * Picked from the transition rather than from the caller, exactly as the
+ * webhook event below is, so the log and the delivery cannot disagree about
+ * what happened. A student leaving and a student coming back are questions
+ * people actually ask the audit log — "who took this child off the register?"
+ * — and answering them should not require diffing two JSON blobs.
+ */
+function studentAuditAction(
+  previousStatus: EnrollmentStatus,
+  nextStatus: EnrollmentStatus,
+): "student.archived" | "student.restored" | "student.updated" {
+  if (previousStatus === "ACTIVE" && nextStatus !== "ACTIVE") return "student.archived";
+  if (previousStatus !== "ACTIVE" && nextStatus === "ACTIVE") return "student.restored";
+  return "student.updated";
 }
 
 export async function updateStudent(
@@ -115,7 +144,7 @@ export async function updateStudent(
 
     await recordAuditLog(
       {
-        action: "student.updated",
+        action: studentAuditAction(existing.status, updated.status),
         entityType: "Student",
         entityId: updated.id,
         institutionId: existing.institutionId,

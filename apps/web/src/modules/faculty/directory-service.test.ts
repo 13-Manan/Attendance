@@ -11,6 +11,7 @@ import {
   updateFacultyDetails,
   type FacultyDeps,
 } from "./directory-service.ts";
+import { EMPTY_FACULTY_FILTERS } from "./directory-filters.ts";
 import { FacultyError } from "./directory-types.ts";
 import type { RecordAuditLogInput } from "../audit/types.ts";
 import { ForbiddenError } from "../authorization/types.ts";
@@ -69,11 +70,15 @@ function staff(overrides: Partial<NonNullable<StaffRow>> = {}): NonNullable<Staf
     email: "r.sharma@example.edu",
     employeeCode: "T-14",
     status: "ACTIVE",
+    departmentId: null,
+    department: null,
     lastLoginAt: null,
     roleAssignments: [{ role: { key: "FACULTY" } }],
     ...overrides,
   };
 }
+
+type Unit = NonNullable<Awaited<ReturnType<NonNullable<FacultyDeps["getUnit"]>>>>;
 
 interface Harness {
   audited: RecordAuditLogInput[];
@@ -83,6 +88,9 @@ interface Harness {
   endedSessions: string[];
   deletedLinks: string[];
   subjectWrites: Array<{ cohortSubjectId: string; facultyId: string | null }>;
+  /** Every institution id any read or write was scoped to. */
+  scopes: string[];
+  updates: Array<Record<string, unknown>>;
   deps: FacultyDeps;
 }
 
@@ -90,11 +98,13 @@ function harness(
   state: {
     rows?: Array<NonNullable<StaffRow>>;
     emailTaken?: boolean;
+    units?: Unit[];
     link?: Awaited<ReturnType<NonNullable<FacultyDeps["getClassLink"]>>>;
     offering?: Awaited<ReturnType<NonNullable<FacultyDeps["getCohortSubject"]>>>;
   } = {},
 ): Harness {
   const rows = state.rows ?? [staff()];
+  const units = state.units ?? [{ id: "unit-cs", name: "Computer Science", kind: "DEPARTMENT" }];
   const h: Harness = {
     audited: [],
     created: [],
@@ -103,19 +113,55 @@ function harness(
     endedSessions: [],
     deletedLinks: [],
     subjectWrites: [],
+    scopes: [],
+    updates: [],
     deps: {},
   };
   h.deps = {
-    listStaff: async () => rows,
-    getStaff: async (_institutionId, id) => rows.find((row) => row.id === id) ?? null,
-    idsWithPassword: async () => ["user-teacher"],
+    searchStaff: async (institutionId) => {
+      h.scopes.push(institutionId);
+      return {
+        rows,
+        total: rows.length,
+        totalAll: rows.length,
+        activeAll: rows.filter((row) => row.status === "ACTIVE").length,
+        page: 1,
+      };
+    },
+    getStaff: async (institutionId, id) => {
+      h.scopes.push(institutionId);
+      return rows.find((row) => row.id === id) ?? null;
+    },
+    idsWithPassword: async (_institutionId, ids) =>
+      ids.filter((id) => id === "user-teacher").slice(),
+    listAssignable: async (institutionId) => {
+      h.scopes.push(institutionId);
+      return rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        status: row.status === "ACTIVE" ? ("ACTIVE" as const) : ("INACTIVE" as const),
+      }));
+    },
+    listDepartments: async (institutionId) => {
+      h.scopes.push(institutionId);
+      return units
+        .filter((unit) => unit.kind === "DEPARTMENT")
+        .map((unit) => ({ id: unit.id, name: unit.name, code: null }));
+    },
+    getUnit: async (institutionId, unitId) => {
+      h.scopes.push(institutionId);
+      return units.find((unit) => unit.id === unitId) ?? null;
+    },
+    institutionType: async () => "COLLEGE",
     findByEmail: async () => (state.emailTaken ? { id: "user-elsewhere" } : null),
     findRole: async (_institutionId, key) => ({ id: `role-${key}`, key }),
     createStaff: async (input) => {
       h.created.push(input as unknown as Record<string, unknown>);
       return staff({ id: "user-new", name: input.name, email: input.email });
     },
-    updateStaff: async (_institutionId, id, data) => {
+    updateStaff: async (institutionId, id, data) => {
+      h.scopes.push(institutionId);
+      h.updates.push(data as unknown as Record<string, unknown>);
       const existing = rows.find((row) => row.id === id);
       return existing ? { ...existing, ...data } : null;
     },
@@ -160,6 +206,31 @@ function flatten(value: unknown): string {
 // Authorization and tenancy
 // ---------------------------------------------------------------------------
 
+test("no entry point can be told which institution to work in", () => {
+  // The signature is the guarantee: an institution id that a caller could pass
+  // is an institution id a form could supply. Every one of these takes the
+  // actor and the thing being acted on, and reads the tenant from the session.
+  assert.equal(getFacultyDirectory.length, 1, "the actor, and nothing else");
+  assert.equal(inviteFaculty.length, 2, "the actor and the new person's details");
+  assert.equal(updateFacultyDetails.length, 3, "the actor, an id and the details");
+  assert.equal(deactivateFaculty.length, 2, "the actor and an id");
+  assert.equal(reactivateFaculty.length, 2, "the actor and an id");
+  assert.equal(resetFacultyPassword.length, 2, "the actor and an id");
+  assert.equal(removeClassTeacher.length, 2, "the actor and a link id");
+  assert.equal(setSubjectFaculty.length, 3, "the actor, a subject and a teacher");
+});
+
+test("every read behind the directory is scoped to the session's institution", async () => {
+  const h = harness();
+  await getFacultyDirectory(ADMIN, EMPTY_FACULTY_FILTERS, h.deps);
+  assert.ok(h.scopes.length > 0, "something was scoped");
+  assert.deepEqual(
+    [...new Set(h.scopes)],
+    ["inst-1"],
+    "no read reached outside the session's institution",
+  );
+});
+
 test("inviting needs user.invite, not merely read access", async () => {
   const h = harness();
   await assert.rejects(
@@ -173,14 +244,14 @@ test("inviting needs user.invite, not merely read access", async () => {
 
 test("a reader may still see the directory", async () => {
   const h = harness();
-  const view = await getFacultyDirectory(READER, h.deps);
+  const view = await getFacultyDirectory(READER, EMPTY_FACULTY_FILTERS, h.deps);
   assert.equal(view.members.length, 1);
 });
 
 test("an account with no institution cannot administer staff", async () => {
   const h = harness();
   await assert.rejects(
-    () => getFacultyDirectory(makeUser({ institutionId: null }), h.deps),
+    () => getFacultyDirectory(makeUser({ institutionId: null }), EMPTY_FACULTY_FILTERS, h.deps),
     FacultyError,
   );
 });
@@ -344,7 +415,7 @@ test("a reset issues a new password, ends every session, and audits neither", as
 
 test("no read path returns anything password-shaped", async () => {
   const h = harness();
-  const view = await getFacultyDirectory(ADMIN, h.deps);
+  const view = await getFacultyDirectory(ADMIN, EMPTY_FACULTY_FILTERS, h.deps);
   assert.equal(Object.hasOwn(view.members[0], "passwordHash"), false);
   assert.equal(view.members[0].canSignIn, true, "whether one is set is still knowable");
 });
@@ -389,6 +460,103 @@ test("a stopped account cannot be handed a subject", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Departments
+// ---------------------------------------------------------------------------
+
+test("a department the institution does not have is refused before the account exists", async () => {
+  const h = harness();
+  await assert.rejects(
+    () =>
+      inviteFaculty(
+        ADMIN,
+        {
+          name: "A Bose",
+          email: "a@example.edu",
+          departmentId: "unit-from-another-college",
+          roleKey: "FACULTY",
+        },
+        h.deps,
+      ),
+    FacultyError,
+  );
+  assert.equal(h.created.length, 0, "nothing was written");
+});
+
+test("a unit that is not a department cannot be one", async () => {
+  // The foreign key is satisfied — the row exists and is in this institution —
+  // and it is still wrong. Postgres cannot express "and its kind is DEPARTMENT",
+  // so the service is the only thing standing between a form and a semester in
+  // the department column.
+  const h = harness({
+    units: [{ id: "unit-sem3", name: "Semester 3", kind: "SEMESTER" }],
+  });
+  await assert.rejects(
+    () =>
+      inviteFaculty(
+        ADMIN,
+        { name: "A Bose", email: "a@example.edu", departmentId: "unit-sem3", roleKey: "FACULTY" },
+        h.deps,
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof FacultyError);
+      assert.match(error.message, /not a department/);
+      return true;
+    },
+  );
+  assert.equal(h.created.length, 0);
+});
+
+test("a valid department is stored and audited", async () => {
+  const h = harness();
+  await inviteFaculty(
+    ADMIN,
+    { name: "A Bose", email: "a@example.edu", departmentId: "unit-cs", roleKey: "FACULTY" },
+    h.deps,
+  );
+  assert.equal(h.created[0].departmentId, "unit-cs");
+  assert.equal((h.audited[0].afterJson as { departmentId: string }).departmentId, "unit-cs");
+});
+
+test("an edit that does not mention a department leaves the stored one alone", async () => {
+  // What a school's edit form sends: no field at all. Reading that as "clear
+  // it" would unassign every department the moment an institution changed type.
+  const h = harness({ rows: [staff({ departmentId: "unit-cs" })] });
+  await updateFacultyDetails(ADMIN, "user-teacher", { name: "R Sharma" }, h.deps);
+  assert.equal(
+    Object.hasOwn(h.updates[0], "departmentId"),
+    false,
+    "the column was not part of the write",
+  );
+});
+
+test("an edit that sends an empty department clears it", async () => {
+  const h = harness({ rows: [staff({ departmentId: "unit-cs" })] });
+  await updateFacultyDetails(
+    ADMIN,
+    "user-teacher",
+    { name: "R Sharma", departmentId: "" },
+    h.deps,
+  );
+  assert.equal(h.updates[0].departmentId, null);
+});
+
+test("a bad department on an edit is refused before the account is written", async () => {
+  const h = harness({ rows: [staff({ departmentId: "unit-cs" })] });
+  await assert.rejects(
+    () =>
+      updateFacultyDetails(
+        ADMIN,
+        "user-teacher",
+        { name: "R Sharma", departmentId: "unit-theirs" },
+        h.deps,
+      ),
+    FacultyError,
+  );
+  assert.equal(h.updates.length, 0, "nothing was written");
+  assert.equal(h.audited.length, 0, "and nothing was audited");
+});
+
+// ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
 
@@ -398,8 +566,16 @@ test("an edit audits both the old and the new details", async () => {
   const row = h.audited[0];
   assert.equal(row.action, "user.updated");
   assert.equal(row.actorUserId, "user-admin");
-  assert.deepEqual(row.beforeJson, { name: "R Sharma", employeeCode: "T-14" });
-  assert.deepEqual(row.afterJson, { name: "R Sharma-Iyer", employeeCode: null });
+  assert.deepEqual(row.beforeJson, {
+    name: "R Sharma",
+    employeeCode: "T-14",
+    departmentId: null,
+  });
+  assert.deepEqual(row.afterJson, {
+    name: "R Sharma-Iyer",
+    employeeCode: null,
+    departmentId: null,
+  });
 });
 
 test("clearing a subject's teacher records who it was before", async () => {

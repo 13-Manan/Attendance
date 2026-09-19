@@ -1,12 +1,13 @@
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { hasPermission } from "@/modules/authorization/service";
-import { getInstitutionById } from "@/modules/institutions/repository";
-import { resolveAcademicUnitLabels, resolveAttendanceMode } from "@/modules/institutions/service";
 import { getRetentionPolicy } from "@/modules/privacy/service";
 import { getAdminSettings } from "@/modules/admin-settings/service";
+import { getInstitutionProfileForRequest } from "@/modules/institution-profile/service";
+import { listTimezoneOptions } from "@/modules/institution-profile/policy";
 import { RetentionForm, RetentionSweepPanel } from "./retention-form";
 import { AttendanceSettingsForm, FixedAttendanceRules } from "./attendance-settings-form";
 import { FacePolicyForm } from "./face-policy-form";
+import { InstitutionProfileForm, InstitutionProfileSummary } from "./profile-form";
 
 export default async function InstitutionSettingsPage() {
   // Server-side enforced: a user without institution.read never sees this
@@ -22,13 +23,11 @@ export default async function InstitutionSettingsPage() {
     );
   }
 
-  const institution = await getInstitutionById(user.institutionId);
-  if (!institution) {
-    return <p className="text-sm text-neutral-500">Institution not found.</p>;
-  }
-
-  const labels = resolveAcademicUnitLabels(institution);
-  const attendanceMode = resolveAttendanceMode(institution);
+  // The profile carries the name, type, time zone, contact details and the
+  // academic-unit labels, all resolved. It is read with the same
+  // `institution.read` this page already required; saving it needs
+  // `institution.update`, which the service re-checks.
+  const profile = await getInstitutionProfileForRequest(user);
 
   // The policy is read with the same `institution.read` this page already
   // required; editing it needs `institution.update` and running the sweep needs
@@ -47,20 +46,15 @@ export default async function InstitutionSettingsPage() {
   return (
     <div className="flex max-w-2xl flex-col gap-6">
       <h1 className="text-xl font-semibold text-neutral-900">Institution Settings</h1>
-      <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
-        <dt className="text-neutral-500">Name</dt>
-        <dd className="text-neutral-900">{institution.name}</dd>
-        <dt className="text-neutral-500">Type</dt>
-        <dd className="text-neutral-900">{institution.type}</dd>
-        <dt className="text-neutral-500">Attendance mode</dt>
-        <dd className="text-neutral-900">{attendanceMode === "DAILY" ? "Daily / class-wise" : "Subject-wise"}</dd>
-        <dt className="text-neutral-500">Academic unit labels</dt>
-        <dd className="text-neutral-900">
-          {Object.entries(labels)
-            .map(([kind, label]) => `${kind}: ${label}`)
-            .join(", ")}
-        </dd>
-      </dl>
+
+      {mayEditPolicy ? (
+        <InstitutionProfileForm
+          profile={profile}
+          timezones={listTimezoneOptions(profile.timezone)}
+        />
+      ) : (
+        <InstitutionProfileSummary profile={profile} />
+      )}
 
       {mayEditPolicy ? (
         <AttendanceSettingsForm

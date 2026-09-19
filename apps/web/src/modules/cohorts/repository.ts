@@ -43,6 +43,15 @@ export function createCohort(data: CreateCohortData): Promise<Cohort> {
   });
 }
 
+export interface UpdateCohortData {
+  name?: string;
+  termLabel?: string | null;
+}
+
+export function updateCohort(id: string, data: UpdateCohortData): Promise<Cohort> {
+  return prisma.cohort.update({ where: { id }, data });
+}
+
 export interface AssignFacultyData {
   cohortId: string;
   userId: string;

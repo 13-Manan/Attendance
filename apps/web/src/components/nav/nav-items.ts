@@ -120,6 +120,15 @@ export const NAV_ITEMS: NavItem[] = [
     permission: "institution.read",
   },
   {
+    href: "/dashboard/campuses",
+    label: "Campuses",
+    group: "Administration",
+    // Read-gated, not `campus.manage`: the list is useful to anyone who can
+    // see the institution, and the page renders the controls only for those
+    // who may use them.
+    permission: "institution.read",
+  },
+  {
     href: "/dashboard/audit-logs",
     label: "Audit logs",
     group: "Administration",

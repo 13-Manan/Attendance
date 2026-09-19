@@ -6,6 +6,13 @@ export type AuditAction =
   | "auth.logout"
   | "student.created"
   | "student.updated"
+  // A student leaving and a student coming back, told apart from an ordinary
+  // edit. Same single write path (modules/students/service.ts#updateStudent)
+  // and the same one row — only the name of the action differs, chosen from
+  // the status transition exactly as the webhook event is, so the log and the
+  // webhook cannot disagree about what happened.
+  | "student.archived"
+  | "student.restored"
   | "user.role_changed"
   | "attendance.corrected"
   | "attendance.finalized"
@@ -29,6 +36,40 @@ export type AuditAction =
   | "cohort_faculty.assigned"
   | "subject.created"
   | "cohort_subject.attached"
+  // Phase 2 academic administration. The creates above already existed; these
+  // are the edits, which until this phase were only possible by hand in the
+  // database and therefore left no trace at all. Renaming a class, moving an
+  // academic year's dates or switching which year is the current one all
+  // change what every report downstream is counting, so each is attributable.
+  //
+  // `academic_session.activated` is the one that carries the most: making a
+  // year current takes that status away from whichever year held it, in the
+  // same transaction, and the payload names the year that lost it — so "why
+  // did last year stop being the default" is answerable from the log alone.
+  //
+  // `academic_session.archived` above already existed; `restored` is its undo,
+  // and is its own action rather than an `updated` carrying a flag for the
+  // same reason `student.restored` is: "who brought this back" is a question
+  // people actually ask, and answering it should not require reading a diff.
+  | "academic_unit.updated"
+  | "academic_session.activated"
+  | "academic_session.updated"
+  | "academic_session.restored"
+  | "cohort.updated"
+  | "subject.updated"
+  // Campus administration. A campus is the coarsest scope a role assignment
+  // can be narrowed to (`UserRoleAssignment.campusId`), so closing one is a
+  // change to who can see what, not only an entry in a list of addresses.
+  | "campus.created"
+  | "campus.updated"
+  | "campus.closed"
+  | "campus.reopened"
+  // The institution's own profile: its name, timezone, contact details and the
+  // words it uses for its own structure. Separate from the two policy actions
+  // below because those change how attendance is decided and this does not —
+  // an administrator auditing a disputed register should be able to exclude
+  // it, and an administrator auditing a rename should be able to find it.
+  | "institution.profile_updated"
   | "student_subject_enrollment.created"
   | "enrollment.created"
   | "enrollment.updated"
