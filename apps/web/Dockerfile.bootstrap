@@ -1,0 +1,92 @@
+# ATTENDANCE PROJECT — production bootstrap image
+#
+# Runs as the attendance-prod-bootstrap Container Apps Job, inside the VNet, so
+# the production database never needs a public endpoint or a temporary firewall
+# rule to be bootstrapped. See infra/azure/modules/bootstrap-job.bicep.
+#
+# Build from the REPOSITORY ROOT:
+#   az acr build -r attendanceprodacr -f apps/web/Dockerfile.bootstrap \
+#     -t bootstrap:<sha> .
+#
+# ---------------------------------------------------------------------------
+# Why this is not the migration image
+# ---------------------------------------------------------------------------
+# The migration image holds schema.prisma, the committed migration SQL and the
+# Prisma CLI, and nothing else — one image, one job, one verb. Bootstrapping
+# needs the opposite set: the application's own modules, a generated Prisma
+# Client and the scrypt hasher, but none of the migration SQL. Sharing an image
+# would mean the job the deployment pipeline starts on every deploy also
+# carries the code that can write an Institution, separated from doing so only
+# by which command the container happened to run. They stay apart.
+#
+# ---------------------------------------------------------------------------
+# What is deliberately NOT here
+# ---------------------------------------------------------------------------
+# No DATABASE_URL, no administrator password, no Key Vault material, no
+# AUTH_SECRET, no API_KEY_PEPPER. The database URL arrives at execution time as
+# a Key Vault secret reference resolved by the job's managed identity; the
+# administrator's details and password arrive as execution-scoped overrides.
+# Nothing secret is baked into a layer, because a layer is readable by anyone
+# who can pull the image.
+#
+# No Next.js build, no application server, no migration SQL, no seed, no
+# dev-fixture. This image cannot serve traffic, cannot apply a migration and
+# cannot create demo data.
+
+FROM node:22-bookworm-slim
+WORKDIR /bootstrap
+
+# Prisma's query engine links against OpenSSL; ca-certificates is needed for
+# the TLS connection the database requires (sslmode=require).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Pinned to the same major as the repo's prisma/@prisma/client dependencies
+# (^6.9.0). --no-save mirrors Dockerfile.migrate: this image has no
+# package.json of its own to keep honest.
+RUN npm install --no-save --no-audit --no-fund prisma@6 @prisma/client@6
+
+# The schema is copied for `prisma generate` only. The migrations directory is
+# NOT copied: this image has no business applying DDL, and one that does not
+# contain the migration SQL cannot be made to.
+COPY --chown=node:node apps/web/prisma/schema.prisma ./prisma/schema.prisma
+
+# `generate` reads the datasource block, so DATABASE_URL must parse — but it is
+# never connected to here, and it is set for this one RUN layer rather than as
+# an ENV so no URL of any kind persists into the image.
+RUN DATABASE_URL="postgresql://generate:generate@127.0.0.1:5432/generate" \
+    npx prisma generate --schema=./prisma/schema.prisma
+
+# Exactly the six source files the entrypoint reaches, and no others. Listing
+# them individually rather than copying src/ keeps the image's contents equal
+# to its actual dependency graph:
+#
+#   scripts/bootstrap-production.ts     the operator CLI and its guards
+#   scripts/register-test-loader.mjs    resolves the `@/` alias at runtime
+#   src/lib/prisma.ts                   the client instance
+#   src/modules/authorization/bootstrap.ts    both bootstrap stages
+#   src/modules/authorization/permissions.ts  the permission catalog
+#   src/modules/auth-tenancy/password.ts      the scrypt hasher
+COPY --chown=node:node apps/web/scripts/bootstrap-production.ts ./scripts/
+COPY --chown=node:node apps/web/scripts/register-test-loader.mjs ./scripts/
+COPY --chown=node:node apps/web/src/lib/prisma.ts ./src/lib/
+COPY --chown=node:node apps/web/src/modules/authorization/bootstrap.ts ./src/modules/authorization/
+COPY --chown=node:node apps/web/src/modules/authorization/permissions.ts ./src/modules/authorization/
+COPY --chown=node:node apps/web/src/modules/auth-tenancy/password.ts ./src/modules/auth-tenancy/
+
+USER node
+
+# ENTRYPOINT is the interpreter and the script; the STAGE is left to `args`, so
+# `az containerapp job start --args inspect` supplies it per execution without
+# the job template ever carrying one.
+#
+# Starting this container with no args runs the script with no stage, which the
+# script refuses with a non-zero exit. That is the intended default: the image's
+# resting state does nothing to a database. It also refuses unless
+# BOOTSTRAP_TARGET is declared, and — for production — unless BOOTSTRAP_CONFIRM
+# matches. None of those are set here.
+#
+# Nothing bootstraps during `docker build`: every line above installs, generates
+# or copies. The entrypoint runs only when a container is started from the image.
+ENTRYPOINT ["node", "--experimental-strip-types", "--import", "./scripts/register-test-loader.mjs", "scripts/bootstrap-production.ts"]

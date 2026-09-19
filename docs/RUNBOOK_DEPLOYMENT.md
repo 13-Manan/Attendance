@@ -184,11 +184,13 @@ throughout: the pipeline halts before `deploy`, so nothing has changed yet.
 
 ## First bootstrap of a new database
 
-> **Status: designed, not built.** Neither the image nor the job below exists in
-> `attendance-production-rg`, and production has not been bootstrapped. The
-> local-side mechanism is implemented and tested; the Azure side is written down
-> here so it can be reviewed before anything is created. Do not run any of this
-> without explicit approval.
+> **Status: built, never executed.** `apps/web/Dockerfile.bootstrap`,
+> `infra/azure/modules/bootstrap-job.bicep` and `infra/azure/bootstrap.bicep`
+> exist and are validated. The `attendance-prod-bootstrap` job does **not** yet
+> exist in `attendance-production-rg`, no bootstrap image has been pushed to the
+> registry, and production has not been bootstrapped: it still holds zero roles,
+> zero institutions and zero users. Do not run any of this without explicit
+> approval.
 
 A freshly migrated database has a complete schema and no rows. Two stages fill
 that gap, both from `apps/web/scripts/bootstrap-production.ts`, both explicit:
@@ -236,23 +238,37 @@ A `apps/web/Dockerfile.bootstrap` image and an `attendance-prod-bootstrap`
 Container Apps Job in the same managed environment, mirroring
 `modules/migration-job.bicep`: `triggerType: Manual`, `replicaRetryLimit: 0`,
 `parallelism: 1`, `replicaCompletionCount: 1`, system-assigned identity with
-`get` on the `DATABASE-URL` secret and nothing more.
+`get` on the `DATABASE-URL` secret and nothing more. The identity's Key Vault
+grant is scoped to that one secret rather than to the vault, so it cannot read
+`AUTH-SECRET`, `API-KEY-PEPPER` or `FACE-AI-SERVICE-TOKEN`.
 
-The job template carries `DATABASE_URL` and no confirmation. That matters:
-`BOOTSTRAP_TARGET` and `BOOTSTRAP_CONFIRM` are both absent by default, so
-starting the job with no overrides runs a container that refuses and exits
-non-zero. The stage and the confirmation are supplied per execution:
+The job template carries `DATABASE_URL` (a Key Vault reference) and
+`BOOTSTRAP_TARGET=production`, and nothing else. In particular it carries no
+stage and no confirmation, so starting the job with no overrides runs a
+container that refuses twice over and exits non-zero. The stage, the
+confirmation and the administrator's details are supplied per execution:
 
 ```sh
 # Stage A — roles and permissions. Idempotent; safe to repeat.
 az containerapp job start -n attendance-prod-bootstrap -g attendance-production-rg \
   --args system \
-  --env-vars BOOTSTRAP_TARGET=production BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION
+  --env-vars DATABASE_URL=secretref:database-url \
+             BOOTSTRAP_TARGET=production \
+             BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION
 ```
 
 `--args` and `--env-vars` on `job start` are execution-scoped overrides: they
 apply to that one run and are not written back to the job template. Nothing a
 bootstrap sets can be left behind to affect a later one.
+
+**`--env-vars` replaces the environment; it does not merge with it.** This is
+why `DATABASE_URL` is repeated above even though the job template already
+declares it. Verified in the CLI source rather than assumed — see
+`start_containerappsjob` in
+`azure/cli/command_modules/containerapp/custom.py`, which builds a fresh
+container override and assigns the parsed list to `env` wholesale. Omit it and
+the container starts with no connection string and refuses with `DATABASE_URL is
+not set`. Harmless, but confusing if you are not expecting it.
 
 Stage B needs the institution and administrator details, and a password. The
 password is the one input that must not appear in a command line, a shell
@@ -265,7 +281,8 @@ az keyvault secret set --vault-name <vault> -n BOOTSTRAP-ADMIN-PASSWORD \
 
 az containerapp job start -n attendance-prod-bootstrap -g attendance-production-rg \
   --args tenant \
-  --env-vars BOOTSTRAP_TARGET=production BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION \
+  --env-vars DATABASE_URL=secretref:database-url \
+             BOOTSTRAP_TARGET=production BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION \
              BOOTSTRAP_INSTITUTION_NAME="..." BOOTSTRAP_INSTITUTION_TYPE=SCHOOL \
              BOOTSTRAP_ADMIN_NAME="..." BOOTSTRAP_ADMIN_EMAIL="..." \
              BOOTSTRAP_ADMIN_PASSWORD=secretref:bootstrap-admin-password
@@ -283,9 +300,22 @@ ordered above. If it proves awkward, `az containerapp job secret set` holds the
 value on the job instead of in Key Vault — same lifetime, one less resource,
 and it is removed the same way afterwards.
 
-Run `--args inspect` first. It reads and reports — how many institutions, users
-and role assignments exist, which system roles are present, and whether the
-tenant stage would be allowed to proceed — and writes nothing.
+Run `inspect` first. It reads and reports — how many institutions, users and
+role assignments exist, which system roles are present, and whether the tenant
+stage would be allowed to proceed — and writes nothing:
+
+```sh
+az containerapp job start -n attendance-prod-bootstrap -g attendance-production-rg \
+  --args inspect \
+  --env-vars DATABASE_URL=secretref:database-url \
+             BOOTSTRAP_TARGET=production \
+             BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION
+```
+
+`inspect` writes nothing but still asks for `BOOTSTRAP_CONFIRM`, because the
+confirmation guards the *target* rather than the stage: saying "production" is
+what requires the second sentence, regardless of what you then intend to do to
+it. Slightly over-strict, deliberately, and in the safe direction.
 
 The script prints the institution id, the administrator's id and the address
 they sign in with. It does not print the password, the hash, or `DATABASE_URL`,
@@ -295,6 +325,61 @@ After the first sign-in, the administrator should issue themselves a fresh
 password from the faculty directory (Dashboard → Faculty → Reset password),
 which replaces the bootstrap password and ends every existing session. Until
 that happens, the value that was briefly in Key Vault is a live credential.
+
+### Creating the job
+
+The job is deployed by `infra/azure/bootstrap.bicep`, not by `main.bicep`. That
+template references the managed environment, the registry, the vault and the
+`DATABASE-URL` secret with `existing` and creates exactly three resources: the
+job, an `AcrPull` assignment on the registry, and a `Key Vault Secrets User`
+assignment on the one secret. Its `what-if` against a live
+`attendance-production-rg` reports 3 × Create, 0 × Modify, 0 × Delete, and
+`Ignore` for all fourteen existing resources.
+
+It is separate from `main.bicep` for a reason worth knowing before you reach for
+the obvious alternative: `parameters/production.bicepparam` still carries the
+pre-Phase-G placeholders — `mcr.microsoft.com/k8se/quickstart:latest` for the
+web, face-ai and migrate images, and `enableKeyVaultSecretRefs = false` — while
+live production runs commit-tagged images with Key Vault references on.
+Deploying `main.bicep` with that parameter file would roll all three back to the
+quickstart image and strip their secret references. Reconciling the parameter
+file with reality is worth doing; it is a change to three live production
+resources and does not belong to a bootstrap change.
+
+```sh
+# 1. Build the image. Tagged by commit, never `latest`.
+SHA=$(git rev-parse HEAD)
+az acr build -r attendanceprodacr -f apps/web/Dockerfile.bootstrap \
+  -t "bootstrap:$SHA" .
+
+# 2. Read the diff. Every line of it.
+az deployment group what-if -g attendance-production-rg \
+  --template-file infra/azure/bootstrap.bicep \
+  --parameters infra/azure/parameters/bootstrap.bicepparam
+
+# 3. Pass 1 — creates the job and its identity, then the role assignments.
+az deployment group create -g attendance-production-rg \
+  --template-file infra/azure/bootstrap.bicep \
+  --parameters infra/azure/parameters/bootstrap.bicepparam
+
+# 4. Pass 2 — now that the identity can read the secret, turn the reference on.
+az deployment group create -g attendance-production-rg \
+  --template-file infra/azure/bootstrap.bicep \
+  --parameters infra/azure/parameters/bootstrap.bicepparam \
+  --parameters enableKeyVaultSecretRefs=true
+```
+
+Two passes, for the same reason `modules/app.bicep` needs them: the platform
+resolves a Key Vault secret reference when the job is created or updated, using
+the job's system-assigned identity — which does not exist until the job has been
+created once. Pass 1 without the reference, grant, then pass 2 with it.
+
+Creating the job does not run it. Confirm that before going further:
+
+```sh
+az containerapp job execution list -n attendance-prod-bootstrap \
+  -g attendance-production-rg --query "length(@)" -o tsv   # must be 0
+```
 
 ### If it refuses
 

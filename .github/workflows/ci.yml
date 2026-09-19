@@ -182,6 +182,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Building it here proves the image's COPY list still matches the script's
+      # real import graph — the one way this image breaks is a new import in
+      # apps/web/scripts/bootstrap-production.ts reaching a file the Dockerfile
+      # does not copy, which nothing else in CI would notice.
+      - name: Build bootstrap image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile.bootstrap
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Build Face AI image
         uses: docker/build-push-action@v6
         with:
