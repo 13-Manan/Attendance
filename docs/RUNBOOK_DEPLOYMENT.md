@@ -5,10 +5,9 @@ subscription *Pay-As-You-Go*). Architecture and rationale live in
 [`infra/azure/README.md`](../infra/azure/README.md); this file is what you read
 when something needs doing or undoing.
 
-> **Infrastructure is deployed; no application is.** Every resource below
-> exists and is empty of application code — the three container resources run a
-> Microsoft placeholder image, and no migration has been applied. See
-> §"Current state" at the end.
+> **Production is live.** Both container apps serve the application from
+> commit-pinned image digests, the database is migrated, and every push to
+> `main` deploys. See §"Current state" at the end.
 
 ---
 
@@ -520,8 +519,10 @@ az ad app federated-credential list --id cdb3ff1c-a376-435b-aff2-1000cdd11795 \
 ```
 
 A superseded credential for the old `repo:13-Manan/Attendance:ref:refs/heads/main`
-subject may still be listed. It authenticates nothing — GitHub no longer emits
-that subject for this repository — and it should be deleted when convenient.
+subject was removed on 2026-09-19. It authenticated nothing — with immutable
+subject claims enabled GitHub cannot emit that subject for this repository — so
+the list above should now show exactly one credential. A second one appearing
+is worth investigating rather than assuming it is this one returning.
 
 Its complete Azure footprint — six assignments, verified subscription-wide:
 
@@ -553,23 +554,33 @@ Three, all **identifiers rather than credentials**: `AZURE_CLIENT_ID`,
 
 ## Current state
 
-As of GATE 4 (deployment `attendance-prod-infra-20260918-102727`, Succeeded):
+As of the first end-to-end CI/CD deployment — GitHub Actions run
+[`35444452111`](https://github.com/13-Manan/Attendance/actions/runs/35444452111),
+commit `9c8b305972d527c0047aa221eb9ee700efac9b7f`, Succeeded:
 
 | | |
 |---|---|
-| `attendance-production-rg` | **Created**, 13 resources + 7 role assignments |
-| Infrastructure (Bicep) | **Deployed** — pass 1 of 2 |
+| `attendance-production-rg` | **Created**, 15 resources + 6 role assignments on the deploy identity |
+| Infrastructure (Bicep) | **Deployed** — both passes (`attendance-bootstrap-pass2`, Succeeded) |
 | `attendance-prod-psql` | **Ready**, `publicNetworkAccess: Disabled`, 0 firewall rules |
-| `attendance_prod` database | **Created**, **zero tables** — no migration has run |
-| pgvector | **Allow-listed** (`azure.extensions=VECTOR`); extension **not yet created** — `CREATE EXTENSION vector` is the first line of the baseline migration |
-| `enableKeyVaultSecretRefs` | **false** — pass 2 pending |
+| `attendance_prod` database | **Migrated** — both migrations applied by `prisma migrate deploy` (`20260917000000_init`, `20260917000100_query_pattern_indexes`) |
+| pgvector | **Created** — `CREATE EXTENSION IF NOT EXISTS vector` runs in the baseline migration, which has now been applied |
+| `enableKeyVaultSecretRefs` | **true** — web resolves 4/4 secrets and face-ai 1/1 through Key Vault references |
 | Key Vault secrets | **All four set** — `DATABASE-URL`, `AUTH-SECRET`, `API-KEY-PEPPER`, `FACE-AI-SERVICE-TOKEN` |
-| Images built and pushed | **All three**, tag `8acfde96…` — but **not deployed**; all three resources still run `mcr.microsoft.com/k8se/quickstart:latest` |
-| Apps serving the application | **None** |
-| Production traffic | **None** |
+| Images built and pushed | **All three**, tag `9c8b305…`; earlier `ab8ef435…` and `8acfde96…` retained for rollback |
+| `attendance-prod-web` | **Serving** `web@sha256:a0850e5a…`, revision `attendance-prod-web--0000002`, Running |
+| `attendance-prod-face-ai` | **Serving** `face-ai@sha256:a233d1a8…`, revision `attendance-prod-face-ai--0000002`, Running/Healthy, ingress **internal-only** |
+| Production traffic | **Live** — `/` and `/api/health` both return 200 |
 | DNS | **Unchanged** (no custom domain) |
-| GitHub OIDC | **Configured** — see above |
+| GitHub OIDC | **Configured** — one credential, `:environment:production`; see above |
 | Required reviewer | **Not configured** — unavailable on this plan; see above |
+
+The deployed digests are what the pipeline handed to Container Apps and read
+back; the SHA tags above resolve to them in `attendanceprodacr`.
+
+`attendance-prod-bootstrap` is a separate manually-triggered job and is not part
+of this pipeline. Its execution history is not evidence of tenant contents —
+verify those through the application, not from here.
 
 ### Secrets
 
