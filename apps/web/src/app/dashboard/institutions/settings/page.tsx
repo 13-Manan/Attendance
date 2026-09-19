@@ -7,6 +7,7 @@ import { listTimezoneOptions } from "@/modules/institution-profile/policy";
 import { RetentionForm, RetentionSweepPanel } from "./retention-form";
 import { AttendanceSettingsForm, FixedAttendanceRules } from "./attendance-settings-form";
 import { FacePolicyForm } from "./face-policy-form";
+import { SelfEnrollmentForm } from "./self-enrollment-form";
 import { InstitutionProfileForm, InstitutionProfileSummary } from "./profile-form";
 
 export default async function InstitutionSettingsPage() {
@@ -94,6 +95,23 @@ export default async function InstitutionSettingsPage() {
           <dd className="text-neutral-900">{adminSettings.facePolicy.presentMin}</dd>
           <dt className="text-neutral-500">Review threshold</dt>
           <dd className="text-neutral-900">{adminSettings.facePolicy.reviewMin}</dd>
+        </dl>
+      )}
+
+      {mayEditPolicy ? (
+        <SelfEnrollmentForm
+          enabled={adminSettings.selfEnrollmentEnabled}
+          defaultForType={adminSettings.selfEnrollmentDefault}
+          institutionType={adminSettings.institutionType}
+        />
+      ) : (
+        <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
+          <dt className="text-neutral-500">Student self-enrollment</dt>
+          <dd className="text-neutral-900">
+            {adminSettings.selfEnrollmentEnabled
+              ? "Students may enrol their own face from the student portal"
+              : "Faces are enrolled by staff only"}
+          </dd>
         </dl>
       )}
 

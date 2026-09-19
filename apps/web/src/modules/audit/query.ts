@@ -118,6 +118,8 @@ export const AUDIT_MODULES: readonly AuditModule[] = [
     label: "Face data",
     actions: [
       "face_enrollment.created",
+      "face_enrollment.replaced",
+      "face_enrollment.refused",
       "face_enrollment.deactivated",
       "face_enrollment.deleted",
       "face_data.retention_purged",
@@ -131,6 +133,7 @@ export const AUDIT_MODULES: readonly AuditModule[] = [
       "institution.profile_updated",
       "institution.attendance_policy_updated",
       "institution.face_policy_updated",
+      "institution.face_enrollment_policy_updated",
     ],
   },
   {

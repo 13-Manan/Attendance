@@ -197,6 +197,8 @@ model User {
   subjectLinks    CohortSubject[]
   openedSessions  AttendanceSession[]    @relation("SessionFaculty")
   corrections     AttendanceCorrection[] @relation("CorrectionActor")
+  enrolledFaces   FaceEmbedding[]        @relation("FaceEnrolledBy")
+  retiredFaces    FaceEmbedding[]        @relation("FaceRetiredBy")
 
   @@index([institutionId])
   @@index([campusId])
@@ -557,8 +559,49 @@ model SessionImage {
   @@unique([sessionId, sequenceNumber])
 }
 
+// How the image that produced a template reached the server. Recorded because
+// the two paths have different evidence behind them: a camera capture happened
+// in front of whoever pressed the button, an upload is a file of unknown
+// provenance. An investigation into a wrong template starts with this column.
+enum FaceCaptureSource {
+  CAMERA
+  UPLOAD
+}
+
+// Who performed the enrollment. Staff-driven is the school workflow; self is
+// the college one, and it is only reachable where the institution permits it
+// (modules/face-enrollment/policy.ts).
+enum FaceEnrollmentChannel {
+  STAFF
+  SELF
+}
+
+// Why a template stopped being used for recognition. A template is never
+// deleted by these paths — it is retired, and the reason is the difference
+// between "the student enrolled again" and "somebody asked us to stop".
+enum FaceSampleRetirementReason {
+  // Superseded by a newer template for the same student.
+  REPLACED
+  // An administrator removed this sample deliberately.
+  WITHDRAWN
+  // Removed by the retention sweep (modules/privacy).
+  RETENTION
+  // The student left, and the policy retires templates when they do.
+  STUDENT_INACTIVE
+}
+
 // Stable contract row: whichever model produced this vector, dimension is
 // fixed at 512 for this phase. See docs/adr/0005 for the model-swap contract.
+//
+// ## Why the provenance columns are nullable
+//
+// `weightsVersion`, `preprocessingVersion`, `aligned`, `qualityScore`,
+// `captureSource` and `channel` describe how a template was made. Rows written
+// before they existed cannot be given a truthful value, and a default would
+// make every one of them assert something nobody checked. Null means "not
+// recorded", which is the only honest answer, and the enrollment status
+// (`modules/face-enrollment/status.ts`) reads it as a reason to re-enrol
+// rather than as a fact about the capture.
 model FaceEmbedding {
   id             String                     @id @default(cuid())
   institutionId  String
@@ -569,15 +612,49 @@ model FaceEmbedding {
   embedding      Unsupported("vector(512)")
   modelName      String
   modelVersion   String
+  // The two halves of `modelVersion`, stored separately as well as composed.
+  // `modelVersion` is "<weights>+pp<preprocessing>" and is what decides which
+  // vectors are comparable; these are what answer "which weights?" and "which
+  // preprocessing?" without parsing a string that is not meant to be parsed.
+  weightsVersion       String?
+  preprocessingVersion String?
   embeddingDim   Int                        @default(512)
+  // Whether the crop was a real landmark-driven alignment or a plain box crop.
+  // A recognition model trained on aligned faces scores an unaligned crop
+  // worse, so a template enrolled without alignment is a quieter problem than
+  // one that failed outright — it simply never matches well.
+  aligned        Boolean?
+  // The quality score the model gave the accepted capture. Kept so a template
+  // that was barely good enough can be found later, when somebody asks why one
+  // student is never recognised.
+  qualityScore   Float?
+  captureSource  FaceCaptureSource?
+  channel        FaceEnrollmentChannel?
+  enrolledByUserId String?
+  enrolledBy       User?   @relation("FaceEnrolledBy", fields: [enrolledByUserId], references: [id])
+  // Never populated by the enrollment paths: the raw image is not persisted.
+  // The column stays because the approved retention design may one day store a
+  // reference under an explicit policy, and because removing it would rewrite
+  // a table holding biometric data for no behavioural gain.
   sourceImageUrl String?
   isActive       Boolean                    @default(true)
   createdAt      DateTime                   @default(now())
+  retiredAt        DateTime?
+  retiredByUserId  String?
+  retiredBy        User?                       @relation("FaceRetiredBy", fields: [retiredByUserId], references: [id])
+  retirementReason FaceSampleRetirementReason?
 
   matchedRecords AttendanceRecord[] @relation("MatchedEmbedding")
 
   @@index([institutionId])
   @@index([studentId])
+  // The duplicate scan asks for one institution's live templates and nothing
+  // else; the history view asks for one student's, live and retired together.
+  @@index([institutionId, isActive])
+  @@index([studentId, isActive])
+  // Postgres does not index a foreign key on its own.
+  @@index([enrolledByUserId])
+  @@index([retiredByUserId])
 }
 
 // aiResult/aiConfidence are advisory and written once by the recognition

@@ -103,13 +103,30 @@ def enroll(
     request: EnrollRequest,
     model: FaceModelProvider = Depends(get_model),
 ) -> EnrollResponse:
-    """Composite quality + align + embed.
+    """Composite quality + detect + align + embed.
 
     The "reject and ask for recapture" quality gate lives here: if the
     assessment is anything but ``ok``, no embedding is generated and the
     rejected response has no field to put one in. That is what makes "do not
     silently enrol bad data" structural rather than a rule callers must
     remember — a caller cannot forward an embedding it was never given.
+
+    ## Why the detector runs even though quality already passed
+
+    Alignment needs five landmarks, and landmarks come from the detector. This
+    route used to call ``align(image, None, None)`` and ``embed(image, None,
+    None)``, which meant every enrolled template was built from a plain box
+    crop and reported ``aligned: false`` — for any ArcFace-family recogniser,
+    a materially worse embedding than the same face warped onto the template
+    it was trained on. The cost of getting that wrong is invisible: nothing
+    fails, the student is simply matched less reliably for as long as the
+    template exists.
+
+    So the stages run in the order ``base.py`` describes them: detect, then
+    align with what the detector found, then embed the aligned crop. A backend
+    whose detector yields no landmarks still works — ``aligned`` comes back
+    false and says so honestly, rather than the route guaranteeing it could
+    never be true.
     """
     assessment = model.assess_quality(request.image_base64)
     if assessment.reason != "ok":
@@ -118,8 +135,18 @@ def enroll(
             modelName=model.name,
             modelVersion=model.version,
         )
-    aligned = model.align(request.image_base64, None, None)
-    embedding = model.embed(request.image_base64, None, None)
+
+    # An `ok` assessment means exactly one face, so the first is the subject.
+    # A backend that disagrees with itself here (quality says one face,
+    # detection finds none) degrades to an unaligned crop rather than failing
+    # an enrolment somebody is standing in front of.
+    detection = model.detect(request.image_base64)
+    face = detection.faces[0] if detection.faces else None
+    bounding_box = face.bounding_box if face else None
+    landmarks = face.landmarks if face else None
+
+    aligned = model.align(request.image_base64, bounding_box, landmarks)
+    embedding = model.embed(request.image_base64, bounding_box, landmarks)
     return EnrollAccepted(
         assessment=assessment,
         embedding=embedding,

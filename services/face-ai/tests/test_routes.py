@@ -5,6 +5,8 @@ quality gate's structural guarantee that a rejection carries no embedding,
 and the normalised match statuses.
 """
 
+import math
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -80,6 +82,44 @@ def test_enroll_rejects_bad_captures_without_producing_an_embedding(
     # forward one by mistake. This is the structural half of "do not silently
     # enrol bad data".
     assert "embedding" not in body
+
+
+def test_enroll_aligns_the_face_it_embeds(client):
+    """Enrolment runs the detector and uses what it found.
+
+    The route once called ``align(image, None, None)``, so every accepted
+    capture reported ``aligned: false`` and every stored template was built
+    from a plain box crop. For an ArcFace-family recogniser that is a
+    materially worse embedding, and nothing fails visibly — the student is
+    simply matched less reliably for as long as the template exists. apps/web
+    now stores this flag, so a regression here would be recorded against every
+    row it produced.
+    """
+    body = client.post("/v1/enroll", json={"imageBase64": "good-image"}).json()
+    assert body["accepted"] is True
+    assert body["aligned"] is True
+
+
+def test_enroll_returns_a_unit_length_embedding(client):
+    """The contract apps/web now verifies before storing anything.
+
+    Cosine similarity is computed as a dot product downstream, so a vector
+    that is not unit length does not score slightly wrong — it scores on a
+    different scale, and every threshold in the product misreads it.
+    """
+    body = client.post("/v1/enroll", json={"imageBase64": "good-image"}).json()
+    norm = math.sqrt(sum(value * value for value in body["embedding"]))
+    assert norm == pytest.approx(1.0, abs=1e-6)
+
+
+def test_enroll_reports_the_provenance_a_model_swap_needs(client):
+    """Weights and preprocessing travel as their own fields, not only inside
+    the composite ``modelVersion``. A future re-enrolment migration has to
+    answer "which rows came from which weights" without parsing a string."""
+    body = client.post("/v1/enroll", json={"imageBase64": "good-image"}).json()
+    composite = f"{body['weightsVersion']}+pp{body['preprocessingVersion']}"
+    assert body["modelVersion"] == composite
+    assert body["embeddingDim"] == EMBEDDING_DIMENSION
 
 
 def test_quality_reports_unimplemented_metrics_as_unavailable(client):

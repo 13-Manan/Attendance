@@ -122,6 +122,7 @@ test("a module filter expands to that module's actions", () => {
       "institution.profile_updated",
       "institution.attendance_policy_updated",
       "institution.face_policy_updated",
+      "institution.face_enrollment_policy_updated",
     ],
   });
 });

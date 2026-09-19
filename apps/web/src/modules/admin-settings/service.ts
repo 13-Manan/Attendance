@@ -7,6 +7,11 @@ import {
   type AttendanceMode,
   type Institution,
 } from "@/modules/institutions/types";
+import {
+  FACE_ENROLLMENT_SETTINGS_KEY,
+  defaultSelfEnrollmentEnabled,
+  resolveSelfEnrollmentEnabled,
+} from "@/modules/face-enrollment/policy";
 import * as repo from "./repository";
 import {
   describeFacePolicyWarnings,
@@ -117,6 +122,13 @@ export interface AdminSettingsView {
   faceWarnings: string[];
   /** Face-policy fields that differ from the shipped defaults. */
   faceChangedFields: Array<keyof FaceRecognitionPolicySettings>;
+  /** Whether students may enrol their own face from the student portal. */
+  selfEnrollmentEnabled: boolean;
+  /**
+   * What this institution's type implies, so the form can say whether the
+   * administrator is looking at a choice somebody made or at the default.
+   */
+  selfEnrollmentDefault: boolean;
 }
 
 function readAttendanceMode(institution: Institution): AttendanceMode {
@@ -157,6 +169,8 @@ export async function getAdminSettings(
     facePolicy,
     faceWarnings: describeFacePolicyWarnings(facePolicy),
     faceChangedFields: facePolicyChangedFields(facePolicy),
+    selfEnrollmentEnabled: resolveSelfEnrollmentEnabled(institution),
+    selfEnrollmentDefault: defaultSelfEnrollmentEnabled(institution.type),
   };
 }
 
@@ -326,4 +340,54 @@ export async function updateFacePolicy(
   });
 
   return { policy, warnings: describeFacePolicyWarnings(policy) };
+}
+
+// ---------------------------------------------------------------------------
+// Writing — who may enrol a face
+// ---------------------------------------------------------------------------
+
+/**
+ * Turns student self-enrollment on or off for this institution.
+ *
+ * A separate function and a separate audit action from `updateFacePolicy`,
+ * because it is a separate kind of decision. The recognition thresholds change
+ * how confidently a stored template is matched; this changes whether biometric
+ * data can enter the system at all without a member of staff present. An
+ * incident review asking "who could enrol a face in October?" should not have
+ * to read through threshold changes to find out.
+ *
+ * Stored explicitly rather than by clearing the key back to the type default:
+ * an administrator who deliberately turns self-enrollment off at a college has
+ * made a choice, and a settings shape that cannot tell that apart from "never
+ * configured" would quietly re-enable it the day somebody edits the column.
+ */
+export async function updateSelfEnrollmentPolicy(
+  actor: SessionUser,
+  input: { selfEnrollmentEnabled: boolean },
+  overrides: AdminSettingsDeps = {},
+): Promise<{ selfEnrollmentEnabled: boolean }> {
+  const d = deps(overrides);
+  const institutionId = requireInstitution(actor, "institution.update");
+
+  const institution = await d.getInstitution(institutionId);
+  if (!institution) throw new AdminSettingsError("Institution not found.");
+
+  const before = resolveSelfEnrollmentEnabled(institution);
+  const settings = (institution.settings ?? {}) as Record<string, unknown>;
+  await d.writeSettings(institutionId, {
+    ...settings,
+    [FACE_ENROLLMENT_SETTINGS_KEY]: { selfEnrollmentEnabled: input.selfEnrollmentEnabled },
+  });
+
+  await d.audit({
+    action: "institution.face_enrollment_policy_updated",
+    entityType: "Institution",
+    entityId: institutionId,
+    institutionId,
+    actorUserId: actor.userId,
+    beforeJson: { selfEnrollmentEnabled: before },
+    afterJson: { selfEnrollmentEnabled: input.selfEnrollmentEnabled },
+  });
+
+  return { selfEnrollmentEnabled: input.selfEnrollmentEnabled };
 }

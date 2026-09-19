@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getFaceCoverage } from "@/modules/face-enrollment/coverage";
+import { faceModelInfo } from "@/lib/face-ai-client";
+import type { ModelInfoResponse } from "@attendance/shared-types";
 import { Panel, EmptyState } from "@/components/ui/panel";
 import { TableScroll } from "@/components/ui/table-scroll";
 
@@ -45,6 +47,80 @@ function CoverageBar({ part, whole }: { part: number; whole: number }) {
   );
 }
 
+/**
+ * The running model, and whether anybody may rely on it.
+ *
+ * A licence question and an accuracy question answered in the same place,
+ * because an administrator asking "is face recognition working?" is asking
+ * both. The service refuses to start on unlicensed weights when
+ * `FACE_AI_REQUIRE_PRODUCTION_MODEL` is set, but a deployment that has not set
+ * it will happily run the mock — and a mock enrols everybody successfully
+ * while recognising nobody. That is exactly the failure this panel exists to
+ * make impossible to miss.
+ */
+function ModelProvenance({ model }: { model: ModelInfoResponse | null }) {
+  if (!model) {
+    return (
+      <Panel
+        title="Recognition model"
+        description="Which model this deployment runs, and whether its weights are cleared for production use."
+      >
+        <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800">
+          The face service could not be reached, so the running model is unknown. New enrollments
+          will fail until it is back. Stored samples are unaffected, and attendance can still be
+          taken by hand.
+        </p>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel
+      title="Recognition model"
+      description="Which model this deployment runs, and whether its weights are cleared for production use."
+    >
+      {!model.productionEligible ? (
+        <p role="alert" className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span className="font-medium">
+            This model is not production-eligible and does not recognise anybody.
+          </span>{" "}
+          Its weights have commercial-use status &ldquo;{model.commercialUse}&rdquo;. Enrollment
+          works and the whole pipeline is exercised end to end, but no face will ever be matched.
+          Take attendance by hand until a licence-verified model is deployed.
+        </p>
+      ) : null}
+
+      <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[max-content_1fr]">
+        <dt className="text-neutral-500">Model</dt>
+        <dd className="text-neutral-900">{model.modelName}</dd>
+        <dt className="text-neutral-500">Version</dt>
+        <dd className="font-mono text-xs text-neutral-900">{model.modelVersion}</dd>
+        <dt className="text-neutral-500">Weights</dt>
+        <dd className="font-mono text-xs text-neutral-900">{model.weightsVersion}</dd>
+        <dt className="text-neutral-500">Preprocessing</dt>
+        <dd className="font-mono text-xs text-neutral-900">{model.preprocessingVersion}</dd>
+        <dt className="text-neutral-500">Embedding</dt>
+        <dd className="text-neutral-900">
+          {model.embeddingDim} dimensions
+          {model.embeddingNormalized ? ", L2-normalised" : ", NOT normalised"}
+        </dd>
+        <dt className="text-neutral-500">Runtime</dt>
+        <dd className="text-neutral-900">{model.runtime}</dd>
+        <dt className="text-neutral-500">Commercial use</dt>
+        <dd className="text-neutral-900">{model.commercialUse}</dd>
+        <dt className="text-neutral-500">Production eligible</dt>
+        <dd className="text-neutral-900">{model.productionEligible ? "Yes" : "No"}</dd>
+      </dl>
+
+      <p className="text-xs text-neutral-500">
+        A template can only be compared against another made by the same model and the same
+        preprocessing. Changing either invalidates every stored sample — which is why both are
+        recorded on each one, and why a model swap is a re-enrollment rather than a config change.
+      </p>
+    </Panel>
+  );
+}
+
 export default async function FaceEnrollmentPage() {
   const user = await requirePermissionOrRedirect("faceEmbedding.manage");
 
@@ -57,7 +133,12 @@ export default async function FaceEnrollmentPage() {
     );
   }
 
-  const coverage = await getFaceCoverage(user);
+  const [coverage, model] = await Promise.all([
+    getFaceCoverage(user),
+    // Best effort. A face service that is down must not take this page with
+    // it: the coverage figures come from our own database and are still true.
+    faceModelInfo().catch(() => null),
+  ]);
   const missing = Math.max(0, coverage.activeStudents - coverage.enrolledStudents);
 
   return (
@@ -70,6 +151,8 @@ export default async function FaceEnrollmentPage() {
           somebody knows it is going to happen.
         </p>
       </header>
+
+      <ModelProvenance model={model} />
 
       <Panel
         title="Coverage"

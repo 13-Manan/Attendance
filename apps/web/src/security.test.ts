@@ -159,6 +159,53 @@ function writes(): Writes {
   return { corrections: [], finalizations: [], embeddings: [], deactivations: [], deletions: [] };
 }
 
+/**
+ * A capture payload, with the provenance field every enrollment path now
+ * requires. The value is recorded and never branched on — both sources pass
+ * through identical checks — so the choice here is arbitrary.
+ */
+const CAPTURE = { imageBase64: "x".repeat(200), captureSource: "CAMERA" as const };
+
+/**
+ * A properly L2-normalised 512-float vector.
+ *
+ * The service refuses a template that is not unit length, so a two-element
+ * stand-in would now be rejected for that reason rather than reaching the
+ * assertion each of these tests is actually making.
+ */
+const UNIT_512: number[] = Array.from({ length: 512 }, () => 1 / Math.sqrt(512));
+
+/** A distinctive value to search a serialised response for. */
+const TELLTALE = 0.9012345678;
+
+function unitVectorWithTelltale(): number[] {
+  // One component replaced and the whole thing renormalised, so the vector is
+  // still unit length but contains a number a leak test can grep for.
+  const raw = UNIT_512.slice();
+  raw[0] = TELLTALE;
+  const norm = Math.sqrt(raw.reduce((total, value) => total + value * value, 0));
+  return raw.map((value) => value / norm);
+}
+
+function acceptedEnrollment(embedding: number[] = UNIT_512) {
+  return {
+    accepted: true as const,
+    assessment: { reason: "ok" as const, qualityScore: 0.9, faceCount: 1 },
+    embedding,
+    modelName: "mock",
+    modelVersion: "0.1.0+pp1",
+    weightsVersion: "0.1.0",
+    preprocessingVersion: "1",
+    embeddingDim: 512,
+    aligned: true,
+  };
+}
+
+/** A college, so the self-enrollment path is permitted by default. */
+async function collegeInstitution() {
+  return { id: "inst-A", name: "Northfield", type: "COLLEGE", settings: {} } as never;
+}
+
 function assertNothingWritten(w: Writes): void {
   assert.equal(w.corrections.length, 0, "a correction was written despite the refusal");
   assert.equal(w.finalizations.length, 0, "a session was finalized despite the refusal");
@@ -202,7 +249,7 @@ test("a student cannot enrol a face against another student's id", async () => {
     () =>
       enrollFaceForStudentRequest(
         studentA,
-        { studentId: "stu-VICTIM", imageBase64: "x".repeat(200) },
+        { studentId: "stu-VICTIM", ...CAPTURE },
         {
           getStudentById: async () => student({ id: "stu-VICTIM" }),
           insertFaceEmbedding: async (input) => {
@@ -222,21 +269,15 @@ test("self-enrollment uses the caller's linked profile, not a studentId from the
 
   await enrollOwnFaceRequest(
     studentA,
-    { imageBase64: "x".repeat(200) },
+    CAPTURE,
     {
       getStudentByUserId: async (userId) => {
         resolvedFromUserId = userId;
         return student({ id: "stu-A" });
       },
-      countActiveEmbeddingsForStudent: async () => 0,
-      faceEnroll: async () => ({
-        accepted: true,
-        embedding: [0.1, 0.2],
-        modelName: "mock",
-        modelVersion: "1",
-        embeddingDim: 2,
-        assessment: { reason: "ok", qualityScore: 0.9, faceCount: 1 },
-      }) as never,
+      listActiveTemplateModelsForStudent: async () => [],
+      getInstitution: collegeInstitution,
+      faceEnroll: async () => acceptedEnrollment(),
       insertFaceEmbedding: async (input) => {
         w.embeddings.push(input);
         return { id: "emb-1" };
@@ -376,10 +417,11 @@ test("a teacher cannot enrol a face for a student at another institution", async
     () =>
       enrollFaceForStudentRequest(
         teacherA,
-        { studentId: "stu-B", imageBase64: "x".repeat(200) },
+        { studentId: "stu-B", ...CAPTURE },
         {
           getStudentById: async () => student({ id: "stu-B", institutionId: "inst-B" }),
-          countActiveEmbeddingsForStudent: async () => 0,
+          listActiveTemplateModelsForStudent: async () => [],
+      getInstitution: collegeInstitution,
           insertFaceEmbedding: async (input) => {
             w.embeddings.push(input);
             return { id: "emb-x" };
@@ -397,10 +439,10 @@ test("a teacher cannot deactivate another institution's face template", async ()
   await assert.rejects(
     () =>
       deactivateFaceEmbeddingRequest(teacherA, "emb-B", {
-        getEmbeddingStudentId: async () => "stu-B",
-        getStudentById: async () => student({ id: "stu-B", institutionId: "inst-B" }),
-        deactivateFaceEmbedding: async (id) => {
+        getTemplateOwner: async () => ({ studentId: "stu-B", institutionId: "inst-B" }),
+        retireTemplate: async (id) => {
           w.deactivations.push(id);
+          return 1;
         },
       }),
     ForbiddenError,
@@ -525,7 +567,7 @@ test("an unknown student id is refused rather than silently doing nothing", asyn
     () =>
       enrollFaceForStudentRequest(
         teacherA,
-        { studentId: "ghost", imageBase64: "x".repeat(200) },
+        { studentId: "ghost", ...CAPTURE },
         {
           getStudentById: async () => null,
           insertFaceEmbedding: async (input) => {
@@ -544,9 +586,10 @@ test("an unknown face template id is refused", async () => {
   await assert.rejects(
     () =>
       deactivateFaceEmbeddingRequest(teacherA, "no-such-embedding", {
-        getEmbeddingStudentId: async () => null,
-        deactivateFaceEmbedding: async (id) => {
+        getTemplateOwner: async () => null,
+        retireTemplate: async (id) => {
           w.deactivations.push(id);
+          return 1;
         },
       }),
     /face_embedding_not_found/,
@@ -571,17 +614,17 @@ test("every face-data entry point checks a permission before it reads anything",
     () =>
       enrollFaceForStudentRequest(
         nobody,
-        { studentId: "stu-A", imageBase64: "x".repeat(200) },
+        { studentId: "stu-A", ...CAPTURE },
         { getStudentById: explode },
       ),
     ForbiddenError,
   );
   await assert.rejects(
-    () => enrollOwnFaceRequest(nobody, { imageBase64: "x".repeat(200) }, { getStudentByUserId: explode }),
+    () => enrollOwnFaceRequest(nobody, CAPTURE, { getStudentByUserId: explode }),
     ForbiddenError,
   );
   await assert.rejects(
-    () => deactivateFaceEmbeddingRequest(nobody, "emb-1", { getEmbeddingStudentId: explode }),
+    () => deactivateFaceEmbeddingRequest(nobody, "emb-1", { getTemplateOwner: explode }),
     ForbiddenError,
   );
   await assert.rejects(
@@ -596,18 +639,12 @@ test("a successful enrollment never returns the biometric template to its caller
   // downstream can accidentally serialise one.
   const result = await enrollOwnFaceRequest(
     studentA,
-    { imageBase64: "x".repeat(200) },
+    CAPTURE,
     {
       getStudentByUserId: async () => student(),
-      countActiveEmbeddingsForStudent: async () => 0,
-      faceEnroll: async () => ({
-        accepted: true,
-        embedding: [0.11, 0.22, 0.33],
-        modelName: "mock",
-        modelVersion: "1",
-        embeddingDim: 3,
-        assessment: { reason: "ok", qualityScore: 0.9, faceCount: 1 },
-      }) as never,
+      listActiveTemplateModelsForStudent: async () => [],
+      getInstitution: collegeInstitution,
+      faceEnroll: async () => acceptedEnrollment(unitVectorWithTelltale()),
       insertFaceEmbedding: async () => ({ id: "emb-1" }),
       recordAuditLog: async () => {},
     },
@@ -632,18 +669,12 @@ test("the audit row for an enrollment carries metadata, never the vector", async
   const rows: unknown[] = [];
   await enrollOwnFaceRequest(
     studentA,
-    { imageBase64: "x".repeat(200) },
+    CAPTURE,
     {
       getStudentByUserId: async () => student(),
-      countActiveEmbeddingsForStudent: async () => 0,
-      faceEnroll: async () => ({
-        accepted: true,
-        embedding: [0.4242, 0.5151],
-        modelName: "mock",
-        modelVersion: "1",
-        embeddingDim: 2,
-        assessment: { reason: "ok", qualityScore: 0.9, faceCount: 1 },
-      }) as never,
+      listActiveTemplateModelsForStudent: async () => [],
+      getInstitution: collegeInstitution,
+      faceEnroll: async () => acceptedEnrollment(unitVectorWithTelltale()),
       insertFaceEmbedding: async () => ({ id: "emb-1" }),
       recordAuditLog: async (input) => {
         rows.push(input);

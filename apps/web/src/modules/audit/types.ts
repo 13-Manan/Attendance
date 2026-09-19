@@ -75,6 +75,22 @@ export type AuditAction =
   | "enrollment.updated"
   | "face_enrollment.created"
   | "face_enrollment.deactivated"
+  // Phase 3 enrollment lifecycle. `replaced` is one act, not a deactivation
+  // followed by a creation: an administrator who replaces a student's whole
+  // template set has made a single decision, and a log that shows five
+  // retirements and one creation invites the reader to wonder whether the
+  // sixth event was related.
+  //
+  // `refused` records an enrollment the system turned down because the face
+  // already belongs to — or is too close to — another student at the same
+  // institution. That is the one refusal worth a permanent row: it is either
+  // the same person enrolled twice under two student records, which somebody
+  // has to reconcile, or an attempt to enrol one student's face against
+  // another's name. Neither should be discoverable only from a screenshot of a
+  // red banner. Quality rejections are not logged — a blurred photograph is
+  // not an event, and logging every retake would bury the two that matter.
+  | "face_enrollment.replaced"
+  | "face_enrollment.refused"
   // Phase 11 face-data retention. `deactivated` above is a soft delete and was
   // the only erasure this system could record; these two are the rows that
   // prove a biometric template actually stopped existing.
@@ -114,6 +130,11 @@ export type AuditAction =
   // have access.
   | "institution.attendance_policy_updated"
   | "institution.face_policy_updated"
+  // Whether students may enrol their own face. A change here opens or closes a
+  // path by which biometric data enters the system without a member of staff
+  // present, which is a different question from the thresholds above and needs
+  // its own attributable row.
+  | "institution.face_enrollment_policy_updated"
   | "user.created"
   | "user.updated"
   | "user.deactivated"

@@ -18,7 +18,11 @@ import { z } from "zod";
 import { refresh } from "next/cache";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { ForbiddenError } from "@/modules/authorization/types";
-import { updateAttendanceSettings, updateFacePolicy } from "./service";
+import {
+  updateAttendanceSettings,
+  updateFacePolicy,
+  updateSelfEnrollmentPolicy,
+} from "./service";
 import { AdminSettingsError, MAX_CORRECTION_WINDOW_DAYS } from "./types";
 
 export interface ActionState {
@@ -156,5 +160,42 @@ export async function updateFacePolicyAction(
     };
   } catch (error) {
     return describe(error, "The recognition policy could not be saved.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Who may enrol a face
+// ---------------------------------------------------------------------------
+
+/**
+ * Turning student self-enrollment on or off.
+ *
+ * No acknowledgement checkbox, unlike the thresholds above. The two directions
+ * are not symmetrically risky and neither is irreversible: turning it *off*
+ * removes a way for biometric data to enter the system, and turning it *on*
+ * only lets a student enrol their own face — a face the institution is already
+ * entitled to enrol on their behalf. The audit row is what makes the change
+ * accountable, and it is written either way.
+ *
+ * An absent checkbox means off. That is how an unchecked HTML checkbox arrives,
+ * and reading it any other way would make the control impossible to switch off.
+ */
+export async function updateSelfEnrollmentPolicyAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const actor = await requireUser();
+  const enabled = formData.get("selfEnrollmentEnabled") === "on";
+
+  try {
+    await updateSelfEnrollmentPolicy(actor, { selfEnrollmentEnabled: enabled });
+    refresh();
+    return {
+      message: enabled
+        ? "Students can now enrol their own face from the student portal. The change is recorded in the audit log."
+        : "Student self-enrollment is off. Faces are enrolled by staff only, and the student portal says so. The change is recorded in the audit log.",
+    };
+  } catch (error) {
+    return describe(error, "The enrollment policy could not be saved.");
   }
 }
