@@ -18,12 +18,30 @@ import { SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS } from "./session";
 export interface LoginState {
   error?: string;
   kind?: "invalid" | "unavailable";
+  /**
+   * The address that was submitted, echoed back so a failed attempt does not
+   * make the user retype it. Only ever their own input, returned to their own
+   * browser — it reveals nothing they did not just type.
+   */
+  email?: string;
+  /**
+   * Counts submissions. React resets a form when its action completes, so the
+   * field needs a changing `key` to be remounted with the value above —
+   * otherwise a second failure with the same address would not re-fill it.
+   */
+  attempt?: number;
 }
 
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 });
+
+/** Bounded because it is rendered back into the page; 320 is the practical
+ *  ceiling for an address (RFC 3696 erratum: 64 local + @ + 255 domain). */
+function submittedEmail(formData: FormData): string {
+  return String(formData.get("email") ?? "").slice(0, 320);
+}
 
 async function requestContext() {
   const headerStore = await headers();
@@ -33,13 +51,16 @@ async function requestContext() {
   };
 }
 
-export async function login(_prevState: LoginState, formData: FormData): Promise<LoginState> {
+export async function login(prevState: LoginState, formData: FormData): Promise<LoginState> {
+  const attempt = (prevState.attempt ?? 0) + 1;
+  const email = submittedEmail(formData);
+
   const parsed = loginSchema.safeParse({
     email: formData.get("email"),
     password: formData.get("password"),
   });
   if (!parsed.success) {
-    return { error: "Enter a valid email and password.", kind: "invalid" };
+    return { error: "Enter a valid email and password.", kind: "invalid", email, attempt };
   }
 
   // Re-sanitised here and not merely on the page that rendered the field: a
@@ -59,6 +80,8 @@ export async function login(_prevState: LoginState, formData: FormData): Promise
     return {
       error: "We can't sign you in right now. The service is unavailable — please try again.",
       kind: "unavailable",
+      email,
+      attempt,
     };
   }
 
@@ -69,6 +92,8 @@ export async function login(_prevState: LoginState, formData: FormData): Promise
           ? "This account is inactive. Contact your administrator."
           : "Incorrect email or password.",
       kind: "invalid",
+      email,
+      attempt,
     };
   }
 

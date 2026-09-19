@@ -27,6 +27,11 @@ const ERROR_ID = "login-error";
  *
  * The message is one `role="alert"` region referenced by both inputs, so a
  * screen reader announces the failure once and either field explains it.
+ *
+ * After a failure the address is put back and the cursor goes to the password
+ * box. React clears a form once its action completes, which is right for the
+ * password and wrong for the email — on a phone, retyping an address to try a
+ * password again is most of the work of signing in.
  */
 export function LoginForm({ next }: { next: string }) {
   const [state, formAction, pending] = useActionState(login, initialState);
@@ -37,6 +42,10 @@ export function LoginForm({ next }: { next: string }) {
   // nothing about what was typed, so marking the inputs invalid would be a
   // lie the screen reader repeats on every focus.
   const fieldsInvalid = hasError && !unavailable;
+  // Remounts both fields after a submission so `defaultValue` is applied
+  // again; without it a second failure on the same address leaves the box
+  // empty, because an uncontrolled input ignores a later defaultValue.
+  const attempt = state.attempt ?? 0;
 
   return (
     <form action={formAction} className="flex flex-col gap-4" noValidate={false}>
@@ -47,6 +56,7 @@ export function LoginForm({ next }: { next: string }) {
 
       <Field label="Email" htmlFor="email">
         <Input
+          key={`email-${attempt}`}
           id="email"
           name="email"
           type="email"
@@ -55,7 +65,11 @@ export function LoginForm({ next }: { next: string }) {
           autoCapitalize="none"
           spellCheck={false}
           required
-          autoFocus
+          defaultValue={state.email ?? ""}
+          // On arrival, the cursor belongs here. After a failure it belongs in
+          // the password box below, which is the field there is any point
+          // changing.
+          autoFocus={!hasError}
           readOnly={pending}
           aria-invalid={fieldsInvalid || undefined}
           aria-describedby={hasError ? ERROR_ID : undefined}
@@ -64,11 +78,13 @@ export function LoginForm({ next }: { next: string }) {
 
       <Field label="Password" htmlFor="password">
         <Input
+          key={`password-${attempt}`}
           id="password"
           name="password"
           type="password"
           autoComplete="current-password"
           required
+          autoFocus={hasError}
           readOnly={pending}
           aria-invalid={fieldsInvalid || undefined}
           aria-describedby={hasError ? ERROR_ID : undefined}
