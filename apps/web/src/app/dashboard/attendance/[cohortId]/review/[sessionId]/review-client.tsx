@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +14,7 @@ import type {
   AttendanceReviewStudent,
 } from "@/modules/attendance-review/types";
 import type { AttendanceRealtimeEvent } from "@/modules/realtime/types";
+import { useLiveStream } from "@/modules/realtime/use-live-stream";
 
 /**
  * Phase 6 faculty review board.
@@ -237,24 +238,31 @@ export function ReviewBoard({ initialBoard }: Props) {
   // changed record and the authoritative counts, so a second teacher's
   // correction lands here without anybody refetching the page.
   // -------------------------------------------------------------------------
+  /**
+   * Guards against an older board landing after a newer one.
+   *
+   * A reconnect reconciliation and an event-driven refresh can overlap; both
+   * run the same query, so the later request is the newer truth. Without this
+   * the earlier response can resolve second and put a stale register — quite
+   * possibly one missing the correction that triggered the refresh — back on
+   * the screen the room is watching.
+   */
+  const latestRefresh = useRef(0);
+
   const refresh = useCallback(async () => {
+    const ticket = ++latestRefresh.current;
     try {
-      setBoard(await getAttendanceReviewBoardAction({ sessionId }));
+      const next = await getAttendanceReviewBoardAction({ sessionId });
+      if (ticket !== latestRefresh.current) return;
+      setBoard(next);
     } catch {
       // A failed background refresh must not clobber a usable screen. The
       // next event (or the user's next action) will reconcile.
     }
   }, [sessionId]);
 
-  useEffect(() => {
-    const source = new EventSource(`/api/realtime/attendance/${sessionId}`);
-    source.onmessage = (message) => {
-      let event: AttendanceRealtimeEvent;
-      try {
-        event = JSON.parse(message.data) as AttendanceRealtimeEvent;
-      } catch {
-        return;
-      }
+  const handleEvent = useCallback(
+    (event: AttendanceRealtimeEvent) => {
       if (event.type === "attendance-record-updated") {
         // Apply the counts immediately, then reconcile the lists. Counts are
         // what the room is watching; list membership can lag by one tick.
@@ -264,9 +272,18 @@ export function ReviewBoard({ initialBoard }: Props) {
         setLiveMessage("This attendance session was finalized.");
         void refresh();
       }
-    };
-    return () => source.close();
-  }, [refresh, sessionId]);
+    },
+    [refresh],
+  );
+
+  const { state: connection } = useLiveStream<AttendanceRealtimeEvent>({
+    url: `/api/realtime/attendance/${sessionId}`,
+    onEvent: handleEvent,
+    // The board may have moved while this screen was disconnected — a second
+    // teacher correcting, or the register being confirmed. Re-read rather than
+    // leave a stale roster in front of the room.
+    onReconnect: refresh,
+  });
 
   // -------------------------------------------------------------------------
   // Corrections
@@ -406,6 +423,33 @@ export function ReviewBoard({ initialBoard }: Props) {
           The recognition model that produced these suggestions is{" "}
           <strong>not cleared for production use</strong>. Treat every row below as
           unverified and confirm each student yourself.
+        </div>
+      )}
+
+      {/*
+        Only once a live connection has been lost, never on first load and
+        never per retry. It matters more here than on the portal: a teacher
+        reading this board to a room needs to know when it has stopped being
+        live, because a second teacher's correction would otherwise be
+        invisible. Stated in words, not by colour alone.
+      */}
+      {connection === "reconnecting" && (
+        <div
+          role="status"
+          className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+        >
+          <strong>Live updates interrupted.</strong> Reconnecting — this board
+          will refresh itself once the connection returns. Corrections you make
+          now are still saved.
+        </div>
+      )}
+      {connection === "unauthorized" && (
+        <div
+          role="status"
+          className="rounded-md border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700"
+        >
+          <strong>Live updates have stopped.</strong> Reload the page to sign in
+          again.
         </div>
       )}
 

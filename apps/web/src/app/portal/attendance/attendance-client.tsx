@@ -1,13 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getOwnAttendanceAction } from "@/modules/attendance-review/actions";
 import type {
   StudentAttendanceEntry,
   StudentAttendanceView,
 } from "@/modules/attendance-review/types";
 import type { StudentAttendanceUpdatedEvent } from "@/modules/realtime/types";
+import { useLiveStream } from "@/modules/realtime/use-live-stream";
 
 /**
  * The student-facing half of the realtime story.
@@ -21,6 +22,38 @@ import type { StudentAttendanceUpdatedEvent } from "@/modules/realtime/types";
 
 interface Props {
   initialView: StudentAttendanceView;
+}
+
+/**
+ * A date in the reader's own locale, without a hydration mismatch.
+ *
+ * `toLocaleDateString()` asks the runtime for its locale and timezone, and the
+ * server's are not the student's — so this rendered one string on the server
+ * and another in the browser, React threw the tree away and logged error #418
+ * on every visit to this page. The review board hit the same thing and solved
+ * it the same way (`LocalTime` there); this is that fix, for the portal.
+ *
+ * The ISO instant is what the server emits, which is also what `<time>` wants.
+ */
+function LocalDate({ iso }: { iso: string }) {
+  const onClient = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
+  const date = new Date(iso);
+  return (
+    <time dateTime={iso}>
+      {onClient
+        ? date.toLocaleDateString(undefined, {
+            weekday: "short",
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+          })
+        : iso.slice(0, 10)}
+    </time>
+  );
 }
 
 function resultBadge(result: StudentAttendanceEntry["finalResult"]) {
@@ -42,9 +75,22 @@ export function StudentAttendanceClient({ initialView }: Props) {
 
   const studentId = view.studentId;
 
+  /**
+   * Monotonic counter guarding against an older response landing last.
+   *
+   * Two refetches can be in flight at once — a reconnect reconciliation and an
+   * event that arrived while it was running. They are the same query, so the
+   * later request holds the newer truth; without this the earlier response can
+   * resolve second and put a stale register back on screen.
+   */
+  const latestFetch = useRef(0);
+
   const refetch = useCallback(async () => {
+    const ticket = ++latestFetch.current;
     try {
       const fresh = await getOwnAttendanceAction();
+      // A newer refetch started while this one was in flight; its answer wins.
+      if (ticket !== latestFetch.current) return;
       if (fresh) {
         setView(fresh);
         setJustUpdated(true);
@@ -55,21 +101,22 @@ export function StudentAttendanceClient({ initialView }: Props) {
     }
   }, []);
 
-  useEffect(() => {
-    const source = new EventSource(`/api/realtime/student/${studentId}`);
-    source.onmessage = (message) => {
-      let event: StudentAttendanceUpdatedEvent;
-      try {
-        event = JSON.parse(message.data) as StudentAttendanceUpdatedEvent;
-      } catch {
-        return;
-      }
+  const handleEvent = useCallback(
+    (event: StudentAttendanceUpdatedEvent) => {
       // Both finalization and a post-finalization correction reach here;
-      // either way the student's visible record may have changed.
+      // either way the student's visible record may have changed. The event is
+      // a signal — the refetch goes back through the authorized action.
       if (event.type === "student-attendance-updated") void refetch();
-    };
-    return () => source.close();
-  }, [refetch, studentId]);
+    },
+    [refetch],
+  );
+
+  const { state: connection } = useLiveStream<StudentAttendanceUpdatedEvent>({
+    url: `/api/realtime/student/${studentId}`,
+    onEvent: handleEvent,
+    // A reconnect may have skipped an update, so re-read rather than assume.
+    onReconnect: refetch,
+  });
 
   useEffect(() => {
     if (!justUpdated) return;
@@ -82,6 +129,30 @@ export function StudentAttendanceClient({ initialView }: Props) {
       <p aria-live="polite" className="sr-only">
         {justUpdated ? "Your attendance record was updated." : ""}
       </p>
+
+      {/*
+        Shown only once a live connection has been lost — never on first load,
+        and never per retry attempt, so the announcement fires on the change of
+        state rather than on every attempt. Carries its own words rather than a
+        colour, so it reads the same to somebody who cannot see the amber.
+      */}
+      {connection === "reconnecting" && (
+        <p
+          role="status"
+          className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+        >
+          Reconnecting for live updates. Your attendance record is safe — this
+          page will catch up on its own.
+        </p>
+      )}
+      {connection === "unauthorized" && (
+        <p
+          role="status"
+          className="rounded-md border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700"
+        >
+          Live updates have stopped. Reload the page to sign in again.
+        </p>
+      )}
 
       {justUpdated && (
         <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
@@ -137,12 +208,7 @@ export function StudentAttendanceClient({ initialView }: Props) {
                     ) : null}
                   </p>
                   <p className="truncate text-xs text-neutral-500">
-                    {new Date(entry.sessionDate).toLocaleDateString(undefined, {
-                      weekday: "short",
-                      year: "numeric",
-                      month: "short",
-                      day: "numeric",
-                    })}
+                    <LocalDate iso={entry.sessionDate} />
                     {entry.subjectName ? ` · ${entry.cohortName}` : ""}
                     {entry.isManuallyCorrected ? " · confirmed by your teacher" : ""}
                   </p>

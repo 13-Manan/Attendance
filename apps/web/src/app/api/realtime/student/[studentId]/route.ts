@@ -53,8 +53,18 @@ export async function GET(
       controller.enqueue(encoder.encode(": connected\n\n"));
       unsubscribe = attendanceEventPublisher.subscribeToStudent(studentId, send);
 
+      // A *named* event rather than the `: heartbeat` comment this used to
+      // send. Comments are discarded by the EventSource parser, so the client
+      // had no way to observe them — and measured on this build, a browser
+      // holding a stream whose server has been killed reports `readyState:
+      // OPEN` with no error for tens of seconds, because nothing obliges it to
+      // notice a socket that has simply gone quiet. A signal the client can
+      // actually see is what lets it time the connection out and reconnect.
+      //
+      // `onmessage` does not fire for named events, so every existing consumer
+      // is unaffected and no domain event contract changes.
       heartbeat = setInterval(() => {
-        controller.enqueue(encoder.encode(": heartbeat\n\n"));
+        controller.enqueue(encoder.encode("event: heartbeat\ndata: {}\n\n"));
       }, HEARTBEAT_INTERVAL_MS);
 
       request.signal.addEventListener("abort", () => {
