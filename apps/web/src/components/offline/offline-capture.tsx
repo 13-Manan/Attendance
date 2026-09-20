@@ -437,6 +437,17 @@ function MarkStep({
   );
 }
 
+/**
+ * The two buttons a teacher actually presses, forty times in a row.
+ *
+ * Sized for a finger rather than a cursor: `min-h-11` is ~44px, the smallest
+ * target most accessibility guidance accepts for touch. They were 30px, which
+ * is fine on a laptop and wrong on the device this screen exists for — a
+ * phone or tablet held in one hand at the front of a classroom, where a
+ * mis-tap marks the wrong student and nothing on screen says so.
+ *
+ * The label stays small; only the hit area grows.
+ */
 function MarkButton({
   active,
   activeClass,
@@ -453,7 +464,7 @@ function MarkButton({
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      className={`rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+      className={`min-h-11 min-w-16 rounded-md border px-3 text-xs font-medium transition-colors sm:min-h-9 ${
         active ? activeClass : "border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-50"
       }`}
     >

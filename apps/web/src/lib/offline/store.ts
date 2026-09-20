@@ -2,9 +2,14 @@
 
 import type { OfflineKitClass } from "@/modules/offline-sync/offline-kit";
 import {
+  clearAllOfflineData,
+  clearOfflineOwner,
+  countUnsyncedWork,
   deleteSessionCascade,
   getCachedClasses,
   getDeviceId,
+  getOfflineOwner,
+  setOfflineOwner,
   isOfflineStorageAvailable,
   listQueue,
   listSessions,
@@ -65,6 +70,17 @@ export interface OfflineState {
   deviceId: string | null;
   /** True while a drain is in flight, for the "Sync now" button. */
   draining: boolean;
+  /**
+   * Set when this device holds another account's offline work.
+   *
+   * Everything stays on disk — it is somebody's attendance and discarding it
+   * silently is the one thing this module must never do — but it is hidden
+   * from the current user and never sent under their session. They see a
+   * short explanation instead of a roster they should not have.
+   */
+  foreignOwner: boolean;
+  /** How much unsynced work is on this device, for the sign-out warning. */
+  unsyncedCount: number;
 }
 
 const INITIAL: OfflineState = {
@@ -76,6 +92,8 @@ const INITIAL: OfflineState = {
   cachedClasses: null,
   deviceId: null,
   draining: false,
+  foreignOwner: false,
+  unsyncedCount: 0,
 };
 
 let state: OfflineState = INITIAL;
@@ -114,6 +132,21 @@ export function getServerState(): OfflineState {
 // Reads
 // ---------------------------------------------------------------------------
 
+/**
+ * Work on this device the server has not accepted.
+ *
+ * One definition, used by the sign-out warning, the hand-over button and the
+ * guard inside `takeOverDevice`. They have to agree: a screen that says
+ * "nothing is waiting" beside a button that silently refuses to act is worse
+ * than either alone.
+ */
+function unsyncedWorkIn(queue: QueueRecord[], sessions: LocalSession[]): number {
+  return (
+    queue.filter((item) => item.status !== "SYNCED").length +
+    sessions.filter((session) => session.syncStatus === "DRAFT").length
+  );
+}
+
 export async function refresh(): Promise<void> {
   try {
     const [snapshot, queue, sessions, cached, deviceId] = await Promise.all([
@@ -123,6 +156,25 @@ export async function refresh(): Promise<void> {
       getCachedClasses<OfflineKitClass>(),
       getDeviceId(),
     ]);
+    if (state.foreignOwner) {
+      // Another account's work is on this device. Counted so the UI can say
+      // how much is waiting, but never listed and never drained.
+      set({
+        ready: true,
+        storageAvailable: true,
+        snapshot: EMPTY_SNAPSHOT,
+        queue: [],
+        sessions: [],
+        cachedClasses: null,
+        deviceId,
+        // Drafts count, not just queued items. A register marked but never
+        // finalized exists only here, so it is the *most* fragile thing on the
+        // device — and this number is what decides whether the hand-over
+        // button appears. Counting only the queue would offer to wipe it.
+        unsyncedCount: unsyncedWorkIn(queue, sessions),
+      });
+      return;
+    }
     set({
       ready: true,
       storageAvailable: true,
@@ -131,6 +183,7 @@ export async function refresh(): Promise<void> {
       sessions,
       cachedClasses: cached.length > 0 ? cached : null,
       deviceId,
+      unsyncedCount: unsyncedWorkIn(queue, sessions),
     });
   } catch {
     set({ ready: true, storageAvailable: false });
@@ -146,7 +199,7 @@ let started = false;
  * operations are in `SYNCING` forever, picked up by no drain and reported by
  * nothing, which is a lost register that merely looks tidy.
  */
-export async function start(): Promise<void> {
+export async function start(currentUserId?: string | null): Promise<void> {
   if (started) return;
   started = true;
   if (!isOfflineStorageAvailable()) {
@@ -154,6 +207,7 @@ export async function start(): Promise<void> {
     return;
   }
   try {
+    if (currentUserId) await claimOwnership(currentUserId);
     await recoverQueue();
     void requestPersistentStorage();
   } catch {
@@ -163,12 +217,106 @@ export async function start(): Promise<void> {
   await refresh();
 }
 
+/**
+ * Decides whether this device's offline data belongs to the person using it.
+ *
+ * Three cases, and the middle one is the reason this exists:
+ *
+ * - **No owner recorded.** A fresh device, or data queued before ownership was
+ *   tracked. Claim it for the current user. Adopting rather than discarding
+ *   keeps an upgrade from stranding a register that was already waiting.
+ * - **A different owner.** Hide everything and drain nothing. The data stays
+ *   on disk so its owner can sign back in and send it; the current user is
+ *   told only that some other account's work is here, not whose or what.
+ * - **The same owner.** Normal operation.
+ *
+ * Only called where the signed-in user is actually known — a server-rendered
+ * page. The static offline shell cannot know, and does not guess; the queue's
+ * own owner stamp is what protects a drain from there, because sending
+ * requires a network and the server refuses a mismatch.
+ */
+async function claimOwnership(currentUserId: string): Promise<void> {
+  const owner = await getOfflineOwner();
+  if (owner !== null) {
+    set({ foreignOwner: owner !== currentUserId });
+    return;
+  }
+
+  // No owner recorded: either a device that has never been used, or one
+  // holding data from a build that predates ownership tracking.
+  //
+  // An empty device is claimed silently — there is nothing to mis-attribute.
+  // A device that already holds registers is *not*, because nothing here can
+  // say whose they are, and the person signing in now is as likely to be the
+  // second teacher as the first. Claiming it for them is precisely the bug
+  // this guard exists to close, so it is quarantined instead and they are
+  // offered an explicit choice.
+  const [sessions, queue] = await Promise.all([listSessions(), listQueue()]);
+  if (sessions.length === 0 && queue.length === 0) {
+    await setOfflineOwner(currentUserId);
+    set({ foreignOwner: false });
+    return;
+  }
+  set({ foreignOwner: true });
+}
+
+/**
+ * Claims a device whose previous registers have all reached the server.
+ *
+ * The explicit way out of `foreignOwner`, and deliberately not offered while
+ * anything is unsynced: what is discarded here is a stale roster and copies
+ * of registers the server already holds, never attendance that exists only on
+ * this device.
+ */
+
+export async function takeOverDevice(currentUserId: string): Promise<void> {
+  if ((await countUnsyncedWork()) > 0) return;
+  await clearAllOfflineData();
+  await setOfflineOwner(currentUserId);
+  set({ foreignOwner: false });
+  await refresh();
+}
+
+/**
+ * Sign-out cleanup.
+ *
+ * Clears the roster, the registers and the captured photos so the next
+ * teacher on a shared tablet finds nothing of the last one's — but only when
+ * the server already has everything. With work still queued it keeps the
+ * data and reports the count, and the sign-out UI warns instead of wiping.
+ * Returns what it did, so the caller can say so.
+ */
+export async function clearForSignOut(): Promise<{ cleared: boolean; unsynced: number }> {
+  if (!isOfflineStorageAvailable()) return { cleared: false, unsynced: 0 };
+  try {
+    const unsynced = await countUnsyncedWork();
+    if (unsynced > 0) return { cleared: false, unsynced };
+    await clearAllOfflineData();
+    await clearOfflineOwner();
+    set({
+      snapshot: EMPTY_SNAPSHOT,
+      queue: [],
+      sessions: [],
+      cachedClasses: null,
+      foreignOwner: false,
+      unsyncedCount: 0,
+    });
+    return { cleared: true, unsynced: 0 };
+  } catch {
+    return { cleared: false, unsynced: 0 };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Sync
 // ---------------------------------------------------------------------------
 
 export async function syncNow(): Promise<void> {
   if (state.draining || !state.storageAvailable) return;
+  // Belt and braces with the server's own refusal: a device holding another
+  // account's work does not even attempt a drain, so their register is not
+  // repeatedly rejected under a session that can never accept it.
+  if (state.foreignOwner) return;
   set({ draining: true });
   try {
     await drainQueue();

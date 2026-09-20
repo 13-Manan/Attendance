@@ -27,7 +27,7 @@ export default async function DashboardLayout({ children }: LayoutProps<"/dashbo
   // register queued in a classroom keeps syncing while the teacher is reading
   // a report. It renders no markup of its own — the layout below is unchanged.
   return (
-    <SyncProvider>
+    <SyncProvider userId={user.userId}>
       <div className="flex min-h-screen flex-col">
         <Topbar user={user} institutionName={institution?.name ?? null} />
         {/* Stacked on phones and tablets in portrait, side-by-side from `md`.

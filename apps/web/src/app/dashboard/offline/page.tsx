@@ -60,7 +60,7 @@ export default async function OfflinePage() {
         </p>
       </header>
 
-      <OfflineWorkbench classes={classes} />
+      <OfflineWorkbench classes={classes} userId={user.userId} />
 
       <section className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-xs text-neutral-600">
         <h2 className="text-sm font-semibold text-neutral-900">How this works</h2>

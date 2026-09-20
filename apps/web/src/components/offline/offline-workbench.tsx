@@ -3,7 +3,12 @@
 import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { EmptyState, Panel } from "@/components/ui/panel";
-import { discardDraft, downloadClasses, openLocalSession } from "@/lib/offline/store";
+import {
+  discardDraft,
+  downloadClasses,
+  openLocalSession,
+  takeOverDevice,
+} from "@/lib/offline/store";
 import type { OfflineKitClass } from "@/modules/offline-sync/offline-kit";
 import { OfflineCapture } from "./offline-capture";
 import { SyncQueuePanel } from "./sync-queue-panel";
@@ -41,9 +46,12 @@ export function OfflineWorkbench({
    * identical empty array and need opposite advice.
    */
   shell = false,
+  userId = null,
 }: {
   classes: OfflineKitClass[];
   shell?: boolean;
+  /** Signed-in user, when the page is server-rendered and therefore knows. */
+  userId?: string | null;
 }) {
   const sync = useSync();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -54,6 +62,7 @@ export function OfflineWorkbench({
   const sessions = sync?.offline.sessions ?? [];
   const deviceId = sync?.offline.deviceId ?? null;
   const storageBlocked = sync ? !sync.storageAvailable : false;
+  const offline = sync?.offline ?? { foreignOwner: false, unsyncedCount: 0 };
 
   /**
    * Stores the rosters for offline use.
@@ -102,6 +111,34 @@ export function OfflineWorkbench({
     (storageBlocked
       ? "This browser is blocking local storage, so offline capture is unavailable here."
       : null);
+
+  // Another account's work is on this device. Shown instead of the workbench,
+  // not beside it: the point is that this user sees no roster, no register and
+  // no queue belonging to somebody else.
+  if (offline.foreignOwner) {
+    return (
+      <Panel title="This device holds another account's registers">
+        <p className="text-sm text-neutral-700">
+          Someone else took attendance on this device and has not sent it to the
+          server yet. It is kept safe here and is only visible to them.
+        </p>
+        <p className="text-sm text-neutral-700">
+          {offline.unsyncedCount > 0
+            ? `${offline.unsyncedCount} register${offline.unsyncedCount === 1 ? " is" : "s are"} waiting. Ask that teacher to sign in on this device while it has a connection, and it will send itself.`
+            : "Nothing is waiting to be sent, so this device can be handed over."}
+        </p>
+        {offline.unsyncedCount === 0 && userId ? (
+          <div>
+            <Button onClick={() => void takeOverDevice(userId)}>Use this device for my classes</Button>
+          </div>
+        ) : null}
+        <p className="text-xs text-neutral-500">
+          Their register cannot be sent under your account — the server refuses
+          it — and nothing here is discarded to make room.
+        </p>
+      </Panel>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">

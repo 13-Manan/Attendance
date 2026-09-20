@@ -2,6 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import { logout } from "@/modules/auth-tenancy/actions";
+import { clearForSignOut } from "@/lib/offline/store";
+import { useSync } from "@/components/offline/sync-provider";
 
 /**
  * Initials for the avatar. Two at most, and from word starts rather than the
@@ -48,6 +50,36 @@ export interface UserMenuProps {
  */
 export function UserMenu({ name, email, roleNames, institutionName }: UserMenuProps) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
+  const sync = useSync();
+  const unsynced = sync?.offline.unsyncedCount ?? 0;
+
+  /**
+   * Clears this device's offline data on the way out — but only when the
+   * server already has everything.
+   *
+   * A shared classroom tablet is the case this exists for: without it the
+   * next teacher to sign in inherits the last one's downloaded roster and
+   * their draft register. With unsynced work, `clearForSignOut` deliberately
+   * keeps the data and the warning above is what the teacher sees; discarding
+   * somebody's attendance to tidy up a device is the one thing this must not
+   * do.
+   *
+   * Awaited before the Server Action proceeds, and failure is swallowed: a
+   * sign-out that cannot clear IndexedDB must still sign the user out, and the
+   * ownership guard hides the leftovers from the next account regardless.
+   */
+  const signingOut = useRef(false);
+  function onSignOut(event: React.FormEvent<HTMLFormElement>) {
+    // The second pass, re-entered from `requestSubmit` below. Let it through,
+    // otherwise this handler cancels the submit it just asked for.
+    if (signingOut.current) return;
+    event.preventDefault();
+    signingOut.current = true;
+    const form = event.currentTarget;
+    void clearForSignOut()
+      .catch(() => undefined)
+      .then(() => form.requestSubmit());
+  }
 
   useEffect(() => {
     const details = detailsRef.current;
@@ -141,7 +173,23 @@ export function UserMenu({ name, email, roleNames, institutionName }: UserMenuPr
           </div>
         </div>
 
-        <form action={logout} className="p-1">
+        <form action={logout} onSubmit={onSignOut} className="p-1">
+          {unsynced > 0 ? (
+            // Said before they press it, not after. On a shared tablet the
+            // register would otherwise be left for whoever signs in next, who
+            // cannot send it — the server refuses a queue drained by the wrong
+            // account — so the only person who can is the one about to leave.
+            <p
+              role="status"
+              className="mb-1 rounded-md bg-amber-50 px-2 py-1.5 text-xs text-amber-900"
+            >
+              <span className="font-medium">
+                {unsynced} register{unsynced === 1 ? "" : "s"} not yet sent.
+              </span>{" "}
+              Connect and sync before signing out, or it stays on this device
+              until you sign in here again.
+            </p>
+          ) : null}
           <button
             type="submit"
             className="w-full rounded-md px-2 py-2 text-left text-sm font-medium text-neutral-700 hover:bg-neutral-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900"

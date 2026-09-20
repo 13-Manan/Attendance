@@ -73,6 +73,32 @@ export interface OfflineQueueItem<TPayload = unknown> {
 export interface IdempotencyKey {
   /** Stable per browser profile, generated once and stored in IndexedDB. */
   deviceId: string;
+  /**
+   * Who was signed in when this operation was created, as a *claim of intent*
+   * — never as authorization.
+   *
+   * The actor is still resolved from the session cookie, exactly as before.
+   * This field exists so the server can refuse a mismatch rather than act on
+   * it. A classroom tablet is shared: one teacher takes a register offline,
+   * signs out, and the next signs in. Without this, that queue drains under
+   * the second teacher's session and their name goes on the first teacher's
+   * attendance decisions — which is not a permission failure the server could
+   * otherwise detect, because the second teacher may legitimately teach that
+   * class.
+   *
+   * Optional because a queue item created before this field existed has no
+   * owner recorded. Those are treated as unowned and are the one case the
+   * server still accepts, so an upgrade does not strand attendance that was
+   * already queued.
+   */
+  ownerUserId?: string;
+  /**
+   * Payload format, so an app update can recognise an operation it does not
+   * understand instead of misreading it.
+   *
+   * Absent means version 1 — everything queued before versioning existed.
+   */
+  schemaVersion?: number;
   /** Unique per operation, generated at queue time and never regenerated. */
   operationId: string;
   /**
@@ -134,6 +160,17 @@ export type OfflineMarkSource = "MANUAL" | "LOCAL_AI_ASSISTED";
 // ---------------------------------------------------------------------------
 // Operations
 // ---------------------------------------------------------------------------
+
+/**
+ * The payload format this build writes and understands.
+ *
+ * Bumped only for a change the server cannot read compatibly. An operation
+ * arriving with a *higher* version came from a newer build than the one
+ * processing it, which happens when a tab has been open across a deploy; it
+ * is rejected as permanent rather than guessed at, and the device is told to
+ * reload.
+ */
+export const SYNC_SCHEMA_VERSION = 1;
 
 export type SyncOperationKind = "attendance.session" | "attendance.correction";
 

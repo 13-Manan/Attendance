@@ -10,6 +10,7 @@ import {
 import { listAttendanceRecordRowsForSession } from "@/modules/attendance-review/repository";
 import * as repo from "./repository";
 import { hasApplied, ledgerEntry, withAppliedOperation } from "./idempotency";
+import { SYNC_SCHEMA_VERSION } from "./types";
 import type {
   CorrectionSyncPayload,
   SessionSyncPayload,
@@ -135,11 +136,69 @@ export async function applySyncBatch(
   return { outcomes, serverTime: now().toISOString() };
 }
 
+/**
+ * Two refusals that precede any attendance work.
+ *
+ * Neither is an authorization check — the actor is the cookie's, as always.
+ * They catch two ways a *correct* authorization can still produce a wrong
+ * record:
+ *
+ * 1. **A queue drained by the wrong person.** Classroom tablets are shared.
+ *    One teacher queues a register offline and signs out; the next signs in
+ *    and the queue drains under their session. The server cannot detect that
+ *    from permissions alone — the second teacher may genuinely teach the
+ *    class — so it would happily write the first teacher's decisions under
+ *    the second teacher's name. The device says whose work it is; a mismatch
+ *    is refused, permanently, and the client parks the item until its owner
+ *    signs back in.
+ *
+ * 2. **A payload from a newer build.** A tab open across a deploy can hold
+ *    operations in a format this server does not know. Guessing at them is
+ *    how a field gets silently dropped from somebody's register.
+ *
+ * Both are permanent: retrying either without changing something would fail
+ * identically forever, and the retry policy needs to hear that.
+ */
+function refuseBeforeApplying(
+  actor: SessionUser,
+  operation: SyncOperation,
+): SyncOperationOutcome | null {
+  if (operation.ownerUserId && operation.ownerUserId !== actor.userId) {
+    return {
+      operationId: operation.operationId,
+      status: "REJECTED",
+      attendanceSessionId: null,
+      conflicts: [],
+      applied: 0,
+      error: "owner_mismatch",
+      retryable: false,
+    };
+  }
+
+  const version = operation.schemaVersion ?? 1;
+  if (version > SYNC_SCHEMA_VERSION) {
+    return {
+      operationId: operation.operationId,
+      status: "REJECTED",
+      attendanceSessionId: null,
+      conflicts: [],
+      applied: 0,
+      error: "unsupported_schema_version",
+      retryable: false,
+    };
+  }
+
+  return null;
+}
+
 async function applyOne(
   actor: SessionUser,
   operation: SyncOperation,
   deps: SyncDeps,
 ): Promise<SyncOperationOutcome> {
+  const refusal = refuseBeforeApplying(actor, operation);
+  if (refusal) return refusal;
+
   try {
     return operation.kind === "attendance.session"
       ? await applySessionOperation(actor, operation.operationId, operation.deviceId, operation.payload, deps)

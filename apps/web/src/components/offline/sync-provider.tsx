@@ -79,7 +79,18 @@ const SyncContext = createContext<SyncContextValue | null>(null);
 /** How often to look for work that has come due behind a backoff. */
 const POLL_INTERVAL_MS = 20_000;
 
-export function SyncProvider({ children }: { children: ReactNode }) {
+export function SyncProvider({
+  children,
+  userId = null,
+}: {
+  children: ReactNode;
+  /**
+   * The signed-in user, when the surrounding page is server-rendered and
+   * therefore knows. Null on the static `/offline` shell, which cannot — see
+   * `claimOwnership`.
+   */
+  userId?: string | null;
+}) {
   const isOffline = useOffline();
   const offline = useSyncExternalStore(subscribe, getState, getServerState);
 
@@ -87,15 +98,15 @@ export function SyncProvider({ children }: { children: ReactNode }) {
   // storage the browser will not evict, and take a first reading. `start` is
   // idempotent, so the second provider on the `/offline` shell is harmless.
   useEffect(() => {
-    void start();
-  }, []);
+    void start(userId);
+  }, [userId]);
 
   // Drain when connectivity returns. The dependency is the flag itself, so
   // this fires on the offline → online edge and not on every render.
   useEffect(() => {
-    if (isOffline || !offline.storageAvailable) return;
+    if (isOffline || !offline.storageAvailable || offline.foreignOwner) return;
     void syncNow();
-  }, [isOffline, offline.storageAvailable]);
+  }, [isOffline, offline.storageAvailable, offline.foreignOwner]);
 
   // Drain on tab focus and on a slow timer.
   useEffect(() => {

@@ -509,6 +509,51 @@ export async function deleteQueueItem(id: string): Promise<void> {
   await tx([STORE_QUEUE], "readwrite", (t) => req(t.objectStore(STORE_QUEUE).delete(id)));
 }
 
+const OWNER_KEY = "ownerUserId";
+
+/**
+ * Which signed-in account this device's offline data belongs to.
+ *
+ * Distinct from `deviceId` in the way that matters: `deviceId` says *which
+ * tablet*, this says *whose work is on it*. A classroom tablet is handed
+ * between teachers, and until this existed the second teacher to sign in
+ * inherited the first one's downloaded roster and their unsynced register —
+ * measured, not theorised: Section A's roster and an eight-mark draft were
+ * both visible to a teacher who taught neither.
+ *
+ * Null means no owner has been recorded yet, which is either a fresh device
+ * or data queued by a build that predates this field.
+ */
+export async function getOfflineOwner(): Promise<string | null> {
+  const row = await tx([STORE_META], "readonly", (t) =>
+    req<{ key: string; value: string } | undefined>(t.objectStore(STORE_META).get(OWNER_KEY)),
+  );
+  return row?.value ?? null;
+}
+
+export async function setOfflineOwner(userId: string): Promise<void> {
+  await tx([STORE_META], "readwrite", (t) =>
+    req(t.objectStore(STORE_META).put({ key: OWNER_KEY, value: userId })),
+  );
+}
+
+export async function clearOfflineOwner(): Promise<void> {
+  await tx([STORE_META], "readwrite", (t) => req(t.objectStore(STORE_META).delete(OWNER_KEY)));
+}
+
+/**
+ * Work on this device that the server has not accepted yet.
+ *
+ * The number a sign-out has to respect. "Never silently lose attendance"
+ * means the answer to "can I wipe this device?" is a count, not a guess.
+ */
+export async function countUnsyncedWork(): Promise<number> {
+  const [queue, sessions] = await Promise.all([listQueue(), listSessions()]);
+  const unsyncedQueue = queue.filter((item) => item.status !== "SYNCED").length;
+  const drafts = sessions.filter((session) => session.syncStatus === "DRAFT").length;
+  return unsyncedQueue + drafts;
+}
+
 /**
  * Wipes every offline store.
  *

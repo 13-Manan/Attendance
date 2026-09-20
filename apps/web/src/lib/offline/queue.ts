@@ -6,11 +6,13 @@ import type {
   SyncOperationOutcome,
   SyncStatus,
 } from "@/modules/offline-sync/types";
+import { SYNC_SCHEMA_VERSION } from "@/modules/offline-sync/types";
 import {
   claimDueItems,
   deleteQueueItem,
   enqueue,
   getDeviceId,
+  getOfflineOwner,
   listQueue,
   releaseStaleClaims,
   updateQueueItem,
@@ -238,10 +240,17 @@ async function drainOnce(): Promise<DrainResult> {
   }
 
   const deviceId = await getDeviceId();
+  // Whose work this is, carried so the server can refuse a mismatch rather
+  // than write one teacher's register under another's name. Not a credential
+  // and not authorization — the cookie is still the only thing that decides
+  // what the actor may do. See `refuseBeforeApplying` in the sync service.
+  const ownerUserId = (await getOfflineOwner()) ?? undefined;
   const operations = claimed.map((item) => ({
     kind: item.kind,
     operationId: item.id,
     deviceId,
+    ownerUserId,
+    schemaVersion: SYNC_SCHEMA_VERSION,
     attendanceSessionId: item.attendanceSessionId,
     payload: item.payload,
   }));
