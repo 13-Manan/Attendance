@@ -38,6 +38,7 @@ import {
   findNearestTemplatesInInstitution,
   listSampleHistoryForStudent,
 } from "@/modules/face-enrollment/repository";
+import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
 
 const TAG = `verify-${randomUUID().slice(0, 8)}`;
 const ids = {
@@ -173,7 +174,7 @@ async function main() {
   assert.equal(stored.channel, "STAFF");
   assert.equal(stored.enrolledByUserId, ids.user);
   assert.equal(stored.sourceImageUrl, null, "the raw image must never be persisted");
-  assert.equal(stored.embeddingDim, 512);
+  assert.equal(stored.embeddingDim, EMBEDDING_DIMENSION);
   ok("provenance, alignment and the actor are all persisted; no image URL is");
 
   // -- 2. The vector actually landed, and is unit length -------------------
@@ -325,7 +326,7 @@ async function main() {
   assert.equal(history.length, 3, "retired templates stay in the history");
   assert.equal(history[0].isActive, true, "live templates sort first");
   assert.equal(history[0].enrolledByName, "Verification Admin");
-  // `embeddingDim` is metadata (the number 512) and is expected. What must not
+  // `embeddingDim` is metadata (the dimension count) and is expected. What must not
   // appear is a vector: the `embedding` key itself, or any array at all.
   const historyJson = JSON.stringify(history);
   assert.equal(historyJson.includes('"embedding":'), false, "no embedding field");

@@ -3,6 +3,17 @@ uvicorn[standard]>=0.32,<1.0
 pydantic>=2.9,<3.0
 pydantic-settings>=2.6,<3.0
 onnxruntime>=1.19,<2.0
-numpy>=1.26,<2.0
+# opencv-python-headless, not opencv-python: the GUI build pulls libGL, X11 and
+# GTK into a slim server image for windowing this service never does.
+#
+# It is what actually runs YuNet and SFace. Both are ONNX graphs, but the YuNet
+# graph emits undecoded per-stride tensors — the anchor decoding, score fusion,
+# keypoint decoding and NMS that turn those into usable detections live in
+# OpenCV's C++ FaceDetectorYN, as does the reference alignment transform SFace
+# was trained against. See app/models/opencv_provider.py.
+opencv-python-headless>=4.10,<5.0
+# opencv-python-headless 4.10+ requires numpy 2.x. The previous <2.0 pin
+# predates it; the suite passes on 2.4.
+numpy>=2.0,<3.0
 pillow>=10.4,<11.0
 python-multipart>=0.0.12

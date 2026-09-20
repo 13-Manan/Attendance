@@ -18,5 +18,11 @@ bench
 requirements-dev.txt
 ruff.toml
 
+# Model weights. ~37 MiB that the image deliberately does not carry — see the
+# Dockerfile for why — and a build context is copied to the daemon wholesale,
+# so excluding them keeps every build fast whether or not a developer has run
+# scripts/fetch_models.py.
+models
+
 *.md
 .DS_Store

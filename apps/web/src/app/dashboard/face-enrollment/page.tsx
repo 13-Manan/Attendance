@@ -81,12 +81,12 @@ function ModelProvenance({ model }: { model: ModelInfoResponse | null }) {
     >
       {!model.productionEligible ? (
         <p role="alert" className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
-          <span className="font-medium">
-            This model is not production-eligible and does not recognise anybody.
-          </span>{" "}
-          Its weights have commercial-use status &ldquo;{model.commercialUse}&rdquo;. Enrollment
-          works and the whole pipeline is exercised end to end, but no face will ever be matched.
-          Take attendance by hand until a licence-verified model is deployed.
+          <span className="font-medium">This model is not cleared for production use.</span>{" "}
+          Its weights have commercial-use status &ldquo;{model.commercialUse}&rdquo;.{" "}
+          {model.commercialUse === "not-applicable"
+            ? "This backend is a development stub: enrollment works and the whole pipeline is exercised end to end, but no face will ever be matched."
+            : "Recognition does run, and enrolled faces can be matched. The unresolved question is the licence behind the weights, not whether the model works — so results must be treated as suggestions and confirmed by a person."}{" "}
+          Production recognition stays blocked until a licence-verified model is deployed.
         </p>
       ) : null}
 

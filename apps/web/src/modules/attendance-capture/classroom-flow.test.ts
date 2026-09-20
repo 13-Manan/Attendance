@@ -37,6 +37,7 @@ import type {
   DetectResponse,
   ModelInfoResponse,
 } from "@attendance/shared-types";
+import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
 
 /**
  * The Phase 4 scenario suite: the classroom flow end to end, from a frame
@@ -54,7 +55,7 @@ import type {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const DIM = 512;
+const DIM = EMBEDDING_DIMENSION;
 
 function angleVec(theta: number): number[] {
   const v = new Array<number>(DIM).fill(0);

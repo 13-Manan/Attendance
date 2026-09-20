@@ -368,7 +368,7 @@ backend, waits for `/v1/health`, and runs the web suite with
 hermetic — no Python, no network.
 
 What integration tests prove against the mock backend: the contract version
-matches, embeddings are 512-d and unit length, `modelVersion` is composite,
+matches, embeddings are 128-d and unit length, `modelVersion` is composite,
 faces carry their image's `sequenceNumber`, the same image embeds
 deterministically across calls, a student in two photos is counted once, the
 search stays class-scoped, and the summary carries no biometric material.
@@ -381,10 +381,17 @@ run against a real dataset.
 
 ## 11. Status and limitations
 
-- **No production-cleared model exists in this repo.** `mock` is a hash stub;
-  `onnx` is a scaffold with no weights and `commercialUse: "unclear"`. The
-  service refuses to start with `FACE_AI_REQUIRE_PRODUCTION_MODEL=true` on
-  either.
+- **A real recogniser exists and is still not production-cleared.** Phase 5
+  added the `opencv` backend: YuNet detection + SFace embedding, both pinned by
+  SHA-256 and verified at startup. Its weight licences are permissive (YuNet
+  MIT, SFace Apache-2.0), but the training-data provenance behind the
+  distributed SFace artefact is unresolved for commercial biometric use, so it
+  reports `commercialUse: "unclear"` and `productionEligible: false`. The
+  service refuses to start on it with `FACE_AI_REQUIRE_PRODUCTION_MODEL=true`.
+  `mock` remains a hash stub; `onnx` remains a weightless scaffold.
+- **Embeddings are 128-d**, SFace's native width, since Phase 5. Any template
+  enrolled before that migration is a different width and is skipped and
+  counted rather than compared — see §3.
 - **Thresholds are unvalidated defaults.** See §4.
 - **No accuracy claim is supported by evidence.** No benchmark run against
   real classroom data exists.

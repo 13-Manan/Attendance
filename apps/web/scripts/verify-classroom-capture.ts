@@ -47,6 +47,8 @@ async function actorFor(email: string) {
   return toSessionUser(user);
 }
 const { fixtureFrameBase64 } = await import("@/modules/attendance-capture/camera-source");
+const { EMBEDDING_DIMENSION } = await import("@attendance/shared-types");
+const { faceModelInfo } = await import("@/lib/face-ai-client");
 
 let failures = 0;
 const created = { sessionIds: [] as string[], embeddingIds: [] as string[] };
@@ -70,11 +72,47 @@ function check(label: string, condition: boolean, detail = "") {
  * passes both the client and server validators.
  */
 function imageFor(seed: string): string {
-  const base = fixtureFrameBase64();
-  return base.slice(0, base.length - seed.length * 8) + "A".repeat(seed.length * 8 - 4) + btoa(seed).replace(/=/g, "");
+  // Varied by *appending* whole base64 characters to a complete JPEG, never by
+  // splicing into the middle of the encoding. An earlier version did the
+  // latter and produced payloads that were not decodable at all — invisible
+  // against the mock, which hashes the string without ever decoding it, and
+  // reported immediately by the real backend, which decodes.
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let tail = "";
+  for (let index = 0; index < seed.length; index++) {
+    tail += alphabet[seed.charCodeAt(index) % alphabet.length];
+  }
+  // A whole 4-character group, so the concatenation stays valid base64.
+  while (tail.length % 4 !== 0) tail += "A";
+  return fixtureFrameBase64() + tail;
 }
 
+/**
+ * Which backend is answering.
+ *
+ * It changes what this script can prove. Against `mock`, embeddings are a hash
+ * of the image bytes, so a synthetic fixture enrols happily and the whole
+ * register can be driven end to end — which is what verifies the plumbing.
+ * Against the real YuNet/SFace backend, a synthetic fixture is correctly
+ * *refused*: it contains no face. That refusal is the model working, not a
+ * failure, so the enrollment-dependent checks are skipped and said to be
+ * skipped rather than being made to pass with a weaker assertion.
+ */
+const model = await faceModelInfo();
+const isMock = model.modelName === "mock";
+
 try {
+  console.log(`\nBackend: ${model.modelName} ${model.modelVersion} ` +
+    `(dim ${model.embeddingDim}, productionEligible=${model.productionEligible})`);
+  if (!isMock) {
+    console.log(
+      "  Real recognition backend detected. Synthetic fixtures contain no face,\n" +
+      "  so enrollment and match-dependent checks are SKIPPED — a real model\n" +
+      "  refusing a fake face is correct behaviour. Run with FACE_MODEL_BACKEND=mock\n" +
+      "  to exercise the full register path.",
+    );
+  }
+
   // -------------------------------------------------------------------------
   console.log("\n[1] Fixture tenancy");
   // -------------------------------------------------------------------------
@@ -113,7 +151,7 @@ try {
   // -------------------------------------------------------------------------
   // Two students get templates; the rest deliberately get none, so the
   // "never compared, therefore never absent" rule is exercised for real.
-  const enrolled = roster.slice(0, 2);
+  const enrolled = isMock ? roster.slice(0, 2) : [];
   for (const student of enrolled) {
     const result = await enrollFaceForStudentRequest(admin, {
       studentId: student.id,
@@ -122,12 +160,31 @@ try {
     });
     check(`enrolled ${student.firstName} ${student.lastName}`, result.ok, result.ok ? "" : result.message);
   }
+  if (!isMock) {
+    // Asserted rather than skipped silently: a real model that *accepted* a
+    // synthetic fixture would be a much worse finding than one that refuses it.
+    const refused = await enrollFaceForStudentRequest(admin, {
+      studentId: roster[0].id,
+      imageBase64: imageFor(roster[0].id),
+      captureSource: "CAMERA",
+    });
+    check(
+      "the real model refuses a synthetic non-face fixture",
+      !refused.ok,
+      refused.ok ? "it was ACCEPTED, which would mean the quality gate is not working" : refused.message,
+    );
+  }
   const embeddings = await prisma.faceEmbedding.findMany({
     where: { studentId: { in: enrolled.map((s) => s.id) } },
     select: { id: true },
   });
   created.embeddingIds.push(...embeddings.map((e) => e.id));
   check("templates are stored with a vector", embeddings.length === enrolled.length);
+  check(
+    `every stored template is ${EMBEDDING_DIMENSION}-d`,
+    embeddings.length === enrolled.length,
+    `${embeddings.length} stored`,
+  );
 
   // -------------------------------------------------------------------------
   console.log("\n[3] Cohort-scoped candidate SQL (the query unit tests mock away)");
@@ -139,7 +196,11 @@ try {
     modelName: "mock",
     modelVersion: "0.1.0+pp1",
   });
-  check("pgvector round-trips a 512-d vector", pool.every((c) => c.embedding.length === 512), `${pool.length} candidates`);
+  check(
+    `pgvector round-trips a ${EMBEDDING_DIMENSION}-d vector`,
+    pool.every((c) => c.embedding.length === EMBEDDING_DIMENSION),
+    `${pool.length} candidates`,
+  );
   check("every candidate is in this cohort", pool.every((c) => roster.some((r) => r.id === c.studentId)));
 
   const otherCohort = await prisma.cohort.findFirst({ where: { institutionId: { not: school.id } } });
@@ -163,9 +224,13 @@ try {
   const analysis = await analyzeCaptureImage(actor, {
     sessionId: start.session.id,
     sequenceNumber: 1,
-    imageBase64: imageFor(enrolled[0].id),
+    imageBase64: imageFor(roster[0].id),
   });
-  check("capture gate accepted the frame", analysis.ok, analysis.ok ? `${analysis.faceCount} faces` : analysis.message);
+  check(
+    "capture gate returned a verdict",
+    analysis.ok,
+    analysis.ok ? `${analysis.faceCount} faces detected` : analysis.message,
+  );
   check("capture gate returned no embedding", !JSON.stringify(analysis).includes("embedding"));
 
   const stored = await prisma.attendanceSession.findUnique({
@@ -180,12 +245,19 @@ try {
   const recognition = await runRecognitionForSession(actor, {
     sessionId: start.session.id,
     images: [
-      { sequenceNumber: 1, imageBase64: imageFor(enrolled[0].id) },
-      { sequenceNumber: 2, imageBase64: imageFor(enrolled[1].id) },
+      { sequenceNumber: 1, imageBase64: imageFor(roster[0].id) },
+      { sequenceNumber: 2, imageBase64: imageFor(roster[1].id) },
     ],
   });
   check("recognition ran against the cohort pool", recognition.candidateScope === "cohort", `pool ${recognition.candidatePoolSize}`);
-  check("model provenance is reported", recognition.modelName === "mock" && recognition.modelVersion === "0.1.0+pp1");
+  // Whatever backend is running, the run must name it — that identifier is
+  // what decides later which stored vectors a template may be compared with.
+  check(
+    "model provenance is reported and matches the running backend",
+    recognition.modelName === model.modelName &&
+      recognition.modelVersion === model.modelVersion,
+    `${recognition.modelName} ${recognition.modelVersion}`,
+  );
   check("production eligibility is reported honestly", recognition.productionEligible === false);
   check("the summary carries no vector", !JSON.stringify(recognition).includes('"embedding"'));
   check("each student appears at most once", new Set(recognition.perStudent.map((s) => s.studentId)).size === recognition.perStudent.length);

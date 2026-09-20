@@ -27,6 +27,7 @@ import {
   runMultiImage,
   type MultiImageCell,
 } from "./multi-image.ts";
+import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(HERE, "results");
@@ -261,7 +262,7 @@ function main(): void {
       "and docs/BENCHMARKS.md. No face-recognition model in this repository is " +
       "licensed for production use.",
     parameters: {
-      embeddingDimension: 512,
+      embeddingDimension: EMBEDDING_DIMENSION,
       facesPerImage: FACES_PER_IMAGE_USED,
       poolSizes: POOL_SIZES,
       cohortSizes: COHORT_SIZES,

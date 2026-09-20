@@ -45,7 +45,7 @@ uvicorn app.main:app --reload --port 8000
 
 ```bash
 curl localhost:8000/v1/health
-# {"status":"ok","modelName":"mock","modelVersion":"0.1.0+pp1","embeddingDim":512}
+# {"status":"ok","modelName":"mock","modelVersion":"0.1.0+pp1","embeddingDim":128}
 
 # Full provenance of the loaded model, including whether it may be used
 # in production at all.

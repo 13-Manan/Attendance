@@ -1,13 +1,29 @@
 /**
  * Stable contract between apps/web and services/face-ai (internal REST API).
  * Mirrors the Pydantic schemas in services/face-ai/app/schemas.py.
- * Any embedding model swap must keep this shape (fixed 512-d vectors) or bump
+ * Any embedding model swap must keep this shape (fixed 128-d vectors) or bump
  * FACE_AI_CONTRACT_VERSION and update both sides together.
  */
 
 export const FACE_AI_CONTRACT_VERSION = "v1" as const;
 
-export const EMBEDDING_DIMENSION = 512 as const;
+/**
+ * Length of every face template, everywhere.
+ *
+ * 128 because that is what SFace emits: `face_recognition_sface_2021dec.onnx`
+ * has output `fc1` of shape [1, 128], verified against the model graph itself
+ * in the Phase 4.5 audit.
+ *
+ * It was 512 until Phase 5, which was never a measurement — it was the
+ * placeholder the scaffold was written around while no model had been chosen.
+ * Padding or randomly projecting 128 up to 512 was rejected: it adds no
+ * information, costs four times the storage and four times the arithmetic on
+ * every comparison, and leaves a number in the schema that describes nothing.
+ *
+ * Changing this invalidates every stored vector. It is a migration, not a
+ * setting — see the note on `FaceEmbedding.embedding` in schema.prisma.
+ */
+export const EMBEDDING_DIMENSION = 128 as const;
 
 export interface FaceAiHealthResponse {
   status: "ok";

@@ -36,7 +36,9 @@ over **synthetic embedding vectors**. No detector, no alignment, no pixels.
 
 The generative model is in `apps/web/scripts/bench/synthetic.ts` and is worth
 one paragraph here because everything downstream depends on it. Each student
-gets a uniformly random unit vector in R^512. Two such vectors have cosine
+gets a uniformly random unit vector in R^512. (The synthetic benchmark's own
+space; the production contract moved to 128-d in Phase 5 and these runs predate
+it.) Two such vectors have cosine
 ~ N(0, 0.044), so the *impostor* distribution is not a parameter — it falls
 out of the geometry of the space. A photograph of a student is constructed at
 an exactly controlled cosine to their identity vector, drawn from N(mu, sd)
@@ -70,7 +72,8 @@ Reported by `GET /v1/model-info` on the service these benchmarks ran against:
   "modelVersion": "0.1.0+pp1",
   "weightsVersion": "0.1.0",
   "preprocessingVersion": "1",
-  "embeddingDim": 512,
+  "embeddingDim": 512,   // historical: this run predates the Phase 5
+                         // move to SFace's native 128-d width
   "embeddingNormalized": true,
   "runtime": "numpy-hash-stub",
   "commercialUse": "not-applicable",

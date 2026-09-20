@@ -36,12 +36,19 @@ function unitVector(seedIndex = 0): number[] {
 }
 
 test("a vector of the wrong length is refused, whatever its norm", () => {
-  const short = new Array(128).fill(0);
-  short[0] = 1;
-  const check = inspectEmbedding(short);
+  // Derived from the contract rather than written as a number, so this stays a
+  // wrong-length vector whatever the contract's width becomes. It was a
+  // hardcoded 128 until Phase 5 made 128 the correct width — at which point the
+  // test was asserting that a valid vector is invalid.
+  const wrongLength = new Array(EMBEDDING_DIMENSION * 2).fill(0);
+  wrongLength[0] = 1;
+  const check = inspectEmbedding(wrongLength);
   assert.equal(check.ok, false);
   assert.equal(check.ok === false && check.problem, "wrong_dimension");
-  assert.match(check.ok === false ? check.detail : "", /expected 512/);
+  assert.match(
+    check.ok === false ? check.detail : "",
+    new RegExp(`expected ${EMBEDDING_DIMENSION}`),
+  );
 });
 
 test("an un-normalised vector is refused, because cosine is computed as a dot product", () => {

@@ -16,6 +16,7 @@ from pydantic_settings import BaseSettings
 from app.models.base import FaceModelProvider
 from app.models.mock_model import MockEmbeddingModel
 from app.models.onnx_provider import OnnxFaceModelProvider
+from app.models.opencv_provider import OpenCVFaceModelProvider
 from app.schemas import CommercialUseStatus
 
 
@@ -61,6 +62,22 @@ MODEL_REGISTRY: dict[str, BackendRegistration] = {
             "backend-log entry in models/LICENSING.md."
         ),
     ),
+    "opencv": BackendRegistration(
+        provider_cls=OpenCVFaceModelProvider,
+        # Real recognition, and still not production-eligible. The weight
+        # licences are permissive (SFace Apache-2.0, YuNet MIT) but the
+        # training-data provenance behind the distributed SFace artefact is
+        # unresolved for commercial biometric use. Until that is settled by
+        # someone qualified to settle it, this stays "unclear" and the guard
+        # below keeps it out of production.
+        commercial_use="unclear",
+        licence_note=(
+            "YuNet (MIT) + SFace (Apache-2.0) via OpenCV. The weights' own "
+            "licences are permissive, but the SFace training-data provenance "
+            "is unresolved for commercial biometric use — see "
+            "models/LICENSING.md. Real recognition, local evaluation only."
+        ),
+    ),
 }
 
 
@@ -72,8 +89,27 @@ class Settings(BaseSettings):
     #: research-only or unverified model cannot reach production by accident.
     face_ai_require_production_model: bool = False
 
-    #: Directory holding .onnx artefacts for the onnx backend.
+    #: Directory holding the .onnx artefacts for the onnx/opencv backends.
+    #:
+    #: No default path: a face-recognition service that falls back to a
+    #: built-in location is one that can silently load whatever is sitting
+    #: there. The backend refuses to start without this, and verifies the
+    #: SHA-256 of everything it finds (app/models/model_files.py).
     face_model_dir: str | None = None
+
+    #: YuNet detection tuning. Upstream's published defaults, exposed because a
+    #: classroom is not the benchmark they were chosen on. NOT CALIBRATED for
+    #: this product — see docs/RECOGNITION_ENGINE.md on threshold calibration.
+    face_detector_score_threshold: float = 0.6
+    face_detector_nms_threshold: float = 0.3
+    face_detector_top_k: int = 5000
+
+    #: Smallest face, in pixels on its shorter side, that may produce an
+    #: *enrolment* template. A bad template is permanent and silently degrades
+    #: every future match, so enrolment is gated where detection is not.
+    #: Conservative and configurable rather than tuned; no classroom data
+    #: exists to tune it against.
+    face_min_enrolment_face_pixels: int = 24
 
     #: ONNX Runtime execution providers, highest priority first, comma
     #: separated. CPU-only deployments need no change; a GPU deployment sets
@@ -165,6 +201,14 @@ def build_provider(settings: Settings) -> FaceModelProvider:
             model_dir=settings.face_model_dir,
             execution_providers=settings.execution_provider_list,
             intra_op_num_threads=settings.face_model_intra_op_threads,
+        )
+    if registration.provider_cls is OpenCVFaceModelProvider:
+        return OpenCVFaceModelProvider(
+            model_dir=settings.face_model_dir,
+            score_threshold=settings.face_detector_score_threshold,
+            nms_threshold=settings.face_detector_nms_threshold,
+            top_k=settings.face_detector_top_k,
+            min_face_pixels=settings.face_min_enrolment_face_pixels,
         )
     return registration.provider_cls()
 

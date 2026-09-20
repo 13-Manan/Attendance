@@ -75,6 +75,16 @@ export interface OpenCameraResult {
 }
 
 export interface CameraSource {
+  /**
+   * Whether `open()` needs a `videoSink` to produce frames.
+   *
+   * True for real hardware: the preview element *is* the frame buffer, so a
+   * null sink yields a stream nothing can read. A fixture synthesises its
+   * frames and does not care. The hook uses this to refuse a start that could
+   * only reach a broken `ready`. Optional so an existing implementation keeps
+   * working; absent means "yes, required".
+   */
+  requiresVideoSink?: boolean;
   isAvailable(): boolean;
   /**
    * Cameras this device offers, for the "switch camera" control.
@@ -105,6 +115,7 @@ function decodePrefixInBrowser(base64: string): Uint8Array | null {
 
 export function browserCameraSource(): CameraSource {
   return {
+    requiresVideoSink: true,
     isAvailable() {
       // `mediaDevices` is absent on an insecure origin as well as on a browser
       // without the API, which covers both reasons the button should not be
@@ -289,6 +300,8 @@ export function fixtureCameraSource(
   let openStreams = 0;
 
   return {
+    // The fixture draws its own frames, so it needs no preview element.
+    requiresVideoSink: false,
     isAvailable: () => !options.unavailable,
     listVideoDevices: async () => devices,
     async open(request) {

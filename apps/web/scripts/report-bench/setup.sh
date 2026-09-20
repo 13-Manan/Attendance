@@ -10,7 +10,7 @@
 # `--drop` removes it again.
 #
 # One substitution is made to the generated DDL: FaceEmbedding.embedding is
-# `vector(512)`, which needs the pgvector extension, and pgvector is only
+# a `vector` column, which needs the pgvector extension, and pgvector is only
 # packaged for PostgreSQL 17+ while this machine runs 16. The column is
 # created as `bytea` here instead. No report query touches that column or
 # that table, so the substitution cannot affect a measurement — but it does
@@ -31,7 +31,7 @@ cd "$WEB_DIR"
 
 echo "==> generating DDL from prisma/schema.prisma"
 npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script \
-  | sed 's/"embedding" vector(512)/"embedding" bytea/' \
+  | sed -E 's/"embedding" vector\([0-9]+\)/"embedding" bytea/' \
   > /tmp/attendance-bench-ddl.sql
 
 echo "==> creating $BENCH_DB"

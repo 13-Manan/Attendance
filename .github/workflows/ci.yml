@@ -112,6 +112,19 @@ jobs:
       - name: Install (locked to declared ranges)
         run: pip install -r requirements-dev.txt
 
+      # The real YuNet/SFace tests skip themselves when the artefacts are
+      # absent, so without this step the backend that actually does the
+      # recognition would be silently untested in CI. Cached on the pinned
+      # hashes: a cache hit is only valid for the exact bytes the pins name.
+      - name: Cache face model artefacts
+        uses: actions/cache@v4
+        with:
+          path: services/face-ai/models
+          key: face-models-8f2383e4-0ba9fbfa
+
+      - name: Fetch and verify face models
+        run: python scripts/fetch_models.py
+
       - name: Lint
         run: ruff check .
 

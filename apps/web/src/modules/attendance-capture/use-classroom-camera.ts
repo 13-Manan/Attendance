@@ -151,10 +151,33 @@ export function useClassroomCamera(options: UseClassroomCameraOptions = {}): Cla
       dispatch({ type: "start" });
 
       try {
+        const sink = videoRef.current;
+        // A real camera with nowhere to draw is the failure this catches. The
+        // stream opens happily, the state machine reaches `ready`, the shutter
+        // looks enabled — and the first capture fails with "no camera preview
+        // is attached", which is exactly what a caller starting the camera in
+        // the same tick as the render that mounts `<video>` produced.
+        //
+        // Only enforced when the source needs a sink. A fixture draws nothing
+        // and legitimately passes null.
+        if (sink === null && source.requiresVideoSink !== false) {
+          openingRef.current = false;
+          dispatch({
+            type: "fail",
+            failure: {
+              kind: "unknown",
+              message:
+                "The camera could not attach to the page. Reload and try again.",
+              retryable: true,
+            },
+          });
+          return;
+        }
+
         const stream = await source.open({
           facingMode: "environment",
           deviceId,
-          videoSink: videoRef.current,
+          videoSink: sink,
         });
 
         if (generation !== generationRef.current) {

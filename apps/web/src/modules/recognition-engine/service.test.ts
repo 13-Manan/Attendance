@@ -16,18 +16,19 @@ import type { Cohort } from "../cohorts/types.ts";
 import type { Institution } from "../institutions/types.ts";
 import type { CandidateEmbeddingWithVector } from "../recognition-results/repository.ts";
 import type { AttendanceSession } from "../sessions/types.ts";
+import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
 import type { DetectEmbedRequest, DetectEmbedResponse, ModelInfoResponse } from "@attendance/shared-types";
 
 // ---------------------------------------------------------------------------
 // Vector fixtures
 //
 // Every test embedding lives in the plane spanned by the first two axes of a
-// 512-d space: v(theta) = [cos t, sin t, 0, 0, ...]. Cosine similarity
+// contract-width space: v(theta) = [cos t, sin t, 0, 0, ...]. Cosine similarity
 // between v(a) and v(b) is then exactly cos(a - b), so a test can ask for a
 // pair of vectors at a *precise* similarity instead of hand-tuning floats.
 // ---------------------------------------------------------------------------
 
-const DIM = 512;
+const DIM = EMBEDDING_DIMENSION;
 
 function angleVec(theta: number): number[] {
   const v = new Array<number>(DIM).fill(0);
@@ -171,7 +172,11 @@ function makeModelInfo(overrides: Partial<ModelInfoResponse> = {}): ModelInfoRes
 }
 
 /** Candidate rows as the pgvector repository would return them. */
-function poolRow(studentId: string, similarity: number, dim = DIM): CandidateEmbeddingWithVector {
+function poolRow(
+  studentId: string,
+  similarity: number,
+  dim: number = DIM,
+): CandidateEmbeddingWithVector {
   const embedding = dim === DIM ? vecAtSimilarity(similarity) : new Array<number>(dim).fill(0.5);
   return {
     id: `emb-${studentId}`,
@@ -445,7 +450,8 @@ test("candidates enrolled at a different embedding dimension are skipped and cou
   const wrongDim: CandidateTemplate = {
     embeddingId: "emb-legacy",
     studentId: "stu-old-model",
-    embedding: new Array<number>(128).fill(0.5),
+    // The pre-Phase-5 width: a template enrolled under the old contract.
+    embedding: new Array<number>(512).fill(0.5),
     modelName: "legacy",
     modelVersion: "0.0.1+pp1",
   };
@@ -658,7 +664,7 @@ test("runRecognitionForSession propagates cohort-access denial before any image 
 
 test("runRecognitionForSession surfaces incompatible candidate templates instead of swallowing them", async () => {
   const h = harness({
-    pool: [poolRow("stu-legacy", 0.9, 128), poolRow("stu-a", 0.9)],
+    pool: [poolRow("stu-legacy", 0.9, 512), poolRow("stu-a", 0.9)],
     faces: [detectedFace(1, REFERENCE)],
   });
   const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps);

@@ -3,10 +3,17 @@
 **Status: no production-cleared model exists. License verification is
 required before production deployment.**
 
-This service ships `MockEmbeddingModel` (deterministic fake vectors, no
-real face recognition) and `OnnxFaceModelProvider` (a scaffold that
-refuses to load without configured weights). Neither performs real
-recognition; neither carries licensing exposure.
+This service ships three backends:
+
+- `MockEmbeddingModel` — deterministic fake vectors, no real recognition.
+- `OnnxFaceModelProvider` — a scaffold that refuses to load without weights.
+- `OpenCVFaceModelProvider` — **real recognition** (YuNet + SFace). Added in
+  Phase 5. It is **not production-eligible**: `commercial_use = "unclear"`,
+  so `FACE_AI_REQUIRE_PRODUCTION_MODEL=true` refuses to start on it.
+
+The third one is the one with licensing exposure, and the reason it is still
+`unclear` is recorded below. It is usable for local development and evaluation
+and must not serve a paying customer until that entry changes.
 
 ## Verified findings (2026-09-15)
 
@@ -83,6 +90,7 @@ selects a backend that lacks a `Commercial use permitted?` entry.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `mock` | Deterministic hash → normalized vector | 0.1.0+pp1 | N/A — synthetic | N/A | `not-applicable` — never for production recognition | Replace with a licensed real model before any paying customer sees the product. | Phase 3 (this repo) |
 | `onnx` | *(none configured)* | `unconfigured` | Set by `FACE_MODEL_DIR` at deploy time | **Unknown — depends entirely on which weights are placed in `FACE_MODEL_DIR`** | `unclear` — refuses to load without weights; not production-eligible | The scaffold is the replacement mechanism: point it at different weights and bump `weights_version`. Fill in this row before wiring it as the default. | Phase 3.1 — scaffold only, no weights verified |
+| `opencv` | YuNet (detector) + SFace (recogniser), via OpenCV | `yunet-2023mar+sface-2021dec+pp1` | `face_detection_yunet_2023mar.onnx` sha256 `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4` (232,589 B) from [HF opencv/face_detection_yunet](https://huggingface.co/opencv/face_detection_yunet); `face_recognition_sface_2021dec.onnx` sha256 `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79` (38,696,353 B) from [HF opencv/face_recognition_sface](https://huggingface.co/opencv/face_recognition_sface) | **Weights:** YuNet MIT (© 2020 Shiqi Yu); SFace Apache-2.0. Both directories state the licence covers all files in them, including the `.onnx`. **Training data:** YuNet on WIDER Face (CC BY-NC-ND 4.0 / academic-only per CUHK terms); SFace's upstream names CASIA-WebFace, VGGFace2 and MS-Celeb-1M — all research-restricted or withdrawn — and **which one produced this artefact is not documented anywhere**. | **`unclear` — NOT permitted.** The weight licences are permissive; the training-data provenance behind the distributed SFace artefact is unresolved for commercial biometric use, and a permissive licence applied downstream does not resolve whether the upstream corpus permitted commercial derivation. | Swap the recogniser for one with documented, commercially-usable training data, or obtain written clearance for this artefact. Both are pinned by SHA-256 in `app/models/model_files.py`; changing either forces a `weights_version` bump and full re-enrollment. | Phase 4.5 audit — technical facts verified from the model graphs and OpenCV source; **licensing question referred, not resolved** |
 
 ## Documented limitations
 
@@ -120,6 +128,7 @@ precisely for the twins/siblings case. See
 | --- | --- | --- | --- | --- | --- |
 | `mock` | None — no training occurred. Embeddings are a SHA-256 hash of the image bytes. | Not applicable. Two photos of the same person produce unrelated vectors, so real-world recognition rate is ~0%. | None — image bytes are never decoded. | Everything. It recognises nobody, by construction. | Everything. Never benchmark a product decision against it. |
 | `onnx` | Unknown — depends entirely on the weights placed in `FACE_MODEL_DIR`. Record before deploying. | **Unmeasured.** No benchmark run exists. | Set by the loaded model; the scaffold does not assume. | Unknown. | Everything. |
+| `opencv` | **Not documented for the distributed artefact.** Upstream names CASIA-WebFace / VGGFace2 / MS-Celeb-1M as the SFace project's datasets; which trained `2021dec` is unstated. Demographic composition therefore unknown, and so is the demographic error distribution. | **Unmeasured.** No benchmark run against classroom data exists. Upstream's published figures — SFace 0.9940 on LFW, YuNet 0.7503 AP on WIDER "hard" — are benchmarks on curated datasets and say nothing about this product. | Aligned 112×112 BGR crop, raw 0–255 values. YuNet is documented as detecting faces roughly 10×10 to 300×300 px, so both a back row and a close-up front row can fall outside it. Enrolment additionally refuses faces under `face_min_enrolment_face_pixels` (default 24 px). | Unknown for this artefact. Generally for this model family: twins and siblings, heavy occlusion, masks, large appearance change since enrolment, motion blur, extreme pose. | **Everything.** No face has been recognised by this deployment under measurement. Thresholds are uncalibrated. |
 
 ## Candidate real backends — evaluate before choosing
 
@@ -161,11 +170,13 @@ above. **None currently qualifies.**
 
 ## Contract stability across a swap
 
-- Embedding dimension is fixed at 512 (see `EMBEDDING_DIMENSION` in
-  `packages/shared-types/src/face-ai-contract.ts`). A backend with a
-  different native dim must project into 512 (learned projection or
-  linear) — a schema change to the pgvector column is a Phase-boundary
-  event, not a per-backend detail.
+- Embedding dimension is fixed at **128** (see `EMBEDDING_DIMENSION` in
+  `packages/shared-types/src/face-ai-contract.ts`), which is SFace's native
+  output width. It was 512 until Phase 5 — a placeholder chosen before any
+  model was. A backend with a different native dim needs a contract and schema
+  change, which is a Phase-boundary event, not a per-backend detail. Projecting
+  or padding into a wider vector was considered and rejected: it adds no
+  information and multiplies the cost of every comparison.
 - The quality vocabulary (`FaceQualityReason`) is authoritative. Real
   models must map their own error modes onto these reasons; a new reason
   is a contract bump.

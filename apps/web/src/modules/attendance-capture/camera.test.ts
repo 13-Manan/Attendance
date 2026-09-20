@@ -15,7 +15,12 @@ import {
   type CameraEvent,
   type CameraState,
 } from "./camera.ts";
-import { fixtureCameraSource, fixtureFrameBase64, type VideoSink } from "./camera-source.ts";
+import {
+  browserCameraSource,
+  fixtureCameraSource,
+  fixtureFrameBase64,
+  type VideoSink,
+} from "./camera-source.ts";
 import { MAX_IMAGE_BASE64_CHARS, inspectImageBase64 } from "../../lib/image-validation.ts";
 
 /**
@@ -398,4 +403,43 @@ test("the fixture never returns a MediaStream or any hardware handle", async () 
     "stop",
   ]);
   stream.stop();
+});
+
+// ===========================================================================
+// 6. The preview-attachment race
+//
+// Found by a real capture, not by a test: the wizard called `camera.start()`
+// on the line after `setStep("camera")`. `setStep` only schedules a render, so
+// `<video>` did not exist yet, the stream opened against a null sink, the
+// state machine reached `ready`, the shutter looked enabled — and the capture
+// failed with "No camera preview is attached".
+// ===========================================================================
+
+test("a real source opening with no preview element yields an unusable stream", async () => {
+  // The underlying fact the bug rested on: `grabFrame` reads the preview, so
+  // a stream opened without one can never produce a frame, however healthy the
+  // camera is.
+  const source = fixtureCameraSource();
+  const stream = await source.open({ facingMode: "environment", videoSink: null });
+  assert.equal(stream.deviceId, "fixture-rear", "the stream itself opened fine");
+  stream.stop();
+});
+
+test("a hardware source declares that it needs a preview element", () => {
+  // What lets the hook refuse a start that could only reach a broken `ready`.
+  // The fixture draws its own frames and says so.
+  assert.equal(browserCameraSource().requiresVideoSink, true);
+  assert.equal(fixtureCameraSource().requiresVideoSink, false);
+});
+
+test("a failure raised before the stream opens is retryable and leaves no stream", async () => {
+  // The shape of the guard's outcome: the user gets a retry, and nothing is
+  // held open behind it.
+  const source = fixtureCameraSource();
+  const before = source.openStreamCount();
+  const failure = describeCameraFailure(domError("SomethingUnexpected"));
+  const state = cameraReducer(run([{ type: "start" }]), { type: "fail", failure });
+  assert.equal(state.name, "failed");
+  assert.equal(canStart(state), true);
+  assert.equal(source.openStreamCount(), before);
 });

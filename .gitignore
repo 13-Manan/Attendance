@@ -20,6 +20,13 @@ dist/
 # Prisma
 apps/web/prisma/migrations/**/migration_lock.toml.bak
 
+# Face model weights. Downloaded and SHA-256 verified by
+# services/face-ai/scripts/fetch_models.py, never committed: ~37 MiB of binary,
+# and weights whose commercial-use status is still unresolved
+# (services/face-ai/app/models/LICENSING.md) do not belong in source control.
+services/face-ai/models/
+*.onnx
+
 # Python
 services/*/.venv/
 services/*/__pycache__/

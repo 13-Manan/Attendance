@@ -153,7 +153,7 @@ cd apps/web
 It builds its own database (`attendance_bench` by default) from
 `prisma/schema.prisma` and never touches the development database. One
 substitution is made to the generated DDL: `FaceEmbedding.embedding` is created
-as `bytea` rather than `vector(512)`, because pgvector is packaged for
+as `bytea` rather than a `vector` column, because pgvector is packaged for
 PostgreSQL 17+ and this machine runs 16. No report query touches that table, so
 the substitution cannot affect a measurement — but it does make that database
 useless for anything involving face recognition.

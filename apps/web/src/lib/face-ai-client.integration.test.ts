@@ -110,7 +110,7 @@ test("model-info satisfies every provenance invariant the engine relies on", { s
   assert.equal(info.productionEligible, info.commercialUse === "permitted");
 });
 
-test("detect-embed returns per-image faces with unit-length 512-d vectors", { skip: SKIP }, async () => {
+test("detect-embed returns per-image faces with unit-length vectors", { skip: SKIP }, async () => {
   const { detectEmbed, faceModelInfo } = await client();
   const info = await faceModelInfo();
 
@@ -349,7 +349,7 @@ test("a live summary carries no biometric material", { skip: SKIP }, async () =>
     await liveDeps(pool),
   );
 
-  // The service returns full 512-d vectors; the engine's output shape must
+  // The service returns full-width vectors; the engine's output shape must
   // not forward them to a browser.
   const serialized = JSON.stringify(summary);
   assert.ok(!serialized.includes("embedding"), "recognition output must not carry embeddings");

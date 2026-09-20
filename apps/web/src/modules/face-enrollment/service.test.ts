@@ -17,6 +17,7 @@ import type { Student } from "../students/types.ts";
 import type { RecordAuditLogInput } from "../audit/types.ts";
 import type { InsertFaceEmbeddingInput, NearestTemplateRow } from "./repository.ts";
 import type { EnrollResponse, FaceQualityReason, ModelInfoResponse } from "@attendance/shared-types";
+import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
 
 /**
  * Enrollment, end to end, without a database or a face service.
@@ -61,25 +62,32 @@ function makeUser(
 const MODEL = { modelName: "mock", modelVersion: "0.1.0+pp1" };
 
 /**
- * A genuinely L2-normalised vector.
+ * A genuinely L2-normalised vector of the contract's current length.
  *
- * Every component is 1/sqrt(512), so the norm is exactly 1 to within float
- * error. This matters: the service now refuses a vector that is not unit
- * length, and a fixture that happened to be un-normalised would make every
- * happy-path test fail for a reason unrelated to what it was asserting.
+ * Every component is 1/sqrt(n), so the norm is exactly 1 to within float error.
+ * This matters: the service refuses a vector that is not unit length, and a
+ * fixture that happened to be un-normalised would make every happy-path test
+ * fail for a reason unrelated to what it was asserting.
+ *
+ * Derived from `EMBEDDING_DIMENSION` rather than written out, so the day the
+ * contract's width changes this fixture follows it instead of turning every
+ * enrollment test into a wrong-dimension failure.
  */
-const UNIT_512: number[] = Array.from({ length: 512 }, () => 1 / Math.sqrt(512));
+const UNIT_VECTOR: number[] = Array.from(
+  { length: EMBEDDING_DIMENSION },
+  () => 1 / Math.sqrt(EMBEDDING_DIMENSION),
+);
 
 function acceptedResponse(overrides: Partial<Extract<EnrollResponse, { accepted: true }>> = {}) {
   return {
     accepted: true as const,
     assessment: { reason: "ok" as const, qualityScore: 0.9, faceCount: 1 },
-    embedding: UNIT_512,
+    embedding: UNIT_VECTOR,
     modelName: MODEL.modelName,
     modelVersion: MODEL.modelVersion,
     weightsVersion: "0.1.0",
     preprocessingVersion: "1",
-    embeddingDim: 512,
+    embeddingDim: EMBEDDING_DIMENSION,
     aligned: true,
     ...overrides,
   };
@@ -121,7 +129,7 @@ const MODEL_INFO: ModelInfoResponse = {
   modelVersion: MODEL.modelVersion,
   weightsVersion: "0.1.0",
   preprocessingVersion: "1",
-  embeddingDim: 512,
+  embeddingDim: EMBEDDING_DIMENSION,
   embeddingNormalized: true,
   runtime: "numpy-hash-stub",
   commercialUse: "not-applicable",
@@ -497,7 +505,7 @@ test("a vector that is not unit length is refused, and nothing is stored", async
   // different scale, and every threshold in the product misreads it for as
   // long as the row exists.
   const h = harness({
-    enrollResponse: acceptedResponse({ embedding: UNIT_512.map((v) => v * 3) }),
+    enrollResponse: acceptedResponse({ embedding: UNIT_VECTOR.map((v) => v * 3) }),
   });
   const result = await enrollFaceForStudentRequest(
     staffAdmin(),
@@ -523,7 +531,7 @@ test("a vector of the wrong dimension is refused before it reaches the column", 
 });
 
 test("a broken embedding contract is audited, because it is a deployment fault", async () => {
-  const h = harness({ enrollResponse: acceptedResponse({ embedding: UNIT_512.map((v) => v * 3) }) });
+  const h = harness({ enrollResponse: acceptedResponse({ embedding: UNIT_VECTOR.map((v) => v * 3) }) });
   await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
 
   assert.equal(h.audits.length, 1);
@@ -616,7 +624,7 @@ test("a collision is audited with both student ids and no vector", async () => {
   const payload = h.audits[0].afterJson as Record<string, unknown>;
   assert.equal(payload.collidedWithStudentId, "student-2");
   assert.equal(payload.similarity, 0.93);
-  assert.equal(auditText(h).includes(String(UNIT_512[0])), false, "no vector in the log");
+  assert.equal(auditText(h).includes(String(UNIT_VECTOR[0])), false, "no vector in the log");
 });
 
 test("re-submitting the same photograph is reported, not stored twice", async () => {
@@ -690,7 +698,7 @@ test("a successful enrollment stores a template and never returns the vector", a
   assert.equal(result.ok === true && result.qualityScore, 0.9);
   // The invariant, asserted on the serialised result rather than on a field
   // list: a vector cannot hide in a nested object.
-  assert.equal(JSON.stringify(result).includes(String(UNIT_512[0])), false);
+  assert.equal(JSON.stringify(result).includes(String(UNIT_VECTOR[0])), false);
   assert.equal("embedding" in result, false);
 });
 
@@ -703,7 +711,7 @@ test("the provenance a future model swap needs is stored with the template", asy
   assert.equal(row.modelVersion, "0.1.0+pp1");
   assert.equal(row.weightsVersion, "0.1.0", "which weights produced this vector");
   assert.equal(row.preprocessingVersion, "1", "and which preprocessing");
-  assert.equal(row.embeddingDim, 512);
+  assert.equal(row.embeddingDim, EMBEDDING_DIMENSION);
   assert.equal(row.aligned, true);
   assert.equal(row.qualityScore, 0.9);
 });
@@ -754,7 +762,7 @@ test("the audit row carries the model and the score, and never the template", as
   assert.equal(payload.modelName, "mock");
   assert.equal(payload.weightsVersion, "0.1.0");
   assert.equal(payload.captureSource, "CAMERA");
-  assert.equal(auditText(h).includes(String(UNIT_512[0])), false);
+  assert.equal(auditText(h).includes(String(UNIT_VECTOR[0])), false);
 });
 
 test("the result reports the slot count after the write, not before it", async () => {
@@ -958,7 +966,7 @@ test("an unreachable face service leaves the history readable with the model unk
       modelVersion: "0.1.0+pp1",
       weightsVersion: "0.1.0",
       preprocessingVersion: "1",
-      embeddingDim: 512,
+      embeddingDim: EMBEDDING_DIMENSION,
       aligned: true,
       qualityScore: 0.9,
       captureSource: "CAMERA",
@@ -989,7 +997,7 @@ test("the history view carries no field that could hold a vector", async () => {
       modelVersion: "0.1.0+pp1",
       weightsVersion: "0.1.0",
       preprocessingVersion: "1",
-      embeddingDim: 512,
+      embeddingDim: EMBEDDING_DIMENSION,
       aligned: true,
       qualityScore: 0.9,
       captureSource: "UPLOAD",

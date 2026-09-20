@@ -21,8 +21,13 @@ WORKDIR /srv
 # libgomp1 is the OpenMP runtime that onnxruntime links against. It is absent
 # from python:slim, and without it `import onnxruntime` fails at startup with a
 # missing-shared-object error rather than anything mentioning ONNX.
+#
+# libglib2.0-0 is opencv-python-headless's one remaining system dependency.
+# "headless" removes the GUI stack (libGL, X11, GTK) but not glib, and without
+# it `import cv2` fails with a missing libgthread — which mentions neither
+# OpenCV nor glib and is a genuinely confusing first-boot failure.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libgomp1 \
+ && apt-get install -y --no-install-recommends libgomp1 libglib2.0-0 \
  && rm -rf /var/lib/apt/lists/*
 
 # Dependencies before source, so editing a handler does not reinstall
@@ -33,6 +38,23 @@ RUN pip install --no-cache-dir -r requirements-prod.txt
 # Application code only. .dockerignore keeps tests/, bench/ and dev
 # requirements out of the image.
 COPY app ./app
+COPY scripts ./scripts
+
+# Model weights are NOT baked into this image.
+#
+# They are ~37 MiB of binary whose commercial-use status is unresolved
+# (app/models/LICENSING.md), so shipping them inside an image that gets pushed
+# to a registry is a licensing decision, not a packaging one. The image is
+# therefore model-agnostic: mount or copy verified artefacts to FACE_MODEL_DIR,
+# and the backend verifies their SHA-256 at startup before OpenCV opens them.
+#
+# With the default FACE_MODEL_BACKEND=mock no weights are needed at all, which
+# is what makes this image deployable while the licensing question is open.
+#
+# To build an image that does carry them, add — deliberately, and only once the
+# licence question is settled:
+#     RUN python scripts/fetch_models.py --dir /srv/models
+#     ENV FACE_MODEL_DIR=/srv/models
 
 # Never root. If an image-parsing bug in pillow or onnxruntime is ever
 # exploitable, the blast radius should not include the container's filesystem.

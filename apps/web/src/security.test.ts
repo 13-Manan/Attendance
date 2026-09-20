@@ -19,6 +19,7 @@ import { deleteStudentFaceData, runRetentionSweep } from "./modules/privacy/serv
 import { inspectImageBase64 } from "./lib/image-validation.ts";
 import type { AttendanceSession } from "./modules/sessions/types.ts";
 import type { Student } from "./modules/students/types.ts";
+import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
 
 /**
  * The attack suite.
@@ -167,13 +168,16 @@ function writes(): Writes {
 const CAPTURE = { imageBase64: "x".repeat(200), captureSource: "CAMERA" as const };
 
 /**
- * A properly L2-normalised 512-float vector.
+ * A properly L2-normalised vector of the contract's current length.
  *
  * The service refuses a template that is not unit length, so a two-element
  * stand-in would now be rejected for that reason rather than reaching the
  * assertion each of these tests is actually making.
  */
-const UNIT_512: number[] = Array.from({ length: 512 }, () => 1 / Math.sqrt(512));
+const UNIT_VECTOR: number[] = Array.from(
+  { length: EMBEDDING_DIMENSION },
+  () => 1 / Math.sqrt(EMBEDDING_DIMENSION),
+);
 
 /** A distinctive value to search a serialised response for. */
 const TELLTALE = 0.9012345678;
@@ -181,13 +185,13 @@ const TELLTALE = 0.9012345678;
 function unitVectorWithTelltale(): number[] {
   // One component replaced and the whole thing renormalised, so the vector is
   // still unit length but contains a number a leak test can grep for.
-  const raw = UNIT_512.slice();
+  const raw = UNIT_VECTOR.slice();
   raw[0] = TELLTALE;
   const norm = Math.sqrt(raw.reduce((total, value) => total + value * value, 0));
   return raw.map((value) => value / norm);
 }
 
-function acceptedEnrollment(embedding: number[] = UNIT_512) {
+function acceptedEnrollment(embedding: number[] = UNIT_VECTOR) {
   return {
     accepted: true as const,
     assessment: { reason: "ok" as const, qualityScore: 0.9, faceCount: 1 },
@@ -196,7 +200,7 @@ function acceptedEnrollment(embedding: number[] = UNIT_512) {
     modelVersion: "0.1.0+pp1",
     weightsVersion: "0.1.0",
     preprocessingVersion: "1",
-    embeddingDim: 512,
+    embeddingDim: EMBEDDING_DIMENSION,
     aligned: true,
   };
 }

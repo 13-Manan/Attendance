@@ -53,7 +53,7 @@ only `kind` values and tree depth differ.
 - **`SessionImage`** — 1–3 classroom photos per session (`sequenceNumber`
   1/2/3), each with an optional `qualityScore` from the quality-check step.
 - **`FaceEmbedding`** — one row per enrolled student's reference face
-  vector. `embedding` is `Unsupported("vector(512)")` (see below).
+  vector. `embedding` is `Unsupported("vector(128)")` (see below).
   `modelName`/`modelVersion` record which backend produced it, so a future
   model swap can identify and re-embed stale rows.
 
@@ -79,7 +79,7 @@ reason").
 ## pgvector
 
 Prisma has no native vector scalar type, so `FaceEmbedding.embedding` is
-declared as `Unsupported("vector(512)")`. Consequences:
+declared as `Unsupported("vector(128)")`. Consequences:
 
 - `prisma generate` produces no typed field for it — reads/writes go through
   `prisma.$queryRaw` / `$executeRaw`.

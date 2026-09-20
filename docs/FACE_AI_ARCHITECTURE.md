@@ -27,21 +27,32 @@ rather than an unfinished task.
 │  matching.py ← cosine + MATCHED/UNCERTAIN/UNMATCHED          │
 └───────────────────────────┬──────────────────────────────────┘
                             │ FaceModelProvider (app/models/base.py)
-             ┌──────────────┴───────────────┐
-             │                              │
-┌────────────▼────────────┐   ┌─────────────▼────────────────┐
-│ MockEmbeddingModel      │   │ OnnxFaceModelProvider        │
-│ deterministic stub      │   │ scaffold — needs weights     │
-│ (development only)      │   │                              │
-└─────────────────────────┘   └─────────────┬────────────────┘
-                                            │
-                                  ┌─────────▼──────────┐
-                                  │ ONNX Runtime       │
-                                  │ (inference engine) │
-                                  └─────────┬──────────┘
-                                            │
-                                    face embedding
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+┌───────▼─────────┐ ┌───────▼──────────┐ ┌──────▼─────────────────┐
+│ MockEmbedding   │ │ OnnxFaceModel    │ │ OpenCVFaceModelProvider│
+│ Model           │ │ Provider         │ │ REAL recognition       │
+│ hash stub       │ │ scaffold —       │ │ productionEligible:    │
+│ (dev/CI only)   │ │ needs weights    │ │   false (licensing)    │
+└─────────────────┘ └───────┬──────────┘ └──────┬─────────────────┘
+                            │                   │
+                  ┌─────────▼────────┐  ┌───────▼─────────────────┐
+                  │ ONNX Runtime     │  │ OpenCV                  │
+                  │ (not wired up)   │  │  FaceDetectorYN (YuNet) │
+                  └──────────────────┘  │  FaceRecognizerSF(SFace)│
+                                        └───────┬─────────────────┘
+                                                │
+                                   128-d L2-normalised embedding
 ```
+
+The `opencv` backend uses OpenCV rather than ONNX Runtime for a specific
+reason: the YuNet ONNX graph emits twelve *undecoded* per-stride tensors, and
+the anchor decoding, score fusion, keypoint decoding and NMS that turn those
+into usable detections live in OpenCV's C++ `FaceDetectorYN` — as does
+`alignCrop`, the reference implementation of the similarity transform SFace was
+trained against. Reimplementing either in Python would mean owning a numerical
+reimplementation of somebody else's post-processing, where every bug presents
+as "recognition is slightly worse" rather than as a failure.
 
 Two boundaries matter, and they are different in kind:
 

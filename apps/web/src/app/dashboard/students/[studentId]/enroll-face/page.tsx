@@ -121,9 +121,11 @@ export default async function StaffEnrollFacePage({
           </span>{" "}
           It is running <span className="font-mono text-xs">{runningModel.modelName}</span>{" "}
           <span className="font-mono text-xs">{runningModel.modelVersion}</span>, whose weights have
-          commercial-use status &ldquo;{runningModel.commercialUse}&rdquo;. Enrollment works and the
-          whole pipeline is exercised, but it does not recognise anybody. Do not rely on automatic
-          attendance until a licence-verified model is deployed.
+          commercial-use status &ldquo;{runningModel.commercialUse}&rdquo;.{" "}
+          {runningModel.commercialUse === "not-applicable"
+            ? "This backend is a development stub: enrollment works and the whole pipeline is exercised, but it matches nobody."
+            : "Recognition does run — captures are compared against enrolled templates and can be matched. What is missing is licence clearance, not capability."}{" "}
+          Do not rely on automatic attendance until a licence-verified model is deployed.
         </p>
       ) : null}
       {!runningModel ? (

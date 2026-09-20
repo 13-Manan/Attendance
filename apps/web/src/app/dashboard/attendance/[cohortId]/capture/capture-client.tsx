@@ -255,6 +255,29 @@ export function CaptureWizard({
     if (step !== "camera") stopCamera();
   }, [step, stopCamera]);
 
+  /**
+   * Open the camera once the camera step has actually rendered.
+   *
+   * Not in the click handler that sets the step. `setStep("camera")` only
+   * schedules a render, so calling `camera.start()` on the next line runs while
+   * `<video>` still does not exist — `videoRef.current` is null, the stream is
+   * opened with nothing to draw into, and the state machine reaches `ready`
+   * with no preview attached. The shutter then looks enabled and fails with
+   * "No camera preview is attached", which is what a real capture did.
+   *
+   * An effect runs after commit, so the element is mounted by the time this
+   * fires. Gated on `idle` specifically rather than `canStart`: a failed start
+   * must wait for the user to press "Try again" instead of being retried
+   * forever, and `ready`/`starting` must not be restarted.
+   */
+  const cameraState = camera.state.name;
+  const { start: startCamera, activeDeviceId } = camera;
+  useEffect(() => {
+    if (step === "camera" && cameraState === "idle") {
+      void startCamera(activeDeviceId ?? undefined);
+    }
+  }, [step, cameraState, startCamera, activeDeviceId]);
+
   // -------------------------------------------------------------------------
   // Session
   // -------------------------------------------------------------------------
@@ -265,7 +288,6 @@ export function CaptureWizard({
       const result = await startCaptureSession({ cohortId, cohortSubjectId });
       setStarted(result);
       setStep("camera");
-      void camera.start();
     } catch (e) {
       setStartError(
         e instanceof Error
@@ -275,7 +297,7 @@ export function CaptureWizard({
     } finally {
       setStarting(false);
     }
-  }, [camera, cohortId, cohortSubjectId]);
+  }, [cohortId, cohortSubjectId]);
 
   // -------------------------------------------------------------------------
   // Capture, quality check, retake
@@ -374,15 +396,13 @@ export function CaptureWizard({
     (sequenceNumber: 1 | 2 | 3) => {
       removeShot(sequenceNumber);
       setStep("camera");
-      void camera.start(camera.activeDeviceId ?? undefined);
     },
-    [camera, removeShot],
+    [removeShot],
   );
 
   const captureAnother = useCallback(() => {
     setStep("camera");
-    void camera.start(camera.activeDeviceId ?? undefined);
-  }, [camera]);
+  }, []);
 
   // -------------------------------------------------------------------------
   // Processing

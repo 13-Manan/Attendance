@@ -38,7 +38,7 @@ cp .env.example apps/web/.env.local   # for the Next.js app at runtime
 
 ### Local database
 
-The schema declares a `vector(512)` column, so **Postgres must have the
+The schema declares a `vector(128)` column, so **Postgres must have the
 pgvector extension available** — a stock Homebrew/apt Postgres does not, and
 `prisma migrate` will fail against one with `type "vector" does not exist`.
 Two supported ways:

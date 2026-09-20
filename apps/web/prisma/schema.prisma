@@ -4,7 +4,7 @@
 // multi-tenancy rationale.
 //
 // NOTE on pgvector: Prisma has no native vector scalar type. FaceEmbedding.embedding
-// is declared with Unsupported("vector(512)") below, which means:
+// is declared with Unsupported("vector(128)") below, which means:
 //   - `prisma generate` will NOT produce a typed field for it on the Prisma Client.
 //   - `CREATE EXTENSION vector` must be added by hand to the generated migration SQL.
 //     It is done, at the top of migrations/20260917000000_init/migration.sql.
@@ -607,9 +607,20 @@ model FaceEmbedding {
   institutionId  String
   studentId      String
   student        Student                    @relation(fields: [studentId], references: [id])
-  // vector(512) — Unsupported so the Prisma Client doesn't attempt to type it;
+  // vector(128) — Unsupported so the Prisma Client doesn't attempt to type it;
   // populated/queried via $executeRaw / $queryRaw only.
-  embedding      Unsupported("vector(512)")
+  //
+  // 128 is SFace's native output width, verified from the model graph in the
+  // Phase 4.5 audit. It was vector(512) until Phase 5; that number was the
+  // scaffold's placeholder, chosen before any model was. Widening 128 back up
+  // to 512 by padding or random projection was rejected — it would add no
+  // information and quadruple the cost of every comparison.
+  //
+  // The column width is the last line of defence against a mismatched vector:
+  // Postgres rejects a wrong-length insert outright, which is why the
+  // enrollment repository's own length check is a better error message rather
+  // than the actual guarantee.
+  embedding      Unsupported("vector(128)")
   modelName      String
   modelVersion   String
   // The two halves of `modelVersion`, stored separately as well as composed.
@@ -618,7 +629,10 @@ model FaceEmbedding {
   // preprocessing?" without parsing a string that is not meant to be parsed.
   weightsVersion       String?
   preprocessingVersion String?
-  embeddingDim   Int                        @default(512)
+  // Recorded per row as well as fixed by the column, because a future model
+  // swap changes the column for new rows while these rows still describe
+  // vectors of the old width.
+  embeddingDim   Int                        @default(128)
   // Whether the crop was a real landmark-driven alignment or a plain box crop.
   // A recognition model trained on aligned faces scores an unaligned crop
   // worse, so a template enrolled without alignment is a quieter problem than

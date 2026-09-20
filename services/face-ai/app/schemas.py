@@ -9,7 +9,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-EMBEDDING_DIMENSION = 512
+# Length of every face template. 128 is SFace's native output (`fc1`, shape
+# [1, 128], read from the model graph during the Phase 4.5 audit), not a
+# choice. Must equal EMBEDDING_DIMENSION in the TypeScript contract; a test
+# asserts the two agree. Changing it invalidates every stored vector.
+EMBEDDING_DIMENSION = 128
 
 # Must equal FACE_AI_CONTRACT_VERSION in the TypeScript contract. A test
 # asserts the two agree, so drift fails CI instead of production.

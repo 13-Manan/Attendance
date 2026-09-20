@@ -9,7 +9,7 @@ import type {
   FaceSampleRetirementReason,
 } from "./types";
 
-// FaceEmbedding.embedding is Unsupported("vector(512)") in schema.prisma —
+// FaceEmbedding.embedding is Unsupported("vector(128)") in schema.prisma —
 // Prisma's typed client cannot write it. All INSERT/UPDATE/DELETE that
 // touch the vector column live in this file and go through $executeRaw so
 // the pgvector operator/type coercions are all explicit.
@@ -51,7 +51,7 @@ export async function insertFaceEmbedding(
   input: InsertFaceEmbeddingInput,
   client: Client = prisma,
 ): Promise<{ id: string }> {
-  // The column is vector(512), so a wrong-length vector is rejected by
+  // The column is vector(128), so a wrong-length vector is rejected by
   // Postgres anyway — but as an opaque driver error, after the write has
   // been attempted. Checking here names the actual problem (a model whose
   // output dimension does not match the schema) at the point a new backend
@@ -123,7 +123,7 @@ export interface NearestTemplateRow {
  * Two reasons, and the second is the important one.
  *
  * The cheap reason: an institution can hold tens of thousands of templates,
- * and pulling 512 floats each across the wire to sort them in JavaScript
+ * and pulling a full template each across the wire to sort them in JavaScript
  * would make enrollment slower the bigger the institution gets.
  *
  * The real reason: this comparison is against *other students'* biometric

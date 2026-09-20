@@ -14,7 +14,7 @@ not run, it says so.
 Three things. Each one is a way a routine operation can go wrong.
 
 **The `vector` extension is a hard prerequisite.** `FaceEmbedding.embedding` is
-`vector(512)`. The baseline migration creates the extension as its first
+`vector(128)`. The baseline migration creates the extension as its first
 statement, but `CREATE EXTENSION` can only succeed if the pgvector files are
 present on the server's filesystem. On a server without them the failure is:
 
@@ -214,7 +214,7 @@ SELECT count(*) FROM pg_indexes WHERE schemaname='public';          -- 77
 SELECT count(*) FROM pg_constraint WHERE contype='f';               -- 43
 SELECT count(*) FROM pg_indexes WHERE indexname='role_key_platform_unique';  -- 1
 SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL;
-SELECT vector_dims(embedding) FROM "FaceEmbedding" LIMIT 1;         -- 512
+SELECT vector_dims(embedding) FROM "FaceEmbedding" LIMIT 1;         -- 128
 ```
 
 The counts above are for the schema as of Phase 15; they are a tripwire for a
@@ -227,7 +227,7 @@ re-migrate.
 
 **Verified on 2026-09-17**: a `pg_dump -Fc` / `pg_restore` round-trip of a
 database holding 22,003 students, 150,000 attendance records, 80,000 audit rows
-and 512-dimension vectors reproduced all 25 tables, all 77 indexes, all 43
+and the contract's vector width reproduced all 25 tables, all 77 indexes, all 43
 foreign keys, the partial unique index, both migration ledger rows, and the
 vector values identically.
 

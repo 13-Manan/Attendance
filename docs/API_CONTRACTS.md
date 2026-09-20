@@ -29,7 +29,7 @@ This is not a replacement for network isolation. It is the control that still
 works when the isolation turns out to be imaginary: a process cannot tell
 whether the port it bound is behind a firewall or published by a
 `docker-compose` line somebody added in a hurry, and `POST /v1/enroll` turns a
-photograph into the 512-float template that identifies that person. If
+photograph into the 128-float template that identifies that person. If
 reachability were the only control, the first deployment mistake would also be
 a biometric breach.
 
@@ -46,7 +46,7 @@ expected to set it. See `docs/SECURITY.md`.
 ### `GET /v1/health`
 
 ```json
-{ "status": "ok", "modelName": "mock", "modelVersion": "0.1.0", "embeddingDim": 512 }
+{ "status": "ok", "modelName": "mock", "modelVersion": "0.1.0+pp1", "embeddingDim": 128 }
 ```
 
 ### `POST /v1/detect-embed`
@@ -68,7 +68,7 @@ Response:
     {
       "sequenceNumber": 1,
       "boundingBox": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2 },
-      "embedding": [0.0123, "... 512 floats total"],
+      "embedding": [0.0123, "... 128 floats total"],
       "detectionConfidence": 0.99,
       "qualityScore": 0.9
     }

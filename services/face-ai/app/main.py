@@ -1,10 +1,12 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.auth import check_startup_auth, require_service_auth
 from app.config import get_model, get_settings
+from app.models.opencv_provider import ImageDecodeError
 from app.routers import enrollment, health, process
 
 logger = logging.getLogger(__name__)
@@ -78,3 +80,21 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(process.router, dependencies=[Depends(require_service_auth)])
 app.include_router(enrollment.router, dependencies=[Depends(require_service_auth)])
+
+
+@app.exception_handler(ImageDecodeError)
+async def handle_image_decode_error(_request: Request, error: ImageDecodeError):
+    """An undecodable image is the caller's problem, not an outage.
+
+    Without this it is a 500, and a 500 is a specific claim: *this service is
+    broken, retrying may help*. apps/web believes it — `analyzeCaptureImage`
+    maps a non-2xx to "the face service is temporarily unavailable, try again",
+    so a teacher whose capture is malformed is told to retry something that
+    will fail identically every time, and an on-call engineer is paged for a
+    service that is working correctly.
+
+    This only became reachable with the real backend: the mock never decoded
+    an image, so nothing could fail to decode. The body carries no image data
+    and no embedding — only the reason.
+    """
+    return JSONResponse(status_code=400, content={"detail": str(error)})
