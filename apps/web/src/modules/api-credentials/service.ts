@@ -1,4 +1,5 @@
 import { recordAuditLog as defaultRecordAuditLog } from "@/modules/audit/service";
+import { sealSecret } from "@/lib/secret-box";
 import type { RecordAuditLogInput } from "@/modules/audit/types";
 import { requirePermission } from "@/modules/authorization/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
@@ -246,7 +247,16 @@ export async function createWebhook(
   const eventTypes = validateEventTypes(input.eventTypes);
 
   const secret = d.newSecret();
-  const endpoint = await d.createHook({ institutionId, url, secret, eventTypes });
+  // Encrypted before it touches the database. The plaintext exists only in
+  // this function and in the one response that shows it to the administrator;
+  // what persists is an AES-256-GCM sealed value that the dispatcher opens
+  // when it needs to sign. See `lib/secret-box.ts`.
+  const endpoint = await d.createHook({
+    institutionId,
+    url,
+    secret: sealSecret(secret),
+    eventTypes,
+  });
 
   await d.audit({
     action: "webhook_endpoint.created",

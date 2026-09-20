@@ -801,6 +801,15 @@ model ApiKey {
   createdAt     DateTime    @default(now())
   lastUsedAt    DateTime?
   revokedAt     DateTime?
+  /// When this key stops working, or null for a key with no expiry.
+  ///
+  /// Null rather than a default, deliberately. Every key issued before this
+  /// column existed has no expiry and must keep working — silently expiring
+  /// live integrations to tidy up a schema is an outage, not a hardening.
+  /// New keys may set one; the API refuses an expired key exactly as it
+  /// refuses a revoked one, and with the same 401, so neither tells a caller
+  /// which of the two happened.
+  expiresAt     DateTime?
 
   @@index([institutionId])
 }

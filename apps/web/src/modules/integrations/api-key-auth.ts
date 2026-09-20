@@ -90,7 +90,15 @@ export async function authenticateApiKey(request: Request): Promise<ApiKeyContex
 
   const hashedKey = hashApiKey(rawKey);
   const apiKey = await prisma.apiKey.findUnique({ where: { hashedKey } });
+  // Revoked and expired are the same answer on purpose. Both return null,
+  // which the route turns into an identical 401 — telling a caller *which*
+  // of the two happened would confirm that a key they hold once existed.
+  //
+  // `expiresAt` is null for every key issued before expiry existed, and a
+  // null expiry never expires: switching off live integrations to tidy up a
+  // schema would be an outage, not a hardening.
   if (!apiKey || apiKey.revokedAt) return null;
+  if (apiKey.expiresAt && apiKey.expiresAt.getTime() <= Date.now()) return null;
 
   // Fire-and-forget: "when was this key last used" is operational metadata,
   // and blocking every API request on a write to record it would make the

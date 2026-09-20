@@ -337,10 +337,7 @@ Stated here rather than left for someone to find.
   or a schema change; this phase permitted neither.
 - **No scheduler for the retention sweep.** §2. It is a button until one
   exists (ADR-0007).
-- **`WebhookEndpoint.secret` is stored in plaintext.** It is the HMAC signing
-  key, so the server must be able to recompute the signature; a hash cannot
-  sign. Reducing the exposure needs envelope encryption with a KMS — again a
-  new dependency. Database access is the boundary that protects it today.
+- ~~`WebhookEndpoint.secret` is stored in plaintext.~~ **Resolved** — see §9.
 - **`api_key.created` and `api_key.revoked` are declared but never emitted.**
   No API-key management surface ships in this build; keys are provisioned
   directly. The actions are reserved so that the screen, when it lands, audits
@@ -353,9 +350,131 @@ Stated here rather than left for someone to find.
   rejected before it consumes an allowance. That tradeoff is documented in
   `modules/integrations/api-route.ts`; an edge rate limit is the deployment's
   responsibility.
-- **No end-to-end browser verification.** The development environment has no
-  pgvector-capable Postgres, so the UI paths in this document are verified by
-  unit and integration tests rather than by clicking them. See the README.
+- ~~No end-to-end browser verification.~~ **Resolved** — a pgvector-capable
+  Postgres now exists locally and the flows in this document are exercised in
+  a real browser (Phases 7–11).
+
+---
+
+## 9. Secrets, outbound requests, and credential lifecycle
+
+Added in Phase 11.
+
+### Webhook signing secrets are encrypted at rest
+
+**IMPLEMENTED.** `lib/secret-box.ts`. AES-256-GCM, random 12-byte IV per
+value, authentication tag, versioned envelope:
+
+```
+v1.<keyVersion>.<base64url iv>.<base64url tag>.<base64url ciphertext>
+```
+
+One string, so it fits the existing `WebhookEndpoint.secret` column — no
+schema change. A stored value **without** the `v1.` prefix is a legacy
+plaintext secret and is returned unchanged, which is what allows the rollout
+to be gradual instead of a flag day that breaks every live endpoint at once.
+
+A signing secret must be *readable* (a hash cannot produce an HMAC), so this
+is encryption, not hashing. The plaintext exists in exactly two places: the
+one response that shows it to the administrator, and the dispatcher's memory
+while it signs.
+
+**CONFIGURATION REQUIRED.** The key-encryption key comes from
+`WEBHOOK_SECRET_KEK` — 32 bytes, base64:
+
+```bash
+WEBHOOK_SECRET_KEK="$(head -c 32 /dev/urandom | base64)"
+```
+
+When it is unset, the KEK is derived from `AUTH_SECRET` via HKDF-SHA256 with
+the label `attendance:webhook-secret-kek:v1`. That keeps a development
+checkout and CI working with no extra configuration and does not weaken the
+deployment — anyone holding `AUTH_SECRET` can already forge a session. An
+explicit key is still preferred in production because it can be rotated
+independently.
+
+**PRODUCTION DEPLOYMENT REQUIRED.** The KEK should be delivered from the same
+secret path as every other production secret. Phase 11 made no Azure or Key
+Vault change; wiring the variable is a deployment step.
+
+**Rotation.** `keyVersion` is written into every ciphertext. A second key
+means adding it and bumping `CURRENT_KEY_VERSION`; existing values keep
+opening under their own version until re-sealed. No key was rotated here.
+
+**Migration.** `scripts/seal-webhook-secrets.ts`, idempotent and
+verify-before-replace: each row is sealed, opened again, compared against the
+original, and only then written. A round-trip failure stops the run with the
+remaining rows untouched. `--dry-run` reports without writing.
+
+### Outbound requests
+
+**IMPLEMENTED.** `modules/integrations/safe-fetch.ts` is the only way this
+application makes an outbound HTTP call.
+
+Phase 10 resolved a hostname, validated the answer, then called `fetch` —
+which resolved it *again*. That second lookup is the DNS-rebinding window.
+`safeRequest` closes it by making resolution and validation the same act: it
+resolves once, refuses the bad answers, and hands the surviving address to the
+agent's `lookup`. Node connects to exactly what that returns, so the real
+resolver is never consulted a second time.
+
+TLS still validates against the hostname (`servername` keeps SNI and
+certificate checking pointed at the configured name). Pinning changes *where*
+we dial, never *who* we are willing to believe we reached.
+
+Also enforced: a timeout covering connect **and** response (an unreachable
+private address previously sat on the OS default for 75 seconds — measured), a
+bounded response body, no redirect following, and only the headers the caller
+passed. Nothing ambient — no cookie jar, no environment, no internal service
+token — can attach itself to a request built this way.
+
+**Trust model.** Private and on-premises addresses are *allowed*: a school ERP
+on `10.0.0.5` is the case these integrations exist for. Refused are loopback,
+link-local (every cloud's instance-metadata service) and the unspecified
+address. The boundary relied on is that only an institution administrator can
+configure a connection — this guards against a malicious *destination*, not a
+malicious administrator.
+
+A refusal is a **permanent** delivery failure, never retried: retrying is a
+scheduled, repeating attempt to post signed student data somewhere it must not
+go.
+
+### API key lifecycle
+
+**IMPLEMENTED.** Keys are hashed (never stored or recoverable in plaintext),
+scoped, institution-owned, shown once, and revocable. Phase 11 added
+`expiresAt`.
+
+Expiry is nullable and null for every key issued before the column existed —
+back-filling a date would have switched off live integrations to tidy up a
+schema. An expired key and a revoked key both return the same `401`, so a
+caller cannot learn that a key they hold was once real.
+
+Rotation is issue-then-revoke with an overlap window; both keys are valid
+until the old one is revoked.
+
+### Security headers
+
+`X-Frame-Options`, `frame-ancestors 'none'`, `nosniff`, `Referrer-Policy`,
+`Permissions-Policy` (camera `self`; microphone and geolocation denied), and —
+**in production builds only** — `Strict-Transport-Security` for two years
+including subdomains, without `preload` (submitting to the preload list is
+irreversible on a browser timescale and belongs to whoever owns the domain).
+
+**POLICY DECISION REQUIRED.** A full `script-src` Content-Security-Policy is
+still deferred. A policy strict enough to be worth having needs per-request
+nonces threaded through the framework's inline bootstrap; a half-strict one
+with `unsafe-inline` buys nothing. That is its own piece of work.
+
+### Dependency advisory
+
+`deepmerge-ts` < 8.0.0 (GHSA-ggr8-5vv4-36mx, stack exhaustion) is reachable
+only through the Prisma **CLI**, a devDependency. It is **not present in the
+production image** — the runtime stage copies only `.next/standalone`,
+`.next/static` and `public`, and the package appears in none of them
+(verified). Fixing it means a major Prisma upgrade, which is not a change to
+make inside a security phase whose rule is to break nothing. Tracked, not
+runtime-reachable.
 
 ---
 

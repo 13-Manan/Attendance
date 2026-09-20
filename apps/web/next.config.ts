@@ -80,26 +80,37 @@ const nextConfig: NextConfig = {
    * (`unsafe-inline`) buys nothing while risking a blank production page.
    * That is its own piece of work, not a line in this config.
    *
-   * HSTS is also absent on purpose: TLS terminates at Azure Container Apps
-   * ingress, so the header belongs to whatever fronts the app, and setting it
-   * from here would apply it to plain-HTTP local development too.
+   * HSTS is environment-specific rather than absent. TLS terminates at Azure
+   * Container Apps ingress, so the header is belt-and-braces there — but
+   * sending it unconditionally would pin `localhost` to HTTPS in every
+   * developer's browser for a year, which is a self-inflicted outage that is
+   * awkward to undo. So it is emitted only in a production build, and the
+   * condition is written here rather than left to whatever fronts the app,
+   * because "someone else will set it" is how a header ends up set nowhere.
    */
   async headers() {
-    return [
+    const headers = [
+      { key: "X-Frame-Options", value: "DENY" },
+      { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
+      { key: "X-Content-Type-Options", value: "nosniff" },
+      { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
       {
-        source: "/:path*",
-        headers: [
-          { key: "X-Frame-Options", value: "DENY" },
-          { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
-          { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-          {
-            key: "Permissions-Policy",
-            value: "camera=(self), microphone=(), geolocation=()",
-          },
-        ],
+        key: "Permissions-Policy",
+        value: "camera=(self), microphone=(), geolocation=()",
       },
     ];
+
+    if (process.env.NODE_ENV === "production") {
+      headers.push({
+        // Two years, subdomains included. No `preload` token: submitting to
+        // the preload list is irreversible on a browser timescale and is a
+        // decision for whoever owns the domain, not for this file.
+        key: "Strict-Transport-Security",
+        value: "max-age=63072000; includeSubDomains",
+      });
+    }
+
+    return [{ source: "/:path*", headers }];
   },
 };
 

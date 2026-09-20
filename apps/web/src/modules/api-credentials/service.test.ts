@@ -12,6 +12,13 @@ import {
 import { CredentialError, type ApiKeySummary, type WebhookSummary } from "./types.ts";
 import type { RecordAuditLogInput } from "../audit/types.ts";
 import { ForbiddenError } from "../authorization/types.ts";
+import { isSealed, openSecret } from "../../lib/secret-box.ts";
+
+// Webhook creation seals the signing secret before storing it, and
+// `lib/secret-box.ts` fails closed with no key configured — deliberately:
+// writing a secret the process cannot read back is worse than refusing. These
+// are unit tests with injected deps, so a throwaway key is all they need.
+process.env.WEBHOOK_SECRET_KEK ??= Buffer.alloc(32, 7).toString("base64");
 import type { SessionUser } from "../auth-tenancy/types.ts";
 
 /**
@@ -281,9 +288,20 @@ test("the webhook signing secret is returned once and never audited", async () =
     h.deps,
   );
 
+  // Shown once to the administrator, in plaintext — the receiver needs the
+  // real value to verify signatures.
   assert.equal(created.secret, "whsec_PLAINTEXT");
-  assert.equal(h.createdHooks[0].secret, "whsec_PLAINTEXT", "the receiver needs it stored");
+
+  // Phase 11: what is *stored* is sealed, not the plaintext. The dispatcher
+  // opens it when it signs; nothing else ever needs it.
+  const stored = h.createdHooks[0].secret;
+  assert.equal(isSealed(stored), true, "the column holds ciphertext");
+  assert.equal(stored.includes("whsec_PLAINTEXT"), false, "and not the secret itself");
+  assert.equal(openSecret(stored), "whsec_PLAINTEXT", "which opens back to what was shown");
+
+  // Unchanged and still the point: neither form reaches the audit trail.
   assert.equal(flatten(h.audited[0]).includes("whsec_PLAINTEXT"), false);
+  assert.equal(flatten(h.audited[0]).includes(stored), false);
 });
 
 test("no read path returns key material", async () => {

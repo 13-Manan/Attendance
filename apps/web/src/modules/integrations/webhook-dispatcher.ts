@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/modules/audit/service";
-import { assertOutboundAddressAllowed, BlockedAddressError } from "./outbound-guard";
+import { BlockedAddressError } from "./outbound-guard";
+import { safeRequest, UnsafeRequestError } from "./safe-fetch";
+import { openSecret } from "@/lib/secret-box";
 import { redact } from "./redaction";
 import {
   ATTEMPT_HEADER,
@@ -111,24 +113,18 @@ async function sendOverHttp(
   headers: Record<string, string>,
 ): Promise<AttemptOutcome> {
   try {
-    // Where the hostname actually points, checked before the payload is sent.
-    // The URL was string-validated when the endpoint was registered; this
-    // catches a name that resolves to loopback or to the instance-metadata
-    // address, which no amount of string checking can see. A signed payload
-    // full of student data is exactly the thing not to send to an address the
-    // administrator did not approve.
-    await assertOutboundAddressAllowed(url);
-
-    const response = await fetch(url, {
+    // `safeRequest`, not `fetch`. It resolves the hostname once, refuses
+    // loopback and link-local answers, and pins the connection to the address
+    // it validated — so there is no second lookup between the check and the
+    // socket for a hostile resolver to answer differently. It also bounds the
+    // time, bounds the response body, and sends only these headers: nothing
+    // ambient can ride along with a signed payload full of student data.
+    const response = await safeRequest(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
       body,
-      signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
-      // No redirect following. A 302 from a webhook endpoint would send a
-      // signed payload containing student data to a host the administrator
-      // never approved, and an open redirect on the receiver's side would
-      // turn into a data leak on ours.
-      redirect: "manual",
+      timeoutMs: DELIVERY_TIMEOUT_MS,
+      maxResponseBytes: ERROR_BODY_LIMIT * 4,
     });
 
     if (response.status >= 200 && response.status < 300) {
@@ -136,13 +132,10 @@ async function sendOverHttp(
     }
     // The receiver's error body is frequently the only clue an integrator
     // gets. Truncated, and redacted, because it is written to an audit row
-    // and we do not control what a stranger's 500 page contains.
-    let snippet = "";
-    try {
-      snippet = (await response.text()).slice(0, ERROR_BODY_LIMIT);
-    } catch {
-      snippet = "";
-    }
+    // and we do not control what a stranger's 500 page contains. A 3xx lands
+    // here too: `safeRequest` never follows one, so a redirect is reported as
+    // the failure it is rather than quietly chased to another host.
+    const snippet = response.body.slice(0, ERROR_BODY_LIMIT);
     return {
       statusCode: response.status,
       error: String(redact(`HTTP ${response.status}${snippet ? `: ${snippet}` : ""}`)),
@@ -154,10 +147,15 @@ async function sendOverHttp(
     return {
       statusCode: null,
       error: String(redact(message)),
-      // …except a blocked address, which resolves the same way every time.
-      // Retrying it would be a scheduled, repeating attempt to post signed
-      // student data at loopback or at the metadata service.
-      permanent: error instanceof BlockedAddressError,
+      // …except a refusal the transport itself made. A blocked address, a
+      // bad protocol or credentials in the URL resolve the same way on every
+      // attempt; retrying is a scheduled, repeating attempt to post signed
+      // student data somewhere it must not go.
+      permanent:
+        error instanceof BlockedAddressError ||
+        (error instanceof UnsafeRequestError &&
+          error.reason !== "timeout" &&
+          error.reason !== "network_error"),
     };
   }
 }
@@ -170,7 +168,10 @@ async function listEndpointsFromDb(
   return selectEndpoints(rows, event).map((row) => ({
     id: row.id,
     url: row.url,
-    secret: row.secret,
+    // Opened here, once, on the way to signing. A legacy plaintext value
+    // passes through unchanged, which is what lets encryption roll out
+    // without a flag-day migration of every existing endpoint.
+    secret: openSecret(row.secret),
     eventTypes: row.eventTypes,
     isActive: row.isActive,
   }));
