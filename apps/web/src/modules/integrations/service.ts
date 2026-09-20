@@ -627,9 +627,24 @@ export async function getSessionEndpoint(ctx: ApiContext) {
   return { data: serializeSession(row), requestId: ctx.requestId };
 }
 
+/**
+ * The one place a path parameter enters this API.
+ *
+ * The NUL check is not decorative. Postgres cannot store a NUL byte in a text
+ * column, so no identifier can ever legitimately contain one — but Prisma
+ * passes the string through and the driver rejects it at the wire, raising
+ * `22021 invalid byte sequence for encoding "UTF8"`. That surfaced as a 500
+ * on `GET /api/v1/students/abc%00def`: an unhandled exception, an error-log
+ * entry and an alert, all reachable by anyone holding any valid key.
+ *
+ * Refused as `not_found` rather than as a new error shape, because that is
+ * what every other unusable id already returns. A separate code here would
+ * tell a caller that their NUL byte was interesting.
+ */
 function requireParam(ctx: ApiContext, name: string): string {
   const value = ctx.params[name];
   if (!value) throw notFound("Resource");
+  if (value.includes("\0")) throw notFound("Resource");
   return value;
 }
 

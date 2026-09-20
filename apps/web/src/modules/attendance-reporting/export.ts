@@ -38,18 +38,31 @@ export interface ExportColumn<T> {
 // ---------------------------------------------------------------------------
 
 /**
- * RFC 4180 quoting. A field is quoted when it contains a comma, a quote, or a
- * newline; embedded quotes are doubled.
+ * RFC 4180 quoting, plus a formula guard.
  *
- * Note what is *not* done: no formula-prefix stripping, because nothing in an
- * attendance report is user-authored free text that reaches a cell — names and
- * codes come from the institution's own records. If a free-text column (a
- * correction reason, say) is ever exported, it needs a leading `'` guard
- * against `=`, `+`, `-` and `@` before it goes in a cell.
+ * This used to quote and nothing else, reasoning that "names and codes come
+ * from the institution's own records" so no cell could be attacker-chosen.
+ * That conflates *stored by us* with *not chosen by someone*: a student's name
+ * is typed into a form, and `validateStudentName` checks only that it is
+ * non-empty and short enough. `Student`, `Class`, `Subject` and `Faculty` are
+ * all columns here, so a student named `=HYPERLINK(...)` arrived in an
+ * administrator's spreadsheet as a live formula (CWE-1236).
+ *
+ * A leading `'` is the standard neutraliser: Excel and LibreOffice read it as
+ * "what follows is text" and do not display it, so the cell still reads as the
+ * name that was stored. Leading tab and carriage return are included because
+ * both are skipped before the prefix character is examined.
+ *
+ * Numbers return early and are never guarded — a negative count is not a
+ * formula, and prefixing it would turn a number into text.
+ *
+ * The XLSX writer needs none of this: it emits `t="inlineStr"`, which is
+ * rendered literally.
  */
 export function csvField(value: string | number | null): string {
   if (value === null) return "";
-  const text = String(value);
+  if (typeof value === "number") return String(value);
+  const text = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
   if (!/[",\n\r]/.test(text)) return text;
   return `"${text.replace(/"/g, '""')}"`;
 }

@@ -17,7 +17,15 @@ function isSelfScoped(permission: string): boolean {
 }
 
 /**
- * You cannot grant authority you do not hold.
+ * You cannot grant authority you do not hold, to anybody but your own staff.
+ *
+ * Two independent rules, both required. The second was added in Phase 14
+ * after the first proved insufficient: `assertMayGrantRole` examined the role
+ * and never the recipient, so an institution admin could grant FACULTY — or
+ * INSTITUTION_ADMIN — to a user at another institution. The damage landed in
+ * the victim's tenant rather than the attacker's, which is exactly why
+ * `requireSameInstitution` never fired on the way in.
+ *
  *
  * `role.assign` says an actor may administer roles. It does not say *which*
  * roles, and without this check it meant all of them: an institution admin
@@ -60,6 +68,24 @@ async function assertMayGrantRole(
   actor: SessionUser,
   input: AssignRoleInput,
 ): Promise<void> {
+  // Who is being granted this, before what is being granted. The assignment's
+  // own `institutionId` cannot answer it: null is the legitimate shape for
+  // every seeded system role, so trusting that field is what let an admin
+  // hand a role to somebody in another tenant. The target user's own
+  // institution is the only fact that settles whose staff this is.
+  const target = await prisma.user.findUnique({
+    where: { id: input.targetUserId },
+    select: { id: true, institutionId: true },
+  });
+  if (!target) throw new ForbiddenError("target_not_assignable");
+
+  if (target.institutionId === null) {
+    // A platform-level user. Only another platform user may alter their roles.
+    if (!isPlatformUser(actor)) throw new ForbiddenError("target_not_assignable");
+  } else {
+    requireSameInstitution(actor, target.institutionId);
+  }
+
   const role = await prisma.role.findUnique({
     where: { id: input.roleId },
     select: { id: true, key: true, institutionId: true, permissions: true },
