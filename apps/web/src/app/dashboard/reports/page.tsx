@@ -64,7 +64,7 @@ interface PageProps {
  * `modules/attendance-reporting/repository.ts` and `scripts/report-bench/`.
  */
 export default async function InstitutionReportsPage({ searchParams }: PageProps) {
-  const user = await requirePermissionOrRedirect("institution.read");
+  const user = await requirePermissionOrRedirect("attendanceRecord.read");
   const params = await searchParams;
   const request = parseReportQuery(params, new Date());
 
@@ -141,6 +141,14 @@ export default async function InstitutionReportsPage({ searchParams }: PageProps
           <p className="text-xs text-neutral-500">
             {overview.institutionName} · {windowLabel(overview)}
           </p>
+          {overview.scope === "assigned" ? (
+            // Stated once, near the title, rather than repeated on every
+            // panel. Without it a lecturer's 78% is indistinguishable from
+            // the institution's 78%, and those are very different sentences.
+            <p className="text-xs font-medium text-amber-700">
+              Your classes and subjects only — not institution-wide figures.
+            </p>
+          ) : null}
         </div>
         <div className="flex shrink-0 flex-wrap gap-1">
           <Link

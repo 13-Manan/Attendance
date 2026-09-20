@@ -149,6 +149,13 @@ export interface LowAttendanceRow {
 
 /** The headline block on the admin report. */
 export interface InstitutionOverview {
+  /**
+   * Whose figures these are. "assigned" means every number on the page is
+   * restricted to the classes and subjects the viewer teaches — which has to
+   * be stated, because "82% attendance" reads as an institution's figure
+   * unless something says otherwise.
+   */
+  scope: "institution" | "assigned";
   institutionId: string;
   institutionName: string;
   attendanceMode: AttendanceMode;

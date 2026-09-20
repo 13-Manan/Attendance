@@ -1,7 +1,11 @@
 import type { SessionUser } from "@/modules/auth-tenancy/types";
-import { requirePermission } from "@/modules/authorization/service";
+import { hasPermission, requirePermission } from "@/modules/authorization/service";
 import { ForbiddenError } from "@/modules/authorization/types";
-import { rateFromCounts, utcDayRange } from "@/modules/attendance-analytics/service";
+import {
+  rateFromCounts,
+  resolveFacultyScope as resolveFacultyScopeDefault,
+  utcDayRange,
+} from "@/modules/attendance-analytics/service";
 import { getInstitutionById as getInstitutionByIdDefault } from "@/modules/institutions/repository";
 import {
   resolveAttendanceMode,
@@ -17,6 +21,7 @@ import {
   cohortsUnderUnits,
   intersectCohortFilters,
   type CohortScope,
+  type FacultyReportScope,
 } from "./unit-tree";
 import type {
   ExportFile,
@@ -62,6 +67,10 @@ export interface ReportingDeps {
   countSessionsAwaitingConfirmation?: AsDep<typeof repo.countSessionsAwaitingConfirmation>;
   listFilterOptions?: AsDep<typeof repo.listFilterOptions>;
   loadUnitTreeRows?: AsDep<typeof repo.loadUnitTreeRows>;
+  /** Shared with the Phase 7 portals so the two cannot disagree about
+   * which classes are whose. */
+  resolveFacultyScope?: typeof resolveFacultyScopeDefault;
+  listReachableSubjectIds?: (scope: FacultyReportScope) => Promise<string[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,15 +104,58 @@ function requireInstitutionScope(actor: SessionUser): string {
 }
 
 /**
- * Institution-level reporting needs both permissions: `institution.read`
- * because the figures are institution-wide, and `attendanceRecord.read`
- * because they are attendance. A role holding one but not the other has not
- * been granted this.
+ * Who may run a report, and over what.
+ *
+ * `attendanceRecord.read` is the floor: these are attendance figures, and a
+ * role without it has not been granted them at any scope. What the permission
+ * above it decides is not *whether* but *how wide*:
+ *
+ *   - `institution.read` → the whole institution. `facultyScope` is null.
+ *   - otherwise          → the classes and subjects this actor actually
+ *                          teaches, and nothing else.
+ *
+ * Previously the second case did not exist and a class teacher simply could
+ * not open a report. Answering "how is 9B doing this term" is squarely their
+ * job, so the fix is to narrow the report rather than to widen the
+ * permission — the alternative, granting faculty `institution.read`, would
+ * have handed them the whole institution's figures to get at their own.
+ *
+ * The scope comes from `resolveFacultyScope`, the same resolver the Phase 7
+ * portals use. Deliberately shared: if a lecturer's dashboard and their
+ * report disagreed about which classes are theirs, one of them would be
+ * wrong, and there would be no way to say which.
  */
-function requireReportAccess(actor: SessionUser): string {
-  requirePermission(actor, "institution.read");
+export interface ReportAccess {
+  institutionId: string;
+  facultyScope: FacultyReportScope | null;
+}
+
+async function requireReportAccess(
+  actor: SessionUser,
+  deps: ReportingDeps = {},
+): Promise<ReportAccess> {
   requirePermission(actor, "attendanceRecord.read");
-  return requireInstitutionScope(actor);
+  const institutionId = requireInstitutionScope(actor);
+
+  if (hasPermission(actor, "institution.read")) {
+    return { institutionId, facultyScope: null };
+  }
+
+  const resolve = deps.resolveFacultyScope ?? resolveFacultyScopeDefault;
+  const resolved = await resolve(actor);
+  // `cohortIds: null` is that resolver's way of saying "administers every
+  // cohort". Reaching it without `institution.read` is unusual but coherent,
+  // and the honest reading is unrestricted.
+  if (resolved.scope.cohortIds === null) {
+    return { institutionId, facultyScope: null };
+  }
+  return {
+    institutionId,
+    facultyScope: {
+      cohortIds: resolved.scope.cohortIds,
+      cohortSubjectIds: resolved.scope.cohortSubjectIds,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -236,15 +288,16 @@ async function loadInstitution(
  * know the structure exists.
  */
 export async function resolveScope(
-  institutionId: string,
+  access: ReportAccess,
   dimension: ReportDimension | null,
   filters: ReportFilters,
   deps: ReportingDeps = {},
 ): Promise<CohortScope> {
+  const { institutionId, facultyScope } = access;
   const kind = dimension ? UNIT_KIND_BY_DIMENSION[dimension] : undefined;
   const hasUnitFilter = (filters.academicUnitIds?.length ?? 0) > 0;
   if (!kind && !hasUnitFilter) {
-    return { cohortIds: filters.cohortIds ?? null, buckets: null };
+    return { cohortIds: filters.cohortIds ?? null, buckets: null, facultyScope };
   }
 
   const load = deps.loadUnitTreeRows ?? repo.loadUnitTreeRows;
@@ -255,6 +308,10 @@ export async function resolveScope(
   return {
     cohortIds: intersectCohortFilters(filters.cohortIds, underUnits),
     buckets: kind ? bucketCohortsByKind(tree, kind) : null,
+    // Carried through untouched. The unit tree is the caller's *filter*
+    // resolving to cohorts; the grant is orthogonal to it and is applied as a
+    // separate AND in the query, so a unit filter can never reach outside it.
+    facultyScope,
   };
 }
 
@@ -299,12 +356,13 @@ export async function getRollup(
   order: RollupOrder = "label",
   deps: ReportingDeps = {},
 ): Promise<ReportPage<ReportRollupRow>> {
-  const institutionId = requireReportAccess(actor);
+  const access = await requireReportAccess(actor, deps);
+  const { institutionId } = access;
 
   const aggregate = deps.aggregateByDimension ?? repo.aggregateByDimension;
   const countSessions = deps.countSessionsByDimension ?? repo.countSessionsByDimension;
   const offset = (request.page - 1) * request.pageSize;
-  const scope = await resolveScope(institutionId, dimension, filters, deps);
+  const scope = await resolveScope(access, dimension, filters, deps);
 
   const [rollupRows, sessionRows] = await Promise.all([
     aggregate(institutionId, dimension, filters, scope, order, request.pageSize, offset),
@@ -331,12 +389,13 @@ export async function getLowAttendance(
   thresholdOverride?: number,
   deps: ReportingDeps = {},
 ): Promise<ReportPage<LowAttendanceRow> & { threshold: number }> {
-  const institutionId = requireReportAccess(actor);
+  const access = await requireReportAccess(actor, deps);
+  const { institutionId } = access;
   const threshold = await resolveThreshold(institutionId, thresholdOverride, deps);
 
   const list = deps.listLowAttendanceStudents ?? repo.listLowAttendanceStudents;
   const offset = (request.page - 1) * request.pageSize;
-  const scope = await resolveScope(institutionId, null, filters, deps);
+  const scope = await resolveScope(access, null, filters, deps);
   const sqlRows = await list(institutionId, filters, scope, threshold, request.pageSize, offset);
 
   const rows: LowAttendanceRow[] = sqlRows.map((row) => ({
@@ -356,11 +415,12 @@ export async function getRecords(
   request: ReportPageRequest,
   deps: ReportingDeps = {},
 ): Promise<ReportPage<ReportRecordRow>> {
-  const institutionId = requireReportAccess(actor);
+  const access = await requireReportAccess(actor, deps);
+  const { institutionId } = access;
   const list = deps.listRecords ?? repo.listRecords;
   const count = deps.countRecords ?? repo.countRecords;
   const offset = (request.page - 1) * request.pageSize;
-  const scope = await resolveScope(institutionId, null, filters, deps);
+  const scope = await resolveScope(access, null, filters, deps);
 
   // Two queries rather than a windowed one. Running them together costs one
   // round trip, and keeps the page query eligible for a top-N sort; see
@@ -403,7 +463,8 @@ export async function getOverview(
   thresholdOverride?: number,
   deps: ReportingDeps = {},
 ): Promise<InstitutionOverview> {
-  const institutionId = requireReportAccess(actor);
+  const access = await requireReportAccess(actor, deps);
+  const { institutionId } = access;
   const now = (deps.now ?? (() => new Date()))();
   const today = utcDayRange(now);
 
@@ -416,22 +477,23 @@ export async function getOverview(
 
   const threshold = await resolveThreshold(institutionId, thresholdOverride, deps);
   const institution = await loadInstitution(institutionId, deps);
-  const scope = await resolveScope(institutionId, null, filters, deps);
+  const scope = await resolveScope(access, null, filters, deps);
   const todayFilters: ReportFilters = { ...filters, from: today.start, to: today.end };
 
   const [overallRows, todayRows, entities, finalizedSessions, awaitingToday, lowRows] =
     await Promise.all([
       aggregateOverall(institutionId, filters, scope),
       aggregateOverall(institutionId, todayFilters, scope),
-      countEntities(institutionId),
-      countFinalized(institutionId, filters.from, filters.to),
-      countAwaiting(institutionId, today.start, today.end),
+      countEntities(institutionId, access.facultyScope),
+      countFinalized(institutionId, filters.from, filters.to, access.facultyScope),
+      countAwaiting(institutionId, today.start, today.end, access.facultyScope),
       countLow(institutionId, filters, scope, threshold),
     ]);
 
   return {
     institutionId,
     institutionName: institution?.name ?? "",
+    scope: access.facultyScope ? "assigned" : "institution",
     attendanceMode: institution
       ? resolveAttendanceMode(institution)
       : resolveAttendanceMode({ type: "SCHOOL", settings: {} } as Institution),
@@ -449,10 +511,42 @@ export async function getOverview(
   };
 }
 
+/**
+ * The values the filter form may offer.
+ *
+ * Narrowed to the grant, and not only for tidiness: a dropdown listing every
+ * class and subject in the institution is itself a disclosure — it tells a
+ * lecturer the whole timetable, the full roster of departments and which
+ * colleagues hold registers — even if selecting one of them returns no rows.
+ * The query beneath is already safe; this stops the *form* from being the
+ * leak.
+ */
 export async function getFilterOptions(actor: SessionUser, deps: ReportingDeps = {}) {
-  const institutionId = requireReportAccess(actor);
+  const access = await requireReportAccess(actor, deps);
+  const { institutionId, facultyScope } = access;
   const list = deps.listFilterOptions ?? repo.listFilterOptions;
-  return list(institutionId);
+  const options = await list(institutionId);
+  if (!facultyScope) return options;
+
+  const reachable = new Set(facultyScope.cohortIds);
+  const cohorts = options.cohorts.filter((c) => reachable.has(c.id));
+  const subjectIds = new Set(
+    (deps.listReachableSubjectIds ? await deps.listReachableSubjectIds(facultyScope) : null) ??
+      (await repo.listSubjectIdsForCohortSubjects(facultyScope.cohortSubjectIds)),
+  );
+
+  return {
+    cohorts,
+    // Empty rather than filtered. The academic tree is the institution's
+    // shape — departments, grades, semesters — and naming the branches around
+    // someone's two classes discloses most of it. The cohort filter already
+    // expresses everything a lecturer can usefully narrow to, since their
+    // grant is a handful of classes rather than a subtree.
+    academicUnits: [] as typeof options.academicUnits,
+    subjects: options.subjects.filter((subject) => subjectIds.has(subject.id)),
+    // Who else holds a register is not this actor's business to enumerate.
+    faculty: [] as typeof options.faculty,
+  };
 }
 
 // ---------------------------------------------------------------------------

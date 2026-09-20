@@ -119,7 +119,17 @@ export function RollupTable({
 
   return (
     <ul className="flex flex-col divide-y divide-neutral-100">
-      <li className="hidden py-2 text-xs font-medium text-neutral-500 sm:flex sm:items-center sm:gap-3">
+      {/*
+        Purely visual column alignment. The figures below carry their own
+        labels — `sm:sr-only` keeps those readable by assistive technology at
+        every width while showing them inline only on mobile, where the row
+        stacks and the header is not rendered. Hidden from the accessibility
+        tree so the labels are not announced twice.
+      */}
+      <li
+        aria-hidden
+        className="hidden py-2 text-xs font-medium text-neutral-500 sm:flex sm:items-center sm:gap-3"
+      >
         <span className="min-w-0 flex-1">{unitLabel}</span>
         <span className="w-20 text-right">Sessions</span>
         <span className="w-20 text-right">Marks</span>
@@ -147,16 +157,19 @@ export function RollupTable({
               {/* Null means this dimension has no session count to give — see
                   ReportRollupRow.sessionCount — not that it held zero. */}
               {row.sessionCount === null ? "—" : row.sessionCount}
-              <span className="sm:hidden"> sessions</span>
+              <span className="sm:sr-only"> sessions</span>
             </span>
             <span className="text-xs tabular-nums text-neutral-600 sm:w-20 sm:text-right">
               {row.rate.total}
-              <span className="sm:hidden"> marks</span>
+              <span className="sm:sr-only"> marks</span>
             </span>
             <span className="text-sm font-semibold tabular-nums text-neutral-900 sm:w-32 sm:text-right">
+              <span className="sr-only">Attendance </span>
               <RatePercent rate={row.rate} />
               <span className="ml-2 text-xs font-normal text-neutral-500">
+                <span className="sr-only">, </span>
                 {row.rate.present}/{row.rate.total}
+                <span className="sr-only"> present</span>
               </span>
             </span>
           </div>

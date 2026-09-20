@@ -106,7 +106,15 @@ export const NAV_ITEMS: NavItem[] = [
     group: "Attendance",
     permission: "attendanceSession.capture",
   },
-  { href: "/dashboard/reports", label: "Reports", group: "Attendance", permission: "institution.read" },
+  {
+    // `attendanceRecord.read`, matching the page: a class teacher reports on
+    // their own classes, an administrator on the institution. One screen,
+    // narrowed server-side — see `requireReportAccess`.
+    href: "/dashboard/reports",
+    label: "Reports",
+    group: "Attendance",
+    permission: "attendanceRecord.read",
+  },
   {
     href: "/dashboard/face-enrollment",
     label: "Face enrollment",

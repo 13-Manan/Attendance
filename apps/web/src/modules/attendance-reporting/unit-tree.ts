@@ -125,6 +125,29 @@ export interface CohortScope {
   cohortIds: string[] | null;
   /** Cohort-to-bucket pairs, set only for the five academic-unit dimensions. */
   buckets: Array<[cohortId: string, unitId: string]> | null;
+  /**
+   * The actor's own teaching assignment, when they are not an administrator.
+   *
+   * Separate from `cohortIds` because it is a different kind of thing and
+   * composes differently. `cohortIds` is a *filter* — what the caller asked
+   * to see — and it is an AND. This is a *grant* — what the caller is allowed
+   * to see at all — and within it the two lists are an OR: a college lecturer
+   * reaches a class either by being its class teacher or by being assigned
+   * one of its subjects, and a lecturer with only the second must see that
+   * subject's registers and nothing else from the class.
+   *
+   * Null means unrestricted, and is only ever produced for an actor holding
+   * `institution.read`. Collapsing the two into one list would lose exactly
+   * the distinction that keeps a subject lecturer out of the rest of the
+   * timetable.
+   */
+  facultyScope: FacultyReportScope | null;
+}
+
+/** The union a non-administrator is restricted to. */
+export interface FacultyReportScope {
+  cohortIds: string[];
+  cohortSubjectIds: string[];
 }
 
 /**

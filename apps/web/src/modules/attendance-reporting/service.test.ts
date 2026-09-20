@@ -83,7 +83,11 @@ function baseDeps(overrides: ReportingDeps = {}): ReportingDeps {
 // Authorization
 // ---------------------------------------------------------------------------
 
+/** An institution administrator: unrestricted within their tenant. */
+const ADMIN_ACCESS = { institutionId: "inst-A", facultyScope: null };
+
 test("institution.read alone is not enough to read an attendance report", async () => {
+  // attendanceRecord.read is the floor at every scope, administrator or not.
   let queried = false;
   const deps = baseDeps({
     aggregateByDimension: async () => {
@@ -98,19 +102,116 @@ test("institution.read alone is not enough to read an attendance report", async 
   assert.equal(queried, false, "the denial must precede any query");
 });
 
-test("attendanceRecord.read alone is not enough either", async () => {
-  await assert.rejects(
-    () =>
-      getRollup(
-        makeUser(["attendanceRecord.read"]),
-        "cohort",
-        WINDOW,
-        { page: 1, pageSize: 25 },
-        "label",
-        baseDeps(),
-      ),
-    ForbiddenError,
+test("attendanceRecord.read alone reports, but only over what the actor teaches", async () => {
+  // Phase 8 change. This used to be a flat refusal, which meant a class
+  // teacher could not run a report on their own class — so the report is
+  // narrowed instead of the permission widened.
+  let seenScope: unknown;
+  const deps = baseDeps({
+    resolveFacultyScope: async () =>
+      ({
+        scope: { institutionId: "inst-A", cohortIds: ["c-8a"], cohortSubjectIds: ["cs-1"] },
+        kind: "assigned",
+        cohorts: [],
+        subjects: [],
+        isClassTeacher: true,
+      }) as never,
+    aggregateByDimension: async (
+      _institutionId: string,
+      _dimension: unknown,
+      _filters: unknown,
+      scope: unknown,
+    ) => {
+      seenScope = scope;
+      return [];
+    },
+  });
+
+  await getRollup(
+    makeUser(["attendanceRecord.read"]),
+    "cohort",
+    WINDOW,
+    { page: 1, pageSize: 25 },
+    "label",
+    deps,
   );
+
+  assert.deepEqual(
+    (seenScope as { facultyScope: unknown }).facultyScope,
+    { cohortIds: ["c-8a"], cohortSubjectIds: ["cs-1"] },
+    "the grant reaches the query, where it is ANDed with the caller's filters",
+  );
+});
+
+test("a faculty member with no assignment yet reports on nothing", async () => {
+  let seenScope: unknown;
+  const deps = baseDeps({
+    resolveFacultyScope: async () =>
+      ({
+        scope: { institutionId: "inst-A", cohortIds: [], cohortSubjectIds: [] },
+        kind: "assigned",
+        cohorts: [],
+        subjects: [],
+        isClassTeacher: false,
+      }) as never,
+    aggregateByDimension: async (
+      _institutionId: string,
+      _dimension: unknown,
+      _filters: unknown,
+      scope: unknown,
+    ) => {
+      seenScope = scope;
+      return [];
+    },
+  });
+
+  await getRollup(
+    makeUser(["attendanceRecord.read"]),
+    "cohort",
+    WINDOW,
+    { page: 1, pageSize: 25 },
+    "label",
+    deps,
+  );
+
+  assert.deepEqual((seenScope as { facultyScope: unknown }).facultyScope, {
+    cohortIds: [],
+    cohortSubjectIds: [],
+  });
+  // The empty grant must not read as "no restriction" — see the FALSE clause
+  // in `sessionConditions`, pinned in scope.test.ts.
+});
+
+test("an administrator is not narrowed to a teaching assignment", async () => {
+  let seenScope: unknown;
+  let resolvedFaculty = false;
+  const deps = baseDeps({
+    resolveFacultyScope: async () => {
+      resolvedFaculty = true;
+      return {} as never;
+    },
+    aggregateByDimension: async (
+      _institutionId: string,
+      _dimension: unknown,
+      _filters: unknown,
+      scope: unknown,
+    ) => {
+      seenScope = scope;
+      return [];
+    },
+  });
+
+  await getRollup(
+    makeUser(["attendanceRecord.read", "institution.read"]),
+    "cohort",
+    WINDOW,
+    { page: 1, pageSize: 25 },
+    "label",
+    deps,
+  );
+
+  assert.equal((seenScope as { facultyScope: unknown }).facultyScope, null);
+  assert.equal(resolvedFaculty, false, "and the extra resolution is skipped entirely");
 });
 
 test("a student cannot reach institution-wide records", async () => {
@@ -290,21 +391,21 @@ test("no unit filter and no unit dimension reads no tree at all", async () => {
       return TREE_ROWS;
     },
   });
-  const scope = await resolveScope("inst-A", "faculty", WINDOW, deps);
+  const scope = await resolveScope(ADMIN_ACCESS, "faculty", WINDOW, deps);
   assert.equal(loaded, false);
-  assert.deepEqual(scope, { cohortIds: null, buckets: null });
+  assert.deepEqual(scope, { cohortIds: null, buckets: null, facultyScope: null });
 });
 
 test("a unit filter is resolved to cohort ids before any attendance query", async () => {
   const deps = baseDeps({ loadUnitTreeRows: async () => TREE_ROWS });
-  const scope = await resolveScope("inst-A", null, { ...WINDOW, academicUnitIds: ["grade-8"] }, deps);
+  const scope = await resolveScope(ADMIN_ACCESS, null, { ...WINDOW, academicUnitIds: ["grade-8"] }, deps);
   assert.deepEqual(scope.cohortIds?.sort(), ["c-8a", "c-8b"]);
   assert.equal(scope.buckets, null);
 });
 
 test("a unit dimension produces cohort-to-bucket pairs", async () => {
   const deps = baseDeps({ loadUnitTreeRows: async () => TREE_ROWS });
-  const scope = await resolveScope("inst-A", "grade", WINDOW, deps);
+  const scope = await resolveScope(ADMIN_ACCESS, "grade", WINDOW, deps);
   assert.deepEqual(scope.buckets, [
     ["c-8a", "grade-8"],
     ["c-8b", "grade-8"],
@@ -316,7 +417,7 @@ test("a cohort filter and a unit filter intersect rather than union", async () =
   // cohort outside it is a contradiction and must return nothing.
   const deps = baseDeps({ loadUnitTreeRows: async () => TREE_ROWS });
   const narrowed = await resolveScope(
-    "inst-A",
+    ADMIN_ACCESS,
     null,
     { ...WINDOW, academicUnitIds: ["grade-8"], cohortIds: ["c-8a"] },
     deps,
@@ -324,7 +425,7 @@ test("a cohort filter and a unit filter intersect rather than union", async () =
   assert.deepEqual(narrowed.cohortIds, ["c-8a"]);
 
   const contradiction = await resolveScope(
-    "inst-A",
+    ADMIN_ACCESS,
     null,
     { ...WINDOW, academicUnitIds: ["grade-8"], cohortIds: ["c-elsewhere"] },
     deps,

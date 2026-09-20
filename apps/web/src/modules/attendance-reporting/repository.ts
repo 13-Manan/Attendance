@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import type { AcademicUnitKind } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { ReportDimension, ReportFilters } from "./types";
-import type { CohortScope } from "./unit-tree";
+import type { CohortScope, FacultyReportScope } from "./unit-tree";
 
 /**
  * Reporting queries.
@@ -259,6 +259,33 @@ function scopeIsEmpty(dimension: ReportDimension, scope: CohortScope): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * A window bound, as PostgreSQL will actually compare it.
+ *
+ * `sessionDate` is `timestamp without time zone` holding a naive UTC calendar
+ * date — Prisma's typed writes put `2026-09-15T00:00:00Z` in the column as
+ * `2026-09-15 00:00:00`, which is what every other part of the system reads
+ * back. Binding a JS `Date` into `$queryRaw` does *not* round-trip the same
+ * way: it arrives as a `timestamptz` in the server's local zone, so on a
+ * machine at UTC+05:30 the bound value for that same instant is
+ * `2026-09-15 05:30:00+05:30`. Compared against the naive column it behaves
+ * as `05:30`, and the whole window slides by the server's offset — measured:
+ * a September report silently dropped every session dated 1 September and
+ * picked up 1 October instead.
+ *
+ * It is invisible on a UTC server, which is the worst property a bug like
+ * this can have: correct in production, wrong on a developer's machine and in
+ * any deployment that is not UTC, with no error either way.
+ *
+ * Formatting the instant as a naive UTC string and casting it back to
+ * `timestamp` makes the comparison like-for-like, and keeps the report's
+ * boundary identical to the one `utcDayRange` uses to decide which calendar
+ * day a session belongs to.
+ */
+function naiveUtc(date: Date): string {
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
+/**
  * `sessionDate` is compared half-open. Both the record-side and session-side
  * `institutionId` predicates are present on purpose: the record-side one is
  * what lets the planner use `AttendanceRecord_institutionId_idx` (dropping it
@@ -273,8 +300,8 @@ function sessionConditions(
   const conditions: Prisma.Sql[] = [
     Prisma.sql`s."institutionId" = ${institutionId}`,
     Prisma.sql`s.status = 'FINALIZED'::"SessionStatus"`,
-    Prisma.sql`s."sessionDate" >= ${filters.from}`,
-    Prisma.sql`s."sessionDate" < ${filters.to}`,
+    Prisma.sql`s."sessionDate" >= ${naiveUtc(filters.from)}::timestamp`,
+    Prisma.sql`s."sessionDate" < ${naiveUtc(filters.to)}::timestamp`,
   ];
   // Already the intersection of the caller's cohort filter and whatever the
   // academic-unit filter resolved to; see `intersectCohortFilters`.
@@ -287,6 +314,27 @@ function sessionConditions(
   if (filters.subjectIds?.length) {
     conditions.push(Prisma.sql`s."cohortSubjectId" IN (
       SELECT id FROM "CohortSubject" WHERE "subjectId" IN (${Prisma.join(filters.subjectIds)}))`);
+  }
+  // The teaching grant, ANDed last. Everything above is what the caller asked
+  // for; this is what they are allowed to have, so it can only ever remove
+  // rows. A `cohortIds` filter naming a class they do not teach therefore
+  // intersects to nothing rather than reaching it.
+  const grant = scope.facultyScope;
+  if (grant) {
+    const reachable: Prisma.Sql[] = [];
+    if (grant.cohortIds.length) {
+      reachable.push(Prisma.sql`s."cohortId" IN (${Prisma.join(grant.cohortIds)})`);
+    }
+    if (grant.cohortSubjectIds.length) {
+      reachable.push(Prisma.sql`s."cohortSubjectId" IN (${Prisma.join(grant.cohortSubjectIds)})`);
+    }
+    // A faculty member with no assignment yet reaches nothing. `FALSE` rather
+    // than an omitted clause: omitting it would silently promote them to the
+    // institution-wide view, which is the exact failure this grant exists to
+    // prevent.
+    conditions.push(
+      reachable.length ? Prisma.sql`(${Prisma.join(reachable, " OR ")})` : Prisma.sql`FALSE`,
+    );
   }
   return conditions;
 }
@@ -685,12 +733,56 @@ export function countLowAttendanceStudents(
 }
 
 /** Institution-wide counts that do not depend on the report window. */
-export function countInstitutionEntities(institutionId: string) {
+/**
+ * The teaching grant as a Prisma clause, for the three counts that are
+ * `prisma.count` rather than raw SQL.
+ *
+ * Same rule as `sessionConditions`: an OR of the two reachable sets, and an
+ * unsatisfiable clause when there is nothing assigned. Expressed twice
+ * because the queries are; the shape is asserted against the SQL one in
+ * `scope.test.ts` so the two cannot drift.
+ */
+function grantWhere(
+  scope: FacultyReportScope | null,
+): Prisma.AttendanceSessionWhereInput | undefined {
+  if (!scope) return undefined;
+  if (!scope.cohortIds.length && !scope.cohortSubjectIds.length) {
+    // Matches nothing. `id: ""` is unsatisfiable for a cuid column and needs
+    // no special-casing downstream, unlike an empty `OR`, which Prisma rejects.
+    return { id: "" };
+  }
+  return {
+    OR: [
+      { cohortId: { in: scope.cohortIds } },
+      { cohortSubjectId: { in: scope.cohortSubjectIds } },
+    ],
+  };
+}
+
+export function countInstitutionEntities(
+  institutionId: string,
+  scope: FacultyReportScope | null = null,
+) {
+  // A lecturer's "students" and "classes" are the ones they teach, not the
+  // institution's totals. Counting enrollments rather than students is
+  // deliberate: the same student in two of their classes is two register
+  // lines, which is what the figure beside a register count should mean.
+  const cohortIds = scope?.cohortIds ?? null;
   return Promise.all([
-    prisma.student.count({ where: { institutionId, status: "ACTIVE" } }),
-    prisma.cohort.count({ where: { institutionId } }),
+    scope
+      ? prisma.enrollment.count({
+          where: { institutionId, status: "ACTIVE", cohortId: { in: cohortIds ?? [] } },
+        })
+      : prisma.student.count({ where: { institutionId, status: "ACTIVE" } }),
+    scope
+      ? Promise.resolve(cohortIds?.length ?? 0)
+      : prisma.cohort.count({ where: { institutionId } }),
     prisma.attendanceSession.count({
-      where: { institutionId, status: { in: ["REVIEW", "PROCESSING"] } },
+      where: {
+        institutionId,
+        status: { in: ["REVIEW", "PROCESSING"] },
+        ...(grantWhere(scope) ?? {}),
+      },
     }),
   ]).then(([students, cohorts, sessionsAwaitingReview]) => ({
     students,
@@ -703,9 +795,15 @@ export function countFinalizedSessions(
   institutionId: string,
   from: Date,
   to: Date,
+  scope: FacultyReportScope | null = null,
 ): Promise<number> {
   return prisma.attendanceSession.count({
-    where: { institutionId, status: "FINALIZED", sessionDate: { gte: from, lt: to } },
+    where: {
+      institutionId,
+      status: "FINALIZED",
+      sessionDate: { gte: from, lt: to },
+      ...(grantWhere(scope) ?? {}),
+    },
   });
 }
 
@@ -713,12 +811,14 @@ export function countSessionsAwaitingConfirmation(
   institutionId: string,
   from: Date,
   to: Date,
+  scope: FacultyReportScope | null = null,
 ): Promise<number> {
   return prisma.attendanceSession.count({
     where: {
       institutionId,
       sessionDate: { gte: from, lt: to },
       status: { notIn: ["FINALIZED", "CANCELLED"] },
+      ...(grantWhere(scope) ?? {}),
     },
   });
 }
@@ -757,4 +857,20 @@ export function listFilterOptions(institutionId: string) {
     subjects,
     faculty,
   }));
+}
+
+/**
+ * The subjects behind a set of `CohortSubject` links.
+ *
+ * A lecturer's grant names cohort-subject links; the subject filter on a
+ * report names `Subject` rows. This is the hop between them, so the filter
+ * form can offer "Data Structures" for the class they actually teach it to.
+ */
+export function listSubjectIdsForCohortSubjects(
+  cohortSubjectIds: string[],
+): Promise<string[]> {
+  if (cohortSubjectIds.length === 0) return Promise.resolve([]);
+  return prisma.cohortSubject
+    .findMany({ where: { id: { in: cohortSubjectIds } }, select: { subjectId: true } })
+    .then((rows) => rows.map((row) => row.subjectId));
 }

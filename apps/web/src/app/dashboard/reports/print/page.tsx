@@ -52,7 +52,7 @@ interface PageProps {
  *   threshold, every applied filter, and when it was generated.
  */
 export default async function ReportPrintPage({ searchParams }: PageProps) {
-  const user = await requirePermissionOrRedirect("institution.read");
+  const user = await requirePermissionOrRedirect("attendanceRecord.read");
   const params = await searchParams;
   const parsed = parseReportQuery(params, new Date());
   const request = {

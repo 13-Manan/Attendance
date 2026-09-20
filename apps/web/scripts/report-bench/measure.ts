@@ -68,8 +68,8 @@ console.log(`\nreport-bench: institution=${INSTITUTION}\n`);
 
 /** The scope every query now takes, resolved the way the service resolves it. */
 const scopeFor = (dimension: ReportDimension | null, f: ReportFilters = filters) =>
-  resolveScope(INSTITUTION, dimension, f);
-const NO_SCOPE: CohortScope = { cohortIds: null, buckets: null };
+  resolveScope({ institutionId: INSTITUTION, facultyScope: null }, dimension, f);
+const NO_SCOPE: CohortScope = { cohortIds: null, buckets: null, facultyScope: null };
 
 const counts = await prisma.$queryRaw<Array<{ records: bigint; sessions: bigint }>>`
   SELECT (SELECT count(*) FROM "AttendanceRecord") AS records,

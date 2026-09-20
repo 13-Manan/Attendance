@@ -30,6 +30,13 @@ import { isReportDimension } from "@/modules/attendance-reporting/types";
  * service's and everything does. The `catch` below is the proof that the
  * service check is the one being relied on.
  *
+ * `attendanceRecord.read` is the floor, not the whole answer. A class teacher
+ * holding it gets a spreadsheet of their own classes; an administrator
+ * holding `institution.read` as well gets the institution's. The difference
+ * is decided inside `requireReportAccess` from the session, which is why the
+ * same query string yields a correctly narrower file for the one rather than
+ * a flat 403.
+ *
  * There is no `institutionId` parameter, and there cannot be one. The scope
  * comes from the session, so a caller cannot ask for another institution's
  * spreadsheet by editing a query string.
@@ -48,7 +55,7 @@ export async function GET(request: Request) {
   if (!user) {
     return Response.json({ error: "unauthenticated" }, { status: 401 });
   }
-  if (!hasPermission(user, "institution.read") || !hasPermission(user, "attendanceRecord.read")) {
+  if (!hasPermission(user, "attendanceRecord.read")) {
     return Response.json({ error: "forbidden" }, { status: 403 });
   }
 
