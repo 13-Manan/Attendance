@@ -43,6 +43,21 @@ export default async function AttendanceCapturePage({ params, searchParams }: Pa
     redirect(`/dashboard/attendance/${cohort.id}`);
   }
 
+  /**
+   * Whether to hand the wizard a fixture camera instead of the real one.
+   *
+   * Read here, on the server, from a build-time `NEXT_PUBLIC_` flag that no
+   * deployment sets — see `.github/workflows/deploy.yml`, which passes no such
+   * variable, and `apps/web/Dockerfile`, whose build args do not include it.
+   * A production bundle therefore has the literal `false` compiled in and the
+   * fixture source is unreachable from it.
+   *
+   * It exists so the capture flow can be driven end to end in a browser on a
+   * machine with no webcam. It proves the wizard, the contracts and the
+   * server; it proves nothing whatsoever about a camera.
+   */
+  const fixtureCamera = process.env.NEXT_PUBLIC_ENABLE_FIXTURE_CAMERA === "true";
+
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
       <div className="flex flex-col gap-1">
@@ -53,11 +68,26 @@ export default async function AttendanceCapturePage({ params, searchParams }: Pa
           ← Back to class
         </Link>
         <h1 className="text-xl font-semibold text-neutral-900">{cohort.name}</h1>
+        <p className="text-sm text-neutral-500">
+          {mode === "DAILY" ? "Daily attendance" : "Subject-wise attendance"}
+          {cohort.termLabel ? ` · ${cohort.termLabel}` : ""}
+        </p>
       </div>
+      {fixtureCamera && (
+        <p
+          role="alert"
+          className="rounded-md border border-purple-300 bg-purple-50 px-3 py-2 text-xs text-purple-900"
+        >
+          <strong>Fixture camera active.</strong> This build replaces the camera with
+          a fixed test image. Nothing here reflects a real lens, a real room, or a
+          real student. Development only.
+        </p>
+      )}
       <CaptureWizard
         cohortId={cohort.id}
         cohortSubjectId={cohortSubjectId ?? null}
         attendanceMode={mode}
+        useFixtureCamera={fixtureCamera}
       />
     </div>
   );

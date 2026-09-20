@@ -127,6 +127,16 @@ export interface AttendanceCandidateRow {
   studentId: string;
   aiResult: AttendanceResult;
   aiConfidence: number | null;
+  /**
+   * The `FaceEmbedding` that produced this advisory.
+   *
+   * The column has existed since the first migration and was never written,
+   * which left "why was this student marked present?" answerable only down to
+   * the student rather than to the template — and a template is the thing an
+   * investigation into a wrong match actually needs. Null whenever nothing
+   * matched, which is most rows.
+   */
+  matchedEmbeddingId: string | null;
   finalResult: AttendanceResult;
 }
 
@@ -168,6 +178,7 @@ export async function upsertAttendanceCandidates(
           studentId: r.studentId,
           aiResult: r.aiResult,
           aiConfidence: r.aiConfidence,
+          matchedEmbeddingId: r.matchedEmbeddingId,
           finalResult: r.finalResult,
         })),
       // Belt and braces against a concurrent generation for the same
@@ -183,6 +194,7 @@ export async function upsertAttendanceCandidates(
         data: {
           aiResult: r.aiResult,
           aiConfidence: r.aiConfidence,
+          matchedEmbeddingId: r.matchedEmbeddingId,
           finalResult: r.finalResult,
         },
       });

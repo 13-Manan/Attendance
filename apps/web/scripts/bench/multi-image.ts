@@ -172,6 +172,7 @@ function buildScenario(
   const candidates: CandidateTemplate[] = [];
   for (let i = 0; i < cohortSize; i++) {
     candidates.push({
+      embeddingId: `emb-${i}`,
       studentId: `stu-${i}`,
       embedding: randomUnitVector(rng, EMBEDDING_DIMENSION),
       modelName: "bench",
@@ -358,6 +359,22 @@ function evaluate(
   let scored = 0;
   const capturedStudents = new Set<string>();
 
+  /**
+   * Position of a face within its own image.
+   *
+   * The scenario's `faceId` is a run-wide label ("f7"), which is what the
+   * composite `detectedFaceId` wants; the aggregation policy wants the
+   * per-image index, because "two faces in the same capture named this
+   * student" is a within-image question. Counted here so the bench feeds
+   * `aggregateByStudent` the same shape production does.
+   */
+  const facesSeenPerImage = new Map<number, number>();
+  const indexWithinImage = (face: { image: number }): number => {
+    const next = facesSeenPerImage.get(face.image) ?? 0;
+    facesSeenPerImage.set(face.image, next + 1);
+    return next;
+  };
+
   const t0 = performance.now();
   for (const face of scenario.faces) {
     if (face.image > imageCount) continue;
@@ -367,9 +384,12 @@ function evaluate(
       perFace.push({
         detectedFaceId: `${face.image}:${face.faceId}`,
         imageSequenceNumber: face.image,
+        faceIndex: indexWithinImage(face),
         candidateStudentId: null,
+        candidateEmbeddingId: null,
         similarityScore: null,
         runnerUpSimilarity: null,
+        runnerUpStudentId: null,
         detectionConfidence: face.detectionConfidence,
         qualityScore: face.qualityScore,
         decision: "UNMATCHED",
@@ -390,9 +410,12 @@ function evaluate(
     perFace.push({
       detectedFaceId: `${face.image}:${face.faceId}`,
       imageSequenceNumber: face.image,
+      faceIndex: indexWithinImage(face),
       candidateStudentId: r.best?.studentId ?? null,
+      candidateEmbeddingId: r.best?.embeddingId ?? null,
       similarityScore: r.best?.similarity ?? null,
       runnerUpSimilarity: r.runnerUp?.similarity ?? null,
+      runnerUpStudentId: r.runnerUp?.studentId ?? null,
       detectionConfidence: face.detectionConfidence,
       qualityScore: face.qualityScore,
       decision: r.decision,

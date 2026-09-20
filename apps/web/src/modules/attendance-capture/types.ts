@@ -49,7 +49,14 @@ export interface CaptureImageAnalysis {
   sequenceNumber: 1 | 2 | 3;
   faceCount: number;
   averageDetectionConfidence: number | null;
+  /** Always null from the per-capture gate: `/v1/detect` reports detector
+   * confidence but no quality score, which is a property of the aligned crop
+   * the recogniser prepares. Filled in by the authoritative run. */
   averageQualityScore: number | null;
+  /** Pixel dimensions the service decoded, so the wizard can warn about a
+   * capture too small for the back of a room without decoding it again. */
+  imageWidth: number;
+  imageHeight: number;
   modelName: string;
   modelVersion: string;
   /** True when the loaded backend is licence-cleared for production
@@ -93,6 +100,9 @@ export type CaptureImageResult =
 export interface CaptureSessionSummary {
   sessionId: string;
   captureCount: number;
+  /** The per-capture verdicts the server recorded, so the summary screen
+   * renders from the same source the counts are derived from. */
+  analyses: CaptureImageAnalysis[];
   totalFacesDetected: number;
   modelName: string;
   modelVersion: string;

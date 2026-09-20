@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,6 +15,9 @@ import type {
   StartCaptureSessionResult,
 } from "@/modules/attendance-capture/types";
 import { MAX_CAPTURES_PER_SESSION } from "@/modules/attendance-capture/types";
+import { cameraStatusLabel, canCapture, canStart } from "@/modules/attendance-capture/camera";
+import { fixtureCameraSource } from "@/modules/attendance-capture/camera-source";
+import { useClassroomCamera } from "@/modules/attendance-capture/use-classroom-camera";
 import {
   processSessionAttendanceAction,
   startManualRollCallAction,
@@ -24,37 +27,45 @@ import type { RecognitionRunSummary } from "@/modules/recognition-engine/types";
 import type { AttendanceMode } from "@/modules/institutions/types";
 
 /**
- * Phase 4 classroom capture wizard.
+ * The classroom capture wizard.
  *
- * Steps, in order:
- *   1. briefing  — instructions + "Start attendance"
- *   2. camera    — live viewfinder, capture up to 3 photos
- *   3. review    — thumbnails, per-image quality, remove/retake/add
- *   4. processing — animated progress while analyses run
- *   5. summary   — face counts, model provenance, "prepare review"
+ *   briefing → camera → review → processing → summary
  *
- * State that must survive a refresh (the attendance session id) is kept
- * server-side. Everything the client keeps (camera stream, base64 preview,
- * face-count analyses) is deliberately in-memory only — no localStorage,
- * no upload beyond the analyze/summarize Server Actions. A refresh
- * discards the previews; the server-side session can be resumed but the
- * user will need to retake photos, which is the correct default for
- * biometric material.
+ * ## Where state lives, and why
+ *
+ * The attendance session id is server-side, so a refresh resumes rather than
+ * duplicating. Everything the browser holds — the camera stream, the captured
+ * previews — is in memory only: no `localStorage`, no IndexedDB, nothing that
+ * outlives the tab. A refresh loses the photographs and the teacher retakes
+ * them, which is the correct default for images of a room full of children.
+ *
+ * The counts on the summary screen are the *server's*, not this component's.
+ * The browser knows how many faces it was told about; what gets displayed and
+ * what gets written are both derived from what the server saw.
+ *
+ * ## Camera
+ *
+ * All of it is behind `useClassroomCamera`. This file decides what to render
+ * for each camera state; it never touches `getUserMedia`, a `MediaStream`, or
+ * a canvas.
  */
 
 type WizardStep = "briefing" | "camera" | "review" | "processing" | "summary";
 
 interface CapturedShot {
   sequenceNumber: 1 | 2 | 3;
-  /** Full data URL for the <img> preview. Local-only; never uploaded. */
+  /** Data URL for the local `<img>` preview. Never uploaded as-is. */
   dataUrl: string;
-  /** Raw base64 payload (no data: prefix) sent to the server. */
+  /** Raw base64 sent to the server. */
   imageBase64: string;
-  /** Present once the server has analyzed this shot; undefined while
-   * queued/in-flight/failed. */
+  width: number;
+  height: number;
+  /** The server's verdict on this frame, once it has one. */
   analysis?: CaptureImageAnalysis;
-  /** Present when analysis failed for this shot — the review UI shows a
-   * retake button rather than silently dropping the frame. */
+  /** Set while the quality check is in flight. */
+  checking?: boolean;
+  /** Set when the quality check failed — the shot gets a retake affordance
+   * rather than being silently dropped. */
   failure?: { message: string; retryable: boolean };
 }
 
@@ -62,36 +73,30 @@ interface Props {
   cohortId: string;
   cohortSubjectId: string | null;
   attendanceMode: AttendanceMode;
+  /**
+   * Development-only. Replaces the camera with a deterministic fixture so the
+   * flow can be driven in a browser with no webcam attached. Never true in a
+   * deployed environment — see the page component, which reads a
+   * `NEXT_PUBLIC_` flag that no deployment sets.
+   */
+  useFixtureCamera?: boolean;
 }
 
 const CAPTURE_TIPS = [
-  "Move the camera to include every visible student",
-  "Ask students to face forward, uncovered by hats or hands",
+  "Stand where you can see the whole class, and include every row",
+  "Ask students to face forward, with hats and hands away from faces",
   "Avoid strong backlighting — the window behind the class is the classic trap",
-  "A second photo from a different angle helps if some students are behind others",
-] as const;
-
-const PROCESSING_STAGES = [
-  "Uploading captured image",
-  "Detecting faces",
-  "Assessing capture quality",
-  "Recognizing enrolled students",
-  "Combining results across images",
-  "Preparing attendance review",
+  "Take a second photo from another angle if students are behind one another",
 ] as const;
 
 // ---------------------------------------------------------------------------
-// Small helpers, kept in this file because they are only used by the wizard.
+// Small helpers
 // ---------------------------------------------------------------------------
 
 function nextSequenceNumber(shots: CapturedShot[]): 1 | 2 | 3 | null {
   const used = new Set(shots.map((s) => s.sequenceNumber));
   for (const n of [1, 2, 3] as const) if (!used.has(n)) return n;
   return null;
-}
-
-function stripDataUrlPrefix(dataUrl: string): string {
-  return dataUrl.split(",", 2)[1] ?? "";
 }
 
 function qualityBadgeClasses(label: CaptureImageAnalysis["qualityLabel"] | undefined): string {
@@ -109,7 +114,11 @@ function qualityBadgeClasses(label: CaptureImageAnalysis["qualityLabel"] | undef
   }
 }
 
-function qualityBadgeText(label: CaptureImageAnalysis["qualityLabel"] | undefined): string {
+function qualityBadgeText(
+  label: CaptureImageAnalysis["qualityLabel"] | undefined,
+  checking: boolean,
+): string {
+  if (checking) return "Checking…";
   switch (label) {
     case "good":
       return "Good";
@@ -120,13 +129,12 @@ function qualityBadgeText(label: CaptureImageAnalysis["qualityLabel"] | undefine
     case "no_faces":
       return "No faces";
     default:
-      return "Analyzing…";
+      return "Not checked";
   }
 }
 
-// useSyncExternalStore adapters for `navigator.onLine`. Extracted from the
-// component so React's snapshot equality (referential) is stable across
-// renders — a fresh closure each render would tear the subscription.
+// `navigator.onLine` adapters, defined outside the component so React's
+// referential snapshot equality holds across renders.
 function subscribeToOnlineStatus(cb: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   window.addEventListener("online", cb);
@@ -137,36 +145,75 @@ function subscribeToOnlineStatus(cb: () => void): () => void {
   };
 }
 function getOnlineSnapshot(): boolean {
-  if (typeof window === "undefined") return true;
-  return window.navigator.onLine;
+  return typeof window === "undefined" ? true : window.navigator.onLine;
 }
 function getServerOnlineSnapshot(): boolean {
-  // Server-render assumes online; the banner only ever renders on the
-  // client, so this is only used to satisfy the SSR contract.
   return true;
 }
 
-/** Best-effort camera-error → human message. `NotAllowedError` covers both
- * user-denied and OS-blocked permissions on every major browser. */
-function humanCameraError(e: unknown): string {
-  if (e instanceof Error) {
-    if (e.name === "NotAllowedError" || e.name === "SecurityError") {
-      return "Camera access was denied. Enable camera permission for this site in your browser settings, then try again.";
-    }
-    if (e.name === "NotFoundError" || e.name === "OverconstrainedError") {
-      return "No usable camera was found on this device.";
-    }
-    if (e.name === "NotReadableError") {
-      return "The camera is in use by another application. Close other apps that might be using it and try again.";
-    }
-    return `Could not open the camera: ${e.message}`;
+/**
+ * Turns a thrown Server Action error into something a teacher standing in
+ * front of a class can act on.
+ *
+ * The service layer throws tagged strings (`session_locked:FINALIZED`,
+ * `empty_roster`) precisely so this mapping can exist. Without it the states
+ * the spec calls "session expired", "unauthorized" and "no students in the
+ * selected cohort" all render as the same raw identifier.
+ */
+function describeProcessingError(error: unknown): { message: string; canRollCall: boolean } {
+  const raw = error instanceof Error ? error.message : "";
+
+  if (raw.startsWith("session_locked:FINALIZED")) {
+    return {
+      message:
+        "This register has already been finalized, so it cannot accept new captures. Open it from the class page to make a correction.",
+      canRollCall: false,
+    };
   }
-  return "Could not open the camera.";
+  if (raw.startsWith("session_locked:CANCELLED") || raw === "session_not_found") {
+    return {
+      message:
+        "This attendance session has expired or was discarded. Go back to the class and start a new one.",
+      canRollCall: false,
+    };
+  }
+  if (raw === "empty_roster") {
+    return {
+      message:
+        "No students are enrolled in this class, so there is no register to build. Ask an administrator to enrol students, then try again.",
+      canRollCall: false,
+    };
+  }
+  if (raw === "not_cohort_faculty" || raw === "not_subject_faculty" || raw === "forbidden") {
+    return {
+      message:
+        "You are not authorized to take attendance for this class. Ask an administrator to link you as its faculty.",
+      canRollCall: false,
+    };
+  }
+  if (raw === "face_ai_timeout") {
+    return {
+      message:
+        "Face recognition took too long to respond. The captures were not lost — try again, or call the roll manually.",
+      canRollCall: true,
+    };
+  }
+  return {
+    message: raw
+      ? `Recognition could not be completed: ${raw}`
+      : "Recognition could not be completed.",
+    canRollCall: true,
+  };
 }
 
 // ---------------------------------------------------------------------------
 
-export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Props) {
+export function CaptureWizard({
+  cohortId,
+  cohortSubjectId,
+  attendanceMode,
+  useFixtureCamera = false,
+}: Props) {
   const router = useRouter();
   const [step, setStep] = useState<WizardStep>("briefing");
   const [starting, setStarting] = useState(false);
@@ -174,100 +221,42 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
   const [started, setStarted] = useState<StartCaptureSessionResult | null>(null);
 
   const [shots, setShots] = useState<CapturedShot[]>([]);
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const [cameraStatus, setCameraStatus] = useState<"idle" | "requesting" | "streaming">("idle");
+  const [captureError, setCaptureError] = useState<string | null>(null);
 
-  const [processingIndex, setProcessingIndex] = useState(0);
-  const [processingStage, setProcessingStage] = useState<string>(PROCESSING_STAGES[0]);
+  const [processingStage, setProcessingStage] = useState<string>("");
+  const [processingPercent, setProcessingPercent] = useState(0);
   const [summary, setSummary] = useState<CaptureSessionSummary | null>(null);
   const [processingError, setProcessingError] = useState<string | null>(null);
-  // Phase 5 recognition output. Null means recognition did not run or did not
-  // succeed — the wizard still reaches the summary step in that case, because
-  // the Phase 4 capture flow must keep working when the engine cannot.
   const [recognition, setRecognition] = useState<RecognitionRunSummary | null>(null);
   const [recognitionError, setRecognitionError] = useState<string | null>(null);
-  // Phase 6: the attendance register this session produced. Non-null means
-  // rows exist for every enrolled student and the review board is reachable.
+  const [canRollCall, setCanRollCall] = useState(false);
   const [generation, setGeneration] = useState<GenerateAttendanceCandidatesResult | null>(null);
   const [rollCallBusy, setRollCallBusy] = useState(false);
   const [rollCallError, setRollCallError] = useState<string | null>(null);
 
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-
-  // -------------------------------------------------------------------------
-  // Online/offline banner. Phase 4 explicitly defers offline support; the
-  // banner is what makes the deferral honest — a network drop while
-  // uploading a capture would otherwise look like a mysterious hang.
-  //
-  // useSyncExternalStore keeps the read/subscribe pair inside React's
-  // concurrent-safe path, so we never call setState from inside an effect
-  // just to mirror an ambient browser signal.
-  // -------------------------------------------------------------------------
   const isOnline = useSyncExternalStore(
     subscribeToOnlineStatus,
     getOnlineSnapshot,
     getServerOnlineSnapshot,
   );
 
-  // -------------------------------------------------------------------------
-  // Camera lifecycle. Always stopped on unmount and whenever the wizard
-  // leaves the camera step, so a captured session never leaves the tab with
-  // the camera light on.
-  //
-  // teardownTracks() is side-effect-only (no React state) so that we can
-  // call it from useEffect cleanups without tripping the
-  // set-state-in-effect rule. The `cameraStatus` state is updated at every
-  // *user-initiated* transition instead — which is when a status change is
-  // actually meaningful to the UI.
-  // -------------------------------------------------------------------------
-  const teardownTracks = useCallback(() => {
-    if (streamRef.current) {
-      for (const track of streamRef.current.getTracks()) track.stop();
-      streamRef.current = null;
-    }
-    if (videoRef.current) videoRef.current.srcObject = null;
-  }, []);
+  // The fixture source is constructed once, and only when explicitly asked
+  // for. `useMemo` because a fresh source each render would restart the camera.
+  const fixtureSource = useMemo(
+    () => (useFixtureCamera ? fixtureCameraSource() : undefined),
+    [useFixtureCamera],
+  );
+  const camera = useClassroomCamera({ source: fixtureSource });
 
-  const stopStream = useCallback(() => {
-    teardownTracks();
-    setCameraStatus("idle");
-  }, [teardownTracks]);
-
-  // Unmount cleanup — pure side-effect, no setState.
-  useEffect(() => teardownTracks, [teardownTracks]);
-  // Step-change cleanup — pure side-effect. `cameraStatus` is left as-is;
-  // it will be reset the next time the user opens the camera.
+  // Leaving the camera step releases the hardware. The hook also handles
+  // unmount and tab-hidden; this covers "moved on to review".
+  const { stop: stopCamera } = camera;
   useEffect(() => {
-    if (step !== "camera") teardownTracks();
-  }, [step, teardownTracks]);
-
-  const openCamera = useCallback(async () => {
-    setCameraError(null);
-    setCameraStatus("requesting");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        // Rear camera preferred for a classroom capture; browsers ignore
-        // `environment` gracefully on laptops and fall back to the built-in
-        // webcam, which is the desired behaviour on demo hardware.
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-      setCameraStatus("streaming");
-    } catch (e) {
-      setCameraStatus("idle");
-      setCameraError(humanCameraError(e));
-    }
-  }, []);
+    if (step !== "camera") stopCamera();
+  }, [step, stopCamera]);
 
   // -------------------------------------------------------------------------
-  // Step transitions
+  // Session
   // -------------------------------------------------------------------------
   const start = useCallback(async () => {
     setStartError(null);
@@ -276,125 +265,145 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
       const result = await startCaptureSession({ cohortId, cohortSubjectId });
       setStarted(result);
       setStep("camera");
+      void camera.start();
     } catch (e) {
       setStartError(
         e instanceof Error
-          ? `Could not start attendance: ${e.message}`
+          ? describeProcessingError(e).message
           : "Could not start attendance.",
       );
     } finally {
       setStarting(false);
     }
-  }, [cohortId, cohortSubjectId]);
+  }, [camera, cohortId, cohortSubjectId]);
 
   // -------------------------------------------------------------------------
-  // Capture / remove / retake
+  // Capture, quality check, retake
   // -------------------------------------------------------------------------
+
+  /**
+   * Sends one frame for its quality check.
+   *
+   * Runs as soon as the shutter is pressed rather than at the end, so a
+   * photograph with nobody in it is caught while the class is still sitting
+   * there. Detection only on the server — no embedding is produced for a frame
+   * the teacher may be about to discard.
+   */
+  const checkShot = useCallback(
+    async (sessionId: string, shot: CapturedShot) => {
+      setShots((current) =>
+        current.map((s) =>
+          s.sequenceNumber === shot.sequenceNumber
+            ? { ...s, checking: true, failure: undefined }
+            : s,
+        ),
+      );
+      try {
+        const result = await analyzeCaptureImageAction({
+          sessionId,
+          sequenceNumber: shot.sequenceNumber,
+          imageBase64: shot.imageBase64,
+        });
+        setShots((current) =>
+          current.map((s) =>
+            s.sequenceNumber === shot.sequenceNumber
+              ? result.ok
+                ? { ...s, checking: false, analysis: result, failure: undefined }
+                : {
+                    ...s,
+                    checking: false,
+                    analysis: undefined,
+                    failure: { message: result.message, retryable: result.retryable },
+                  }
+              : s,
+          ),
+        );
+      } catch (e) {
+        setShots((current) =>
+          current.map((s) =>
+            s.sequenceNumber === shot.sequenceNumber
+              ? {
+                  ...s,
+                  checking: false,
+                  failure: {
+                    message:
+                      e instanceof Error
+                        ? `Could not check this photo: ${e.message}`
+                        : "Could not check this photo.",
+                    retryable: true,
+                  },
+                }
+              : s,
+          ),
+        );
+      }
+    },
+    [],
+  );
+
   const capture = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
-    const next = nextSequenceNumber(shots);
-    if (next === null) return;
-    const w = video.videoWidth;
-    const h = video.videoHeight;
-    if (w === 0 || h === 0) return;
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, w, h);
-    // JPEG at 0.85 is a reasonable balance: enough detail for face
-    // detection, small enough to keep the upload responsive.
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
-    setShots((current) => [
-      ...current,
-      { sequenceNumber: next, dataUrl, imageBase64: stripDataUrlPrefix(dataUrl) },
-    ]);
-    // Move straight to review after a capture so faculty can see what they
-    // just took; the review screen offers "Capture another" to come back.
-    stopStream();
+    if (!started) return;
+    const sequenceNumber = nextSequenceNumber(shots);
+    if (sequenceNumber === null) return;
+
+    setCaptureError(null);
+    const frame = camera.capture();
+    if (!frame.ok) {
+      setCaptureError(frame.message);
+      return;
+    }
+
+    const shot: CapturedShot = {
+      sequenceNumber,
+      dataUrl: frame.dataUrl,
+      imageBase64: frame.imageBase64,
+      width: frame.width,
+      height: frame.height,
+      checking: true,
+    };
+    setShots((current) => [...current, shot]);
     setStep("review");
-  }, [shots, stopStream]);
+    void checkShot(started.session.id, shot);
+  }, [camera, checkShot, shots, started]);
 
   const removeShot = useCallback((sequenceNumber: 1 | 2 | 3) => {
     setShots((current) => current.filter((s) => s.sequenceNumber !== sequenceNumber));
   }, []);
 
+  const retakeShot = useCallback(
+    (sequenceNumber: 1 | 2 | 3) => {
+      removeShot(sequenceNumber);
+      setStep("camera");
+      void camera.start(camera.activeDeviceId ?? undefined);
+    },
+    [camera, removeShot],
+  );
+
   const captureAnother = useCallback(() => {
     setStep("camera");
-    void openCamera();
-  }, [openCamera]);
+    void camera.start(camera.activeDeviceId ?? undefined);
+  }, [camera]);
 
   // -------------------------------------------------------------------------
-  // Processing pipeline. Runs analyses in order 1 → 2 → 3, updating the
-  // progress label between images so the UI never appears frozen. Failed
-  // analyses are attached to their shot and the user can retake from the
-  // review screen without losing the successful captures.
+  // Processing
+  //
+  // Recognition and register generation happen in ONE server call. If the
+  // browser ran recognition and posted results back, a client could simply
+  // claim everybody was matched — attendance would be asserted by the device
+  // rather than measured. What the browser gets back is display-only.
   // -------------------------------------------------------------------------
   const process = useCallback(async () => {
-    if (!started) return;
+    if (!started || shots.length === 0) return;
     setStep("processing");
     setProcessingError(null);
-    // Clear any prior run's advisory before reprocessing, so a retake can
-    // never leave stale recognition counts on screen next to fresh captures.
     setRecognition(null);
     setRecognitionError(null);
     setRollCallError(null);
-    const collected: CaptureImageAnalysis[] = [];
-    for (let i = 0; i < shots.length; i++) {
-      const shot = shots[i];
-      setProcessingIndex(i);
-      setProcessingStage(`Uploading image ${i + 1} of ${shots.length}`);
-      try {
-        setProcessingStage(`Analyzing image ${i + 1}: detecting faces`);
-        const analysis = await analyzeCaptureImageAction({
-          sessionId: started.session.id,
-          sequenceNumber: shot.sequenceNumber,
-          imageBase64: shot.imageBase64,
-          acceptedSoFar: i,
-        });
-        if (!analysis.ok) {
-          // Attach the failure to the shot rather than aborting; the review
-          // screen will surface a per-shot retake affordance.
-          setShots((current) =>
-            current.map((s) =>
-              s.sequenceNumber === shot.sequenceNumber
-                ? { ...s, analysis: undefined, failure: { message: analysis.message, retryable: analysis.retryable } }
-                : s,
-            ),
-          );
-          setProcessingError(analysis.message);
-          setStep("review");
-          return;
-        }
-        const { ok: _ok, ...rest } = analysis;
-        void _ok;
-        collected.push(rest);
-        setShots((current) =>
-          current.map((s) =>
-            s.sequenceNumber === shot.sequenceNumber ? { ...s, analysis: rest, failure: undefined } : s,
-          ),
-        );
-        setProcessingStage(`Assessing capture quality for image ${i + 1}`);
-      } catch (e) {
-        setProcessingError(
-          e instanceof Error ? `Processing failed: ${e.message}` : "Processing failed.",
-        );
-        setStep("review");
-        return;
-      }
-    }
-    // Recognition + attendance generation (Phases 5 and 6) in ONE server
-    // call. The browser never posts recognition results back for storage:
-    // a client that could do that could simply claim everyone was matched.
-    // What gets written is what the server computed.
-    //
-    // A failure here is NOT fatal: the capture itself succeeded, and the
-    // faculty member must still reach the summary and fall back to roll
-    // call. The error is surfaced, never swallowed.
-    setProcessingStage("Recognizing enrolled students");
-    setRecognitionError(null);
+    setCanRollCall(false);
+    setGeneration(null);
+
+    setProcessingStage("Sending the captures for recognition");
+    setProcessingPercent(20);
     try {
       const result = await processSessionAttendanceAction({
         sessionId: started.session.id,
@@ -403,43 +412,33 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           imageBase64: s.imageBase64,
         })),
       });
+      setProcessingStage("Building the attendance register");
+      setProcessingPercent(75);
       setRecognition(result.recognition);
       setGeneration(result.generation);
     } catch (e) {
-      setRecognition(null);
-      setGeneration(null);
-      setRecognitionError(
-        e instanceof Error
-          ? `Recognition could not be completed: ${e.message}`
-          : "Recognition could not be completed.",
-      );
+      // Not fatal: the captures succeeded, and the teacher must still be able
+      // to take attendance. The reason is surfaced, never swallowed.
+      const described = describeProcessingError(e);
+      setRecognitionError(described.message);
+      setCanRollCall(described.canRollCall);
     }
 
-    setProcessingStage("Combining results across images");
+    setProcessingStage("Preparing the summary");
+    setProcessingPercent(90);
     try {
-      const s = await summarizeCaptureSessionAction({
-        sessionId: started.session.id,
-        analyses: collected,
-      });
-      setProcessingStage("Preparing attendance review");
-      setSummary(s);
-      setStep("summary");
+      setSummary(await summarizeCaptureSessionAction({ sessionId: started.session.id }));
     } catch (e) {
       setProcessingError(
-        e instanceof Error ? `Could not summarize the session: ${e.message}` : "Could not summarize the session.",
+        e instanceof Error
+          ? `Could not summarize the session: ${e.message}`
+          : "Could not summarize the session.",
       );
-      setStep("review");
     }
+    setProcessingPercent(100);
+    setStep("summary");
   }, [shots, started]);
 
-  // -------------------------------------------------------------------------
-  // Manual roll call — the fallback when recognition could not run.
-  //
-  // Builds the register from the enrolled roster with every student in Needs
-  // Review. Nothing is presumed present or absent: the faculty member calls
-  // the roll on the review screen. This is what keeps a recognition outage
-  // from meaning "no attendance today".
-  // -------------------------------------------------------------------------
   const openReview = useCallback(
     (sessionId: string) => {
       router.push(`/dashboard/attendance/${cohortId}/review/${sessionId}`);
@@ -447,6 +446,11 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
     [cohortId, router],
   );
 
+  /**
+   * The fallback when recognition could not run: the register is built from
+   * the enrolled roster with every student awaiting a decision. Nothing is
+   * presumed present or absent — the teacher calls the roll.
+   */
   const startRollCall = useCallback(async () => {
     if (!started) return;
     setRollCallError(null);
@@ -455,94 +459,88 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
       await startManualRollCallAction({ sessionId: started.session.id });
       openReview(started.session.id);
     } catch (e) {
-      setRollCallError(
-        e instanceof Error
-          ? `Could not open a roll call: ${e.message}`
-          : "Could not open a roll call.",
-      );
+      setRollCallError(describeProcessingError(e).message);
     } finally {
       setRollCallBusy(false);
     }
   }, [openReview, started]);
 
-  // -------------------------------------------------------------------------
-  // Discard
-  // -------------------------------------------------------------------------
   const discard = useCallback(async () => {
     if (started) {
       try {
         await cancelCaptureSessionAction({ sessionId: started.session.id });
       } catch {
-        // Best-effort. The UI navigates away either way — the server-side
-        // session either transitioned to CANCELLED or was already terminal.
+        // Best effort. The session either moved to CANCELLED or was already
+        // terminal; either way the user is leaving.
       }
     }
-    stopStream();
+    camera.stop();
     router.push(`/dashboard/attendance/${cohortId}`);
-  }, [cohortId, router, started, stopStream]);
+  }, [camera, cohortId, router, started]);
 
   // -------------------------------------------------------------------------
-  // Derived state used across steps
+  // Derived
   // -------------------------------------------------------------------------
   const captureLimitReached = shots.length >= MAX_CAPTURES_PER_SESSION;
-  const hasAnyShot = shots.length > 0;
-  const canProcess = hasAnyShot && !shots.some((s) => s.failure);
+  const busyChecking = shots.some((s) => s.checking);
+  const canProcess = shots.length > 0 && !busyChecking && !shots.some((s) => s.failure);
   const contextLabel = useMemo(() => {
     if (!started) return "";
-    const bits: string[] = [];
-    bits.push(started.cohortName);
+    const bits = [started.cohortName];
     if (started.subjectName) bits.push(started.subjectName);
     bits.push(`${started.enrolledStudentCount} enrolled`);
     return bits.join(" · ");
   }, [started]);
-
-  // -------------------------------------------------------------------------
-  // Renderers
-  // -------------------------------------------------------------------------
 
   const banner = !isOnline ? (
     <div
       role="alert"
       className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
     >
-      You appear to be offline. Uploads will resume when connectivity is
-      restored — full offline capture is planned for a later release.
+      You appear to be offline. Captures cannot be processed until the
+      connection returns — the photos you have already taken are kept.
     </div>
   ) : null;
 
+  // =========================================================================
+  // Briefing
+  // =========================================================================
   if (step === "briefing") {
+    const noStudents = started?.enrolledStudentCount === 0;
     return (
       <div className="flex flex-col gap-6">
         {banner}
         <section className="rounded-md border border-neutral-200 p-6">
           <h2 className="text-base font-semibold text-neutral-900">Before you capture</h2>
           <p className="mt-1 text-sm text-neutral-600">
-            You can take up to {MAX_CAPTURES_PER_SESSION} photos. One is enough
-            for a small class; add a second or third from another angle when
-            students are obscured or the room is uneven.
+            You can take up to {MAX_CAPTURES_PER_SESSION} photos. One is enough for a
+            small class; add a second or third from another angle when students are
+            obscured.
           </p>
           <ul className="mt-3 flex flex-col gap-1.5 text-sm text-neutral-700">
             {CAPTURE_TIPS.map((tip) => (
               <li key={tip} className="flex gap-2">
-                <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-400" aria-hidden />
+                <span
+                  className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-400"
+                  aria-hidden
+                />
                 <span>{tip}</span>
               </li>
             ))}
           </ul>
           <p className="mt-4 text-xs text-neutral-500">
-            Classroom photos are processed and discarded — nothing is
-            permanently stored on our servers by default. See your
-            institution&apos;s privacy notice for details.
+            Classroom photos are processed and discarded — none is stored on our
+            servers. Only the attendance result is kept.
           </p>
         </section>
 
-        <div className="flex items-center gap-3">
-          <Button onClick={start} disabled={starting}>
+        <div className="flex flex-wrap items-center gap-3">
+          <Button onClick={start} disabled={starting || noStudents}>
             {starting ? "Starting…" : "Start attendance"}
           </Button>
           {attendanceMode === "SUBJECT_WISE" && !cohortSubjectId && (
             <span className="text-xs text-red-600">
-              No subject selected — return to the class page and pick one first.
+              No subject selected — go back to the class page and pick one first.
             </span>
           )}
         </div>
@@ -555,7 +553,14 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
     );
   }
 
+  // =========================================================================
+  // Camera
+  // =========================================================================
   if (step === "camera") {
+    const state = camera.state;
+    const showVideo = state.name === "ready" || state.name === "capturing";
+    const failure = state.name === "failed" ? state.failure : null;
+
     return (
       <div className="flex flex-col gap-4">
         {banner}
@@ -567,42 +572,69 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
         </div>
 
         <div className="relative w-full overflow-hidden rounded-md border border-neutral-200 bg-neutral-950">
+          {/* The element stays mounted across every state: `open()` resolves
+              into this ref, and a ref pointing at an element React has just
+              unmounted is how a camera ends up running with nothing to draw
+              it. */}
           <video
-            ref={videoRef}
+            ref={camera.videoRef}
             playsInline
             muted
-            className="aspect-video w-full object-cover"
+            className={`aspect-video w-full object-cover ${showVideo ? "block" : "invisible"}`}
             aria-label="Classroom camera preview"
           />
-          {cameraStatus !== "streaming" && (
-            <div className="absolute inset-0 flex items-center justify-center text-sm text-neutral-200">
-              {cameraStatus === "requesting"
-                ? "Requesting camera permission…"
-                : "Camera not started"}
+          {!showVideo && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
+              <p className="text-sm text-neutral-200">{cameraStatusLabel(state)}</p>
+              {state.name === "starting" && (
+                <p className="text-xs text-neutral-400">
+                  Your browser may ask for permission to use the camera.
+                </p>
+              )}
+              {state.name === "unsupported" && (
+                <p className="text-xs text-neutral-400">
+                  Open this page in Chrome, Edge or Safari over HTTPS, or use a phone
+                  or tablet.
+                </p>
+              )}
             </div>
           )}
-          <canvas ref={canvasRef} className="hidden" />
         </div>
 
-        {cameraError && (
+        {failure && (
+          <div
+            role="alert"
+            className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+          >
+            {failure.message}
+          </div>
+        )}
+        {captureError && (
           <p role="alert" className="text-sm text-red-600">
-            {cameraError}
+            {captureError}
           </p>
         )}
 
         <div className="flex flex-wrap items-center gap-2">
-          {cameraStatus !== "streaming" ? (
-            <Button onClick={openCamera} disabled={cameraStatus === "requesting"}>
-              {cameraStatus === "requesting" ? "Opening camera…" : "Open camera"}
-            </Button>
-          ) : (
+          {canCapture(state) ? (
             <Button onClick={capture} disabled={captureLimitReached}>
               {captureLimitReached
                 ? "Capture limit reached"
                 : `Capture photo ${shots.length + 1} of ${MAX_CAPTURES_PER_SESSION}`}
             </Button>
+          ) : (
+            <Button
+              onClick={() => void camera.start()}
+              disabled={!canStart(state) || state.name === "starting"}
+            >
+              {state.name === "starting"
+                ? "Opening camera…"
+                : state.name === "failed"
+                  ? "Try again"
+                  : "Open camera"}
+            </Button>
           )}
-          {hasAnyShot && (
+          {shots.length > 0 && (
             <Button variant="secondary" onClick={() => setStep("review")}>
               Review {shots.length} photo{shots.length === 1 ? "" : "s"}
             </Button>
@@ -612,15 +644,39 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           </Button>
         </div>
 
+        {/* Device switching. Only offered once a stream has run: before
+            permission is granted the browser reports no usable labels. */}
+        {camera.devices.length > 1 && state.name === "ready" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor="camera-device" className="text-xs text-neutral-500">
+              Camera
+            </label>
+            <select
+              id="camera-device"
+              value={camera.activeDeviceId ?? ""}
+              onChange={(e) => void camera.switchDevice(e.target.value)}
+              className="rounded-md border border-neutral-300 px-2 py-1.5 text-xs text-neutral-800"
+            >
+              {camera.devices.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         <p className="text-xs text-neutral-500">
-          Reposition between shots so students obscured in one photo appear in
-          another. You do not have to take three — one solid capture is
-          usually enough for a small class.
+          Reposition between shots so students hidden in one photo appear in another.
+          One solid capture is usually enough for a small class.
         </p>
       </div>
     );
   }
 
+  // =========================================================================
+  // Review captures
+  // =========================================================================
   if (step === "review") {
     return (
       <div className="flex flex-col gap-4">
@@ -628,7 +684,7 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
         <div className="flex items-baseline justify-between">
           <h2 className="text-base font-semibold text-neutral-900">Review captures</h2>
           <span className="text-xs text-neutral-500">
-            {shots.length} of {MAX_CAPTURES_PER_SESSION} photos
+            {shots.length} of up to {MAX_CAPTURES_PER_SESSION} captures
           </span>
         </div>
 
@@ -638,11 +694,15 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
               key={s.sequenceNumber}
               className="flex flex-col gap-2 rounded-md border border-neutral-200 p-2"
             >
+              {/* A data URL held in memory for the length of this step.
+                  next/image optimises assets served from a URL and has nothing
+                  to do here; it would also mean handing a photograph of a
+                  classroom to an image pipeline. */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={s.dataUrl}
                 alt={`Capture ${s.sequenceNumber}`}
-                className="aspect-video w-full rounded-sm object-cover"
+                className="aspect-video w-full rounded-sm bg-neutral-100 object-cover"
               />
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium text-neutral-500">
@@ -651,7 +711,7 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
                 <span
                   className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${qualityBadgeClasses(s.analysis?.qualityLabel)}`}
                 >
-                  {qualityBadgeText(s.analysis?.qualityLabel)}
+                  {qualityBadgeText(s.analysis?.qualityLabel, s.checking === true)}
                 </span>
               </div>
               {s.analysis && (
@@ -669,14 +729,13 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
                   {s.failure.message}
                 </p>
               )}
+              <p className="text-[10px] text-neutral-400">
+                {s.width}×{s.height}
+              </p>
               <div className="flex gap-2">
                 <Button
                   variant="secondary"
-                  onClick={() => {
-                    removeShot(s.sequenceNumber);
-                    setStep("camera");
-                    void openCamera();
-                  }}
+                  onClick={() => retakeShot(s.sequenceNumber)}
                   className="!py-1 !text-xs"
                 >
                   Retake
@@ -693,6 +752,12 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           ))}
         </ul>
 
+        {shots.length === 0 && (
+          <p className="rounded-md border border-dashed border-neutral-300 px-4 py-6 text-center text-sm text-neutral-500">
+            No captures yet. Open the camera and take at least one photo of the class.
+          </p>
+        )}
+
         {processingError && (
           <p role="alert" className="text-sm text-red-600">
             {processingError}
@@ -705,24 +770,28 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           </Button>
           {!captureLimitReached && (
             <Button variant="secondary" onClick={captureAnother}>
-              Capture another photo
+              {shots.length === 0 ? "Open camera" : "Capture another photo"}
             </Button>
           )}
           <Button variant="secondary" onClick={discard}>
             Discard session
           </Button>
         </div>
-        {!canProcess && (
+        {!canProcess && shots.length > 0 && (
           <p className="text-xs text-neutral-500">
-            Retake or remove any photos that failed to upload before continuing.
+            {busyChecking
+              ? "Checking the captures — this takes a moment."
+              : "Retake or remove any photo that failed its check before continuing."}
           </p>
         )}
       </div>
     );
   }
 
+  // =========================================================================
+  // Processing
+  // =========================================================================
   if (step === "processing") {
-    const pct = shots.length === 0 ? 0 : Math.min(100, ((processingIndex + 1) / shots.length) * 100);
     return (
       <div className="flex flex-col gap-4">
         {banner}
@@ -731,54 +800,58 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-valuenow={Math.round(pct)}
+          aria-valuenow={processingPercent}
+          aria-label="Recognition progress"
           className="h-2 w-full overflow-hidden rounded-full bg-neutral-100"
         >
           <div
-            className="h-full animate-pulse bg-neutral-900 transition-[width] duration-500 ease-out"
-            style={{ width: `${pct}%` }}
+            className="h-full bg-neutral-900 transition-[width] duration-500 ease-out"
+            style={{ width: `${processingPercent}%` }}
           />
         </div>
-        <p className="text-sm text-neutral-700">{processingStage}…</p>
-        <ol className="ml-4 flex list-decimal flex-col gap-1 text-xs text-neutral-500">
-          {PROCESSING_STAGES.map((s) => (
-            <li key={s}>{s}</li>
-          ))}
-        </ol>
+        <p className="text-sm text-neutral-700" aria-live="polite">
+          {processingStage}…
+        </p>
         <p className="text-xs text-neutral-400">
-          Do not close this tab. Analyses run one image at a time so the wizard
-          can report which capture, if any, needs a retake.
+          Do not close this tab. All {shots.length} capture
+          {shots.length === 1 ? "" : "s"} are analysed together so a student seen in
+          two photos is counted once.
         </p>
       </div>
     );
   }
 
-  // step === "summary"
+  // =========================================================================
+  // Summary
   //
-  // Counts are derived, never stored: `perStudent` holds one deduplicated row
-  // per student who was claimed by some face in some image, and
-  // `unmatchedStudentIds` holds the rest of the class. A student appearing in
-  // two photos is already collapsed to one row upstream.
+  // Counts are derived from the server's run: `perStudent` is already one
+  // deduplicated row per student, and `unmatchedStudentIds` is the rest of the
+  // class.
+  // =========================================================================
   const perStudent = recognition?.perStudent ?? [];
   const presentCount = perStudent.filter((s) => s.advisoryResult === "PRESENT").length;
   const reviewCount = perStudent.filter((s) => s.advisoryResult === "NEEDS_REVIEW").length;
   const ambiguousCount = perStudent.filter((s) => s.wasAmbiguous).length;
+  const noFacesAtAll = recognition !== null && recognition.detectedFacesTotal === 0;
+  const facesButNoMatches =
+    recognition !== null && recognition.detectedFacesTotal > 0 && perStudent.length === 0;
 
   return (
     <div className="flex flex-col gap-4">
       {banner}
-      <h2 className="text-base font-semibold text-neutral-900">Session ready for review</h2>
+      <h2 className="text-base font-semibold text-neutral-900">
+        {generation ? "Session ready for review" : "Captures processed"}
+      </h2>
 
       {summary && !summary.productionEligible && (
         <div
           role="alert"
           className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
         >
-          The recognition model currently loaded is <strong>not cleared for
-          production use</strong> (backend: {summary.modelName} · {summary.modelVersion}).
-          Face counts and any matches below are produced by that backend, so
-          they describe the pipeline, not real identification. Use faculty
-          roll-call to finalize.
+          The recognition model currently loaded is{" "}
+          <strong>not cleared for production use</strong> (backend: {summary.modelName} ·{" "}
+          {summary.modelVersion}). Face counts and matches below describe the
+          pipeline, not real identification. Confirm every student yourself.
         </div>
       )}
 
@@ -787,22 +860,37 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           role="alert"
           className="flex flex-col gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800"
         >
-          <p>
-            {recognitionError} The captures were still analyzed — face counts
-            below are unaffected. No attendance has been recorded, and nobody
-            has been marked absent as a result.
-          </p>
-          <p>
-            You can still take attendance: a roll call opens the class list
-            with every student awaiting your decision.
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={startRollCall} disabled={rollCallBusy} className="!py-1 !text-xs">
-              {rollCallBusy ? "Opening roll call…" : "Continue to manual roll call"}
-            </Button>
-          </div>
+          <p>{recognitionError}</p>
+          {canRollCall && (
+            <>
+              <p>
+                No attendance has been recorded, and nobody has been marked absent as
+                a result. A roll call opens the class list with every student awaiting
+                your decision.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button onClick={startRollCall} disabled={rollCallBusy} className="!py-1 !text-xs">
+                  {rollCallBusy ? "Opening roll call…" : "Continue to manual roll call"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={process}
+                  disabled={rollCallBusy}
+                  className="!py-1 !text-xs"
+                >
+                  Try recognition again
+                </Button>
+              </div>
+            </>
+          )}
           {rollCallError && <p role="alert">{rollCallError}</p>}
         </div>
+      )}
+
+      {processingError && (
+        <p role="alert" className="text-sm text-red-600">
+          {processingError}
+        </p>
       )}
 
       {summary && (
@@ -813,27 +901,52 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           </div>
           <div>
             <dt className="text-xs text-neutral-500">Faces detected</dt>
-            <dd className="text-lg font-semibold text-neutral-900">{summary.totalFacesDetected}</dd>
+            <dd className="text-lg font-semibold text-neutral-900">
+              {recognition?.detectedFacesTotal ?? summary.totalFacesDetected}
+            </dd>
           </div>
           <div>
             <dt className="text-xs text-neutral-500">Enrolled students</dt>
-            <dd className="text-lg font-semibold text-neutral-900">{summary.enrolledStudentCount}</dd>
+            <dd className="text-lg font-semibold text-neutral-900">
+              {summary.enrolledStudentCount}
+            </dd>
           </div>
           <div>
             <dt className="text-xs text-neutral-500">Model</dt>
-            <dd className="truncate text-sm text-neutral-700" title={`${summary.modelName} · ${summary.modelVersion}`}>
+            <dd
+              className="truncate text-sm text-neutral-700"
+              title={`${summary.modelName} · ${summary.modelVersion}`}
+            >
               {summary.modelName}
             </dd>
           </div>
         </dl>
       )}
 
+      {noFacesAtAll && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <strong>No faces were detected in any capture.</strong> Nobody has been
+          marked absent because of it — every student is waiting for your decision.
+          Retake with more light, or move closer to the class.
+        </div>
+      )}
+
+      {facesButNoMatches && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <strong>
+            {recognition?.detectedFacesTotal} face
+            {recognition?.detectedFacesTotal === 1 ? " was" : "s were"} detected, but
+            none matched an enrolled student.
+          </strong>{" "}
+          This usually means the class has no face enrollments yet. Every student is
+          waiting for your decision rather than being marked absent.
+        </div>
+      )}
+
       {recognition && (
         <section className="flex flex-col gap-3 rounded-md border border-neutral-200 p-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h3 className="text-sm font-semibold text-neutral-900">
-              Recognition advisory
-            </h3>
+            <h3 className="text-sm font-semibold text-neutral-900">Recognition advisory</h3>
             <span className="text-xs text-neutral-500">
               {recognition.scoredFacesTotal} of {recognition.detectedFacesTotal} detected
               faces scored against {recognition.candidatePoolSize} enrolled students in
@@ -844,9 +957,7 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           <dl className="grid grid-cols-3 gap-4 text-sm">
             <div>
               <dt className="text-xs text-neutral-500">Suggested present</dt>
-              <dd className="text-lg font-semibold text-emerald-700">
-                {presentCount}
-              </dd>
+              <dd className="text-lg font-semibold text-emerald-700">{presentCount}</dd>
             </div>
             <div>
               <dt className="text-xs text-neutral-500">Needs review</dt>
@@ -863,9 +974,9 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           {ambiguousCount > 0 && (
             <p className="text-xs text-amber-800">
               {ambiguousCount} {ambiguousCount === 1 ? "student was" : "students were"}{" "}
-              too close to another enrolled student to separate confidently, and{" "}
-              {ambiguousCount === 1 ? "was" : "were"} routed to review rather than
-              marked present.
+              routed to review rather than marked present — either too close to another
+              enrolled student to separate confidently, or claimed by two faces in the
+              same photo.
             </p>
           )}
 
@@ -874,16 +985,15 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
               {recognition.skippedIncompatibleCandidates} enrolled{" "}
               {recognition.skippedIncompatibleCandidates === 1 ? "student" : "students"}{" "}
               could not be compared because their stored face data was captured with a
-              different model version. They are not evidence of absence and must be
-              re-enrolled or marked by roll-call.
+              different model version. That is not evidence of absence — they must be
+              re-enrolled or marked by roll call.
             </p>
           )}
 
           <p className="rounded-md bg-neutral-50 px-3 py-2 text-xs text-neutral-700">
-            <strong>Advisory only — attendance is not finalized.</strong> These
-            results have been written to the register as a starting point, but
-            nothing counts until a faculty member confirms it. An uncertain
-            match is never silently promoted to present.
+            <strong>Advisory only — attendance is not final.</strong> These results are
+            a starting point for the register; nothing counts until you confirm it. An
+            uncertain match is never silently promoted to present.
           </p>
         </section>
       )}
@@ -898,8 +1008,8 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
             {generation.rosterScope === "cohortSubject"
               ? " (this subject's enrolled students)"
               : " (the whole class)"}
-            . Every one of them is accounted for — nobody was dropped for having
-            no usable face data.
+            . Every one of them is accounted for — nobody was dropped for having no
+            usable face data.
           </p>
           <dl className="grid grid-cols-3 gap-4 text-sm">
             <div>
@@ -925,8 +1035,8 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
       )}
 
       <p className="text-sm text-neutral-600">
-        The captures have been analyzed. Captured images are not stored, so a
-        retake later would need to be done live.
+        The captures have been analysed and discarded. Nothing was stored, so a
+        retake later would have to be taken live.
       </p>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -934,22 +1044,18 @@ export function CaptureWizard({ cohortId, cohortSubjectId, attendanceMode }: Pro
           <Button onClick={() => started && openReview(started.session.id)}>
             Review and confirm attendance
           </Button>
-        ) : (
-          <Button onClick={() => router.push(`/dashboard/attendance/${cohortId}`)}>
-            Back to class
-          </Button>
-        )}
-        {generation && (
-          <Button
-            variant="secondary"
-            onClick={() => router.push(`/dashboard/attendance/${cohortId}`)}
-          >
-            Back to class
-          </Button>
-        )}
-        <Button variant="secondary" onClick={discard}>
-          Discard session
+        ) : null}
+        <Button
+          variant="secondary"
+          onClick={() => router.push(`/dashboard/attendance/${cohortId}`)}
+        >
+          Back to class
         </Button>
+        {!generation && (
+          <Button variant="secondary" onClick={discard}>
+            Discard session
+          </Button>
+        )}
       </div>
     </div>
   );

@@ -23,6 +23,10 @@ export type AttendanceRosterScope = "cohort" | "cohortSubject";
 export type AttendanceReviewReason =
   | "low_confidence"
   | "ambiguous_match"
+  /** Two distinct faces in one photograph both named this student. One person
+   * is not in one still image twice, so this is the recogniser confusing
+   * people — never a confident presence. */
+  | "duplicate_in_capture"
   | "no_match"
   | "no_face_template"
   | "incompatible_face_template"

@@ -74,6 +74,7 @@ function buildPool(rng: () => number, size: number): CandidateTemplate[] {
   const pool = new Array<CandidateTemplate>(size);
   for (let i = 0; i < size; i++) {
     pool[i] = {
+      embeddingId: `emb-${i}`,
       studentId: `stu-${i}`,
       embedding: randomUnitVector(rng, EMBEDDING_DIMENSION),
       modelName: "bench",

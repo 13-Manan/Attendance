@@ -8,12 +8,14 @@ import {
   summarizeCaptureSession,
 } from "./service.ts";
 import { MAX_CAPTURES_PER_SESSION } from "./types.ts";
+import type { AnalyzeCaptureImageInput } from "./service.ts";
+import type { CaptureImageAnalysis } from "./types.ts";
 import { ForbiddenError } from "../authorization/types.ts";
 import type { SessionUser } from "../auth-tenancy/types.ts";
 import type { Cohort } from "../cohorts/types.ts";
 import type { Institution } from "../institutions/types.ts";
 import type { AttendanceSession } from "../sessions/types.ts";
-import type { DetectEmbedResponse } from "@attendance/shared-types";
+import type { DetectResponse } from "@attendance/shared-types";
 
 function makeUser(overrides: Partial<SessionUser> & { permissions: string[]; roleKey?: string }): SessionUser {
   return {
@@ -74,17 +76,44 @@ function makeSession(overrides: Partial<AttendanceSession> = {}): AttendanceSess
   } as AttendanceSession;
 }
 
-function makeDetectResponse(faceCount: number, confidence = 0.95): DetectEmbedResponse {
+/**
+ * A `/v1/detect` response. Note what is absent: an embedding. The per-capture
+ * gate runs the detector only, so there is no vector for the fixture to carry
+ * and no vector for the result to leak.
+ */
+function makeDetectResponse(faceCount: number, confidence = 0.95): DetectResponse {
   return {
     faces: Array.from({ length: faceCount }, (_, i) => ({
-      sequenceNumber: 1,
+      faceId: i,
       boundingBox: { x: i * 10, y: 0, width: 128, height: 128 },
-      embedding: Array.from({ length: 512 }, () => 0.001),
       detectionConfidence: confidence,
-      qualityScore: 0.9,
     })),
+    faceCount,
+    imageWidth: 1920,
+    imageHeight: 1080,
     modelName: "mock",
     modelVersion: "0.1.0+pp1",
+  };
+}
+
+/** Swallows the metadata write so analyze tests need no database. */
+const NO_RECORD = { recordCaptureAnalysis: async () => {} };
+
+/** One per-capture verdict, as the server records it. */
+function analysis(overrides: Partial<CaptureImageAnalysis> = {}): CaptureImageAnalysis {
+  return {
+    sequenceNumber: 1,
+    faceCount: 12,
+    averageDetectionConfidence: 0.9,
+    averageQualityScore: null,
+    imageWidth: 1920,
+    imageHeight: 1080,
+    modelName: "mock",
+    modelVersion: "0.1.0+pp1",
+    productionEligible: false,
+    qualityLabel: "good",
+    qualityHint: "12 faces",
+    ...overrides,
   };
 }
 
@@ -293,12 +322,12 @@ test("analyzeCaptureImage: happy path returns face count and never leaks embeddi
     {
       sessionId: "sess-1",
       sequenceNumber: 1,
-      imageBase64: "a".repeat(200),
-      acceptedSoFar: 0,
+      imageBase64: "a".repeat(200)
     },
     {
       getSessionById: async () => makeSession({ status: "CAPTURING" }),
-      detectEmbed: async () => makeDetectResponse(3, 0.9),
+      faceDetect: async () => makeDetectResponse(3, 0.9),
+      ...NO_RECORD,
     },
   );
 
@@ -317,10 +346,11 @@ test("analyzeCaptureImage: zero-face capture is reported as no_faces with a reta
   const faculty = makeUser({ permissions: ["attendanceSession.capture", "cohort.manage"] });
   const result = await analyzeCaptureImage(
     faculty,
-    { sessionId: "sess-1", sequenceNumber: 1, imageBase64: "a".repeat(200), acceptedSoFar: 0 },
+    { sessionId: "sess-1", sequenceNumber: 1, imageBase64: "a".repeat(200) },
     {
       getSessionById: async () => makeSession({ status: "CAPTURING" }),
-      detectEmbed: async () => makeDetectResponse(0),
+      faceDetect: async () => makeDetectResponse(0),
+      ...NO_RECORD,
     },
   );
   assert.equal(result.ok, true);
@@ -331,28 +361,42 @@ test("analyzeCaptureImage: zero-face capture is reported as no_faces with a reta
   }
 });
 
-test("analyzeCaptureImage: caps at MAX_CAPTURES_PER_SESSION before touching face-ai", async () => {
+test("the capture input carries no client-supplied counter", () => {
+  // The three-capture cap used to be enforced against an `acceptedSoFar`
+  // integer the browser sent, which made a product rule depend on a number the
+  // client chose. The sequence number is the enforcement now: a session holds
+  // captures 1, 2 and 3, so there is no fourth to send, and re-sending one is
+  // a retake rather than an addition. Asserted here because deleting a field
+  // is the kind of fix a later refactor quietly puts back.
+  assert.equal(MAX_CAPTURES_PER_SESSION, 3);
+  const input: AnalyzeCaptureImageInput = {
+    sessionId: "sess-1",
+    sequenceNumber: 3,
+    imageBase64: "a".repeat(200),
+  };
+  assert.equal(Object.hasOwn(input, "acceptedSoFar"), false);
+});
+
+test("a retake of capture 2 replaces it rather than adding a fourth", async () => {
   const faculty = makeUser({ permissions: ["attendanceSession.capture", "cohort.manage"] });
-  let detectCalled = false;
-  const result = await analyzeCaptureImage(
-    faculty,
-    {
-      sessionId: "sess-1",
-      sequenceNumber: 3,
-      imageBase64: "a".repeat(200),
-      acceptedSoFar: MAX_CAPTURES_PER_SESSION,
+  const recorded: CaptureImageAnalysis[] = [];
+  const deps = {
+    getSessionById: async () => makeSession({ status: "CAPTURING" }),
+    faceDetect: async () => makeDetectResponse(5, 0.9),
+    recordCaptureAnalysis: async (_id: string, a: CaptureImageAnalysis) => {
+      const next = recorded.filter((r) => r.sequenceNumber !== a.sequenceNumber);
+      recorded.length = 0;
+      recorded.push(...next, a);
     },
-    {
-      getSessionById: async () => makeSession({ status: "CAPTURING" }),
-      detectEmbed: async () => {
-        detectCalled = true;
-        return makeDetectResponse(0);
-      },
-    },
-  );
-  assert.equal(detectCalled, false);
-  assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.reason, "capture_limit_reached");
+  };
+  for (const sequenceNumber of [1, 2, 2, 3] as const) {
+    await analyzeCaptureImage(
+      faculty,
+      { sessionId: "sess-1", sequenceNumber, imageBase64: "a".repeat(200) },
+      deps,
+    );
+  }
+  assert.deepEqual(recorded.map((r) => r.sequenceNumber).sort(), [1, 2, 3]);
 });
 
 test("analyzeCaptureImage: cross-institution session is denied without hitting face-ai", async () => {
@@ -363,10 +407,10 @@ test("analyzeCaptureImage: cross-institution session is denied without hitting f
   let detectCalled = false;
   const result = await analyzeCaptureImage(
     faculty,
-    { sessionId: "sess-x", sequenceNumber: 1, imageBase64: "a".repeat(200), acceptedSoFar: 0 },
+    { sessionId: "sess-x", sequenceNumber: 1, imageBase64: "a".repeat(200) },
     {
       getSessionById: async () => makeSession({ institutionId: "inst-B", status: "CAPTURING" }),
-      detectEmbed: async () => {
+      faceDetect: async () => {
         detectCalled = true;
         return makeDetectResponse(2);
       },
@@ -381,10 +425,10 @@ test("analyzeCaptureImage: face-ai timeout is surfaced as retryable service_time
   const faculty = makeUser({ permissions: ["attendanceSession.capture", "cohort.manage"] });
   const result = await analyzeCaptureImage(
     faculty,
-    { sessionId: "sess-1", sequenceNumber: 1, imageBase64: "a".repeat(200), acceptedSoFar: 0 },
+    { sessionId: "sess-1", sequenceNumber: 1, imageBase64: "a".repeat(200) },
     {
       getSessionById: async () => makeSession({ status: "CAPTURING" }),
-      detectEmbed: () => new Promise(() => {}), // never resolves
+      faceDetect: () => new Promise(() => {}), // never resolves
       detectTimeoutMs: 10,
     },
   );
@@ -399,10 +443,10 @@ test("analyzeCaptureImage: face-ai crash surfaces as retryable service_unavailab
   const faculty = makeUser({ permissions: ["attendanceSession.capture", "cohort.manage"] });
   const result = await analyzeCaptureImage(
     faculty,
-    { sessionId: "sess-1", sequenceNumber: 1, imageBase64: "a".repeat(200), acceptedSoFar: 0 },
+    { sessionId: "sess-1", sequenceNumber: 1, imageBase64: "a".repeat(200) },
     {
       getSessionById: async () => makeSession({ status: "CAPTURING" }),
-      detectEmbed: async () => {
+      faceDetect: async () => {
         throw new Error("boom");
       },
     },
@@ -418,10 +462,10 @@ test("analyzeCaptureImage: a session not in CAPTURING refuses new frames", async
   const faculty = makeUser({ permissions: ["attendanceSession.capture", "cohort.manage"] });
   const result = await analyzeCaptureImage(
     faculty,
-    { sessionId: "sess-1", sequenceNumber: 1, imageBase64: "a".repeat(200), acceptedSoFar: 0 },
+    { sessionId: "sess-1", sequenceNumber: 1, imageBase64: "a".repeat(200) },
     {
       getSessionById: async () => makeSession({ status: "FINALIZED" }),
-      detectEmbed: async () => makeDetectResponse(1),
+      faceDetect: async () => makeDetectResponse(1),
     },
   );
   assert.equal(result.ok, false);
@@ -432,40 +476,18 @@ test("analyzeCaptureImage: a session not in CAPTURING refuses new frames", async
 // summarize + cancel
 // ---------------------------------------------------------------------------
 
-test("summarizeCaptureSession: aggregates face counts and reports production-eligibility honestly", async () => {
+test("summarizeCaptureSession reads the server's own verdicts, not the browser's", async () => {
   const faculty = makeUser({ permissions: ["attendanceSession.capture", "cohort.manage"] });
   const summary = await summarizeCaptureSession(
     faculty,
-    {
-      sessionId: "sess-1",
-      analyses: [
-        {
-          sequenceNumber: 1,
-          faceCount: 12,
-          averageDetectionConfidence: 0.9,
-          averageQualityScore: 0.85,
-          modelName: "mock",
-          modelVersion: "0.1.0+pp1",
-          productionEligible: false,
-          qualityLabel: "good",
-          qualityHint: "12 faces",
-        },
-        {
-          sequenceNumber: 2,
-          faceCount: 3,
-          averageDetectionConfidence: 0.7,
-          averageQualityScore: 0.7,
-          modelName: "mock",
-          modelVersion: "0.1.0+pp1",
-          productionEligible: false,
-          qualityLabel: "acceptable",
-          qualityHint: "3 faces",
-        },
-      ],
-    },
+    { sessionId: "sess-1" },
     {
       getSessionById: async () => makeSession({ status: "CAPTURING" }),
       countEnrolledStudents: async () => 24,
+      loadCaptureAnalyses: async () => [
+        analysis({ sequenceNumber: 1, faceCount: 12, qualityLabel: "good" }),
+        analysis({ sequenceNumber: 2, faceCount: 3, qualityLabel: "acceptable" }),
+      ],
     },
   );
   assert.equal(summary.captureCount, 2);
@@ -473,6 +495,25 @@ test("summarizeCaptureSession: aggregates face counts and reports production-eli
   assert.equal(summary.enrolledStudentCount, 24);
   assert.equal(summary.productionEligible, false);
   assert.equal(summary.hasUsableCaptures, true);
+  assert.equal(summary.analyses.length, 2);
+});
+
+test("a session with no captures claims no production-eligible backend", async () => {
+  // `every` over an empty list is true, which would have reported a
+  // licence-cleared model for a session that never ran one.
+  const faculty = makeUser({ permissions: ["attendanceSession.capture", "cohort.manage"] });
+  const summary = await summarizeCaptureSession(
+    faculty,
+    { sessionId: "sess-1" },
+    {
+      getSessionById: async () => makeSession({ status: "CAPTURING" }),
+      countEnrolledStudents: async () => 24,
+      loadCaptureAnalyses: async () => [],
+    },
+  );
+  assert.equal(summary.captureCount, 0);
+  assert.equal(summary.productionEligible, false);
+  assert.equal(summary.hasUsableCaptures, false);
 });
 
 test("cancelCaptureSession: moves a CAPTURING session to CANCELLED with audit", async () => {

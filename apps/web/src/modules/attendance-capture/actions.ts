@@ -12,7 +12,6 @@ import {
   summarizeCaptureSession,
 } from "./service";
 import type {
-  CaptureImageAnalysis,
   CaptureImageResult,
   CaptureSessionSummary,
   CapturableCohort,
@@ -56,12 +55,14 @@ export async function startCaptureSession(
 
 const analyzeSchema = z.object({
   sessionId: z.string().min(1),
+  // The three-capture cap, expressed structurally. A session cannot hold a
+  // fourth distinct capture because there is no fourth sequence number, so
+  // nothing has to trust a counter the browser maintains.
   sequenceNumber: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   // Bounded and format-checked before anything forwards it to a decoder —
   // see lib/image-validation.ts for why "the AI service validates it", which
   // this comment used to claim, was not true of either side of the wire.
   imageBase64: imageBase64Field(),
-  acceptedSoFar: z.number().int().min(0).max(3),
 });
 
 export async function analyzeCaptureImageAction(
@@ -72,32 +73,22 @@ export async function analyzeCaptureImageAction(
   return analyzeCaptureImage(actor, parsed);
 }
 
-const summarizeSchema = z.object({
-  sessionId: z.string().min(1),
-  analyses: z.array(
-    z.object({
-      sequenceNumber: z.union([z.literal(1), z.literal(2), z.literal(3)]),
-      faceCount: z.number().int().min(0),
-      averageDetectionConfidence: z.number().nullable(),
-      averageQualityScore: z.number().nullable(),
-      modelName: z.string(),
-      modelVersion: z.string(),
-      productionEligible: z.boolean(),
-      qualityLabel: z.enum(["good", "acceptable", "poor", "no_faces"]),
-      qualityHint: z.string(),
-    }),
-  ),
-});
+const summarizeSchema = z.object({ sessionId: z.string().min(1) });
 
+/**
+ * The summary takes only a session id.
+ *
+ * It used to take the per-capture verdicts as well, which meant the screen
+ * reporting "3 photos, 41 faces detected" was reporting whatever the browser
+ * had said. The server recorded those verdicts when it analysed the images;
+ * it reads its own copy.
+ */
 export async function summarizeCaptureSessionAction(
   input: z.infer<typeof summarizeSchema>,
 ): Promise<CaptureSessionSummary> {
   const actor = await requireUser();
   const parsed = summarizeSchema.parse(input);
-  return summarizeCaptureSession(actor, {
-    sessionId: parsed.sessionId,
-    analyses: parsed.analyses as CaptureImageAnalysis[],
-  });
+  return summarizeCaptureSession(actor, { sessionId: parsed.sessionId });
 }
 
 const cancelSchema = z.object({ sessionId: z.string().min(1) });

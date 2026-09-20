@@ -99,9 +99,29 @@ function aggregate(
     bestDetectionConfidence: 0.99,
     bestQualityScore: 0.8,
     bestFaceId: "1:0",
+    bestEmbeddingId: `emb-${studentId}`,
     advisoryResult,
     matchStatus: advisoryResult === "PRESENT" ? "MATCHED" : advisoryResult === "ABSENT" ? "UNMATCHED" : "UNCERTAIN",
     wasAmbiguous,
+    downgrades: wasAmbiguous ? ["ambiguous_face"] : [],
+    observations: [
+      {
+        captureNumber: 1,
+        faceIndex: 0,
+        detectedFaceId: "1:0",
+        similarity: bestSimilarity ?? 0,
+        detectionConfidence: 0.99,
+        qualityScore: 0.8,
+        matchStatus:
+          advisoryResult === "PRESENT"
+            ? "MATCHED"
+            : advisoryResult === "ABSENT"
+              ? "UNMATCHED"
+              : "UNCERTAIN",
+        wasAmbiguous,
+        candidateEmbeddingId: `emb-${studentId}`,
+      },
+    ],
   } as StudentRecognitionAggregate;
 }
 
@@ -117,6 +137,8 @@ function runSummary(perStudent: StudentRecognitionAggregate[]): RecognitionRunSu
     modelName: "stub",
     modelVersion: "0.0.1",
     productionEligible: false,
+    completedAt: "2026-09-20T09:00:00.000Z",
+    durationMs: 42,
     policy: {
       presentMin: 0.62,
       reviewMin: 0.45,

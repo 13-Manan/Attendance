@@ -9,7 +9,10 @@ import {
 import { recordAuditLog as defaultRecordAuditLog } from "@/modules/audit/service";
 import type { RecordAuditLogInput } from "@/modules/audit/types";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
-import { requireCohortAccess } from "@/modules/authorization/cohort-access";
+import {
+  requireCohortAccess,
+  requireCohortSubjectAccess,
+} from "@/modules/authorization/cohort-access";
 import {
   hasPermission,
   requirePermission,
@@ -106,11 +109,35 @@ import type {
  */
 export const ATTENDANCE_METADATA_KEY = "attendanceReview";
 
+/**
+ * One observation, as stored with the register.
+ *
+ * A trimmed copy of the engine's `StudentObservation`: capture number, face
+ * index, similarity and the face-level verdict. Deliberately no embedding and
+ * no bounding box — the provenance worth keeping is "which photograph, which
+ * face, how sure", not a re-derivable biometric.
+ */
+export interface StoredObservation {
+  captureNumber: number;
+  faceIndex: number;
+  similarity: number;
+  matchStatus: string;
+}
+
 export interface StoredStudentNote {
   reason: AttendanceReviewReason;
   wasAmbiguous: boolean;
   wasComparable: boolean;
   bestFaceId: string | null;
+  /**
+   * Every face that named this student, so a reviewer asking "why is Priya in
+   * review?" can be told "photo 1 face 3 at 71%, and photo 2 face 0 also
+   * claimed her". Absent on rows written before this existed, and on rows that
+   * recognition never produced.
+   */
+  observations?: StoredObservation[];
+  /** Which demotion rules the aggregation policy applied, if any. */
+  downgrades?: string[];
 }
 
 export interface StoredAttendanceMetadata {
@@ -218,6 +245,14 @@ export function decideCandidate(args: {
         bestSimilarity: number | null;
         wasAmbiguous: boolean;
         bestFaceId: string | null;
+        bestEmbeddingId?: string | null;
+        downgrades?: string[];
+        observations?: Array<{
+          captureNumber: number;
+          faceIndex: number;
+          similarity: number;
+          matchStatus: string;
+        }>;
       }
     | undefined;
   recognitionRan: boolean;
@@ -226,13 +261,26 @@ export function decideCandidate(args: {
 }): {
   aiResult: AttendanceRecordRow["aiResult"];
   aiConfidence: number | null;
+  /** The `FaceEmbedding` behind the advisory, for `matchedEmbeddingId`. */
+  matchedEmbeddingId: string | null;
   finalResult: AttendanceRecordRow["finalResult"];
   note: StoredStudentNote;
 } {
+  /** Provenance shared by every branch that had an aggregate to work from. */
+  const provenance = (): Pick<StoredStudentNote, "observations" | "downgrades"> => ({
+    observations: args.aggregate?.observations?.map((o) => ({
+      captureNumber: o.captureNumber,
+      faceIndex: o.faceIndex,
+      similarity: o.similarity,
+      matchStatus: o.matchStatus,
+    })),
+    downgrades: args.aggregate?.downgrades,
+  });
   if (!args.recognitionRan) {
     return {
       aiResult: "NOT_EVALUATED",
       aiConfidence: null,
+      matchedEmbeddingId: null,
       finalResult: "NEEDS_REVIEW",
       note: {
         reason: "recognition_unavailable",
@@ -250,6 +298,7 @@ export function decideCandidate(args: {
     return {
       aiResult: "NOT_EVALUATED",
       aiConfidence: null,
+      matchedEmbeddingId: null,
       finalResult: "NEEDS_REVIEW",
       note: { reason, wasAmbiguous: false, wasComparable: false, bestFaceId: null },
     };
@@ -260,6 +309,7 @@ export function decideCandidate(args: {
     return {
       aiResult: "ABSENT",
       aiConfidence: null,
+      matchedEmbeddingId: null,
       finalResult: "ABSENT",
       note: { reason: "no_match", wasAmbiguous: false, wasComparable: true, bestFaceId: null },
     };
@@ -269,12 +319,14 @@ export function decideCandidate(args: {
     return {
       aiResult: "PRESENT",
       aiConfidence: agg.bestSimilarity,
+      matchedEmbeddingId: agg.bestEmbeddingId ?? null,
       finalResult: "PRESENT",
       note: {
         reason: null,
         wasAmbiguous: false,
         wasComparable: true,
         bestFaceId: agg.bestFaceId,
+        ...provenance(),
       },
     };
   }
@@ -283,12 +335,18 @@ export function decideCandidate(args: {
     return {
       aiResult: "NEEDS_REVIEW",
       aiConfidence: agg.bestSimilarity,
+      matchedEmbeddingId: agg.bestEmbeddingId ?? null,
       finalResult: "NEEDS_REVIEW",
       note: {
-        reason: agg.wasAmbiguous ? "ambiguous_match" : "low_confidence",
+        reason: agg.downgrades?.includes("duplicate_within_capture")
+          ? "duplicate_in_capture"
+          : agg.wasAmbiguous
+            ? "ambiguous_match"
+            : "low_confidence",
         wasAmbiguous: agg.wasAmbiguous,
         wasComparable: true,
         bestFaceId: agg.bestFaceId,
+        ...provenance(),
       },
     };
   }
@@ -296,12 +354,14 @@ export function decideCandidate(args: {
   return {
     aiResult: "ABSENT",
     aiConfidence: agg.bestSimilarity,
+    matchedEmbeddingId: null,
     finalResult: "ABSENT",
     note: {
       reason: "no_match",
       wasAmbiguous: false,
       wasComparable: true,
       bestFaceId: agg.bestFaceId,
+      ...provenance(),
     },
   };
 }
@@ -318,6 +378,7 @@ export interface AttendanceReviewDeps {
   getAttendanceRecordById?: (id: string) => Promise<AttendanceRecord | null>;
   getInstitutionById?: (id: string) => Promise<Institution | null>;
   requireCohortAccess?: (u: SessionUser, cohortId: string) => Promise<void>;
+  requireCohortSubjectAccess?: (u: SessionUser, cohortSubjectId: string) => Promise<void>;
   listCohortRoster?: RosterLoader;
   listCohortSubjectRoster?: RosterLoader;
   listComparableTemplates?: (
@@ -408,15 +469,30 @@ async function loadAttendancePolicy(
 }
 
 /**
- * Loads the session and runs the three checks every entry point in this
- * module needs: it exists, it belongs to the caller's institution, and the
- * caller teaches (or administers) the cohort. Returns the session so callers
- * do not re-fetch.
+ * Loads the session and runs the checks every entry point in this module
+ * needs: it exists, it belongs to the caller's institution, and the caller
+ * teaches (or administers) the cohort. Returns the session so callers do not
+ * re-fetch.
+ *
+ * ## Why writing asks for more than reading
+ *
+ * `intent: "write"` additionally requires the subject link on a subject
+ * session. `createAttendanceSessionForRequest` already demands it before a
+ * college session can be opened at all, and recognition demands it before
+ * processing one — so a register that exists was opened by somebody holding
+ * that link, and this cannot lock out the person who started the capture. What
+ * it stops is a colleague who teaches the same class a *different* subject
+ * finalizing a register that is not theirs.
+ *
+ * Reading stays at cohort level deliberately: a class teacher looking at a
+ * subject register their colleague took is ordinary oversight, not an
+ * escalation, and an admin holds `cohort.manage` and bypasses both.
  */
 async function loadAuthorizedSession(
   actor: SessionUser,
   sessionId: string,
   deps: AttendanceReviewDeps,
+  intent: "read" | "write" = "read",
 ): Promise<AttendanceSession> {
   const getSession = deps.getSessionById ?? getSessionById;
   const session = await getSession(sessionId);
@@ -424,6 +500,10 @@ async function loadAuthorizedSession(
   requireSameInstitution(actor, session.institutionId);
   const checkAccess = deps.requireCohortAccess ?? requireCohortAccess;
   await checkAccess(actor, session.cohortId);
+  if (intent === "write" && session.cohortSubjectId) {
+    const checkSubject = deps.requireCohortSubjectAccess ?? requireCohortSubjectAccess;
+    await checkSubject(actor, session.cohortSubjectId);
+  }
   return session;
 }
 
@@ -488,7 +568,7 @@ export async function generateAttendanceCandidates(
 ): Promise<GenerateAttendanceCandidatesResult> {
   requirePermission(actor, "attendanceSession.capture");
 
-  const session = await loadAuthorizedSession(actor, input.sessionId, deps);
+  const session = await loadAuthorizedSession(actor, input.sessionId, deps, "write");
   if (session.status === "FINALIZED" || session.status === "CANCELLED") {
     throw new Error(`session_locked:${session.status}`);
   }
@@ -536,6 +616,7 @@ export async function generateAttendanceCandidates(
       studentId: student.studentId,
       aiResult: decision.aiResult,
       aiConfidence: decision.aiConfidence,
+      matchedEmbeddingId: decision.matchedEmbeddingId,
       finalResult: decision.finalResult,
     };
   });
@@ -803,7 +884,7 @@ export async function applyReviewDecision(
   const existing = await getRecord(input.attendanceRecordId);
   if (!existing) throw new Error("attendance_record_not_found");
 
-  const session = await loadAuthorizedSession(actor, existing.sessionId, deps);
+  const session = await loadAuthorizedSession(actor, existing.sessionId, deps, "write");
 
   if (session.status === "CANCELLED") {
     throw new Error("session_cancelled");
@@ -935,7 +1016,7 @@ export async function confirmAttendance(
   sessionId: string,
   deps: AttendanceReviewDeps = {},
 ): Promise<ConfirmAttendanceResult> {
-  const session = await loadAuthorizedSession(actor, sessionId, deps);
+  const session = await loadAuthorizedSession(actor, sessionId, deps, "write");
 
   const listRecords = deps.listAttendanceRecords ?? listAttendanceRecordRowsForSession;
   const records = await listRecords(sessionId);

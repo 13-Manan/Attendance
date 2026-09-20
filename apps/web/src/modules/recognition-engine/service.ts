@@ -22,13 +22,17 @@ import type {
 } from "@attendance/shared-types";
 import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
 import type {
+  AggregationDowngrade,
   CandidateTemplate,
   FaceRecognitionResult,
   RecognitionPolicy,
   RecognitionRunInput,
   RecognitionRunSummary,
+  StudentObservation,
   StudentRecognitionAggregate,
 } from "./types";
+import { MAX_CAPTURES_PER_SESSION } from "@/modules/attendance-capture/types";
+import { requireCohortSubjectAccess } from "@/modules/authorization/cohort-access";
 
 /**
  * Phase 5 recognition engine.
@@ -127,13 +131,33 @@ export function buildRecognitionPolicyForInstitution(
 interface ScoredCandidate {
   studentId: string;
   similarity: number;
+  embeddingId: string | null;
 }
 
 /**
  * Score one detected face's embedding against every compatible candidate,
- * returning the top-two by similarity (best + runner-up) plus a decision.
- * Two are enough for the ambiguity rule; nothing downstream needs the full
- * ranking.
+ * returning the best match plus the best match belonging to *another*
+ * student, and a decision.
+ *
+ * ## Why the runner-up must be a different student
+ *
+ * The ambiguity rule exists to catch one situation: two students whose
+ * templates the model cannot tell apart. It fires when the top two scores are
+ * within `ambiguityMargin` of each other.
+ *
+ * A student may hold up to `MAX_SAMPLES_PER_STUDENT` (5) templates, and the
+ * enrollment UI actively encourages several — "different light recognises them
+ * more reliably". Those samples are, by construction, all of the same face, so
+ * they score within a hair of each other. Ranking them against one another
+ * meant the runner-up was almost always the *same person's* second photograph,
+ * the margin was almost always tiny, and every well-enrolled student was
+ * demoted MATCHED → UNCERTAIN. The better somebody enrolled, the more certainly
+ * they were sent to manual review — the exact inverse of the intent, and it
+ * made multi-sample enrollment actively harmful.
+ *
+ * So a student's own templates compete to represent that student, and only the
+ * best score from a *different* student can be the runner-up. Two are still
+ * enough for the rule; nothing downstream needs the full ranking.
  */
 export function scoreFaceAgainstCandidates(
   faceEmbedding: number[],
@@ -158,20 +182,39 @@ export function scoreFaceAgainstCandidates(
       continue;
     }
     const s = cosineSimilarity(faceEmbedding, c.embedding);
+    const scored: ScoredCandidate = {
+      studentId: c.studentId,
+      similarity: s,
+      embeddingId: c.embeddingId ?? null,
+    };
     if (!best || s > best.similarity) {
-      runnerUp = best;
-      best = { studentId: c.studentId, similarity: s };
-    } else if (!runnerUp || s > runnerUp.similarity) {
-      runnerUp = { studentId: c.studentId, similarity: s };
+      // The displaced leader becomes the runner-up only if it was somebody
+      // else. When the same student simply beat their own earlier sample,
+      // the existing runner-up (already a different student) stands.
+      if (best && best.studentId !== c.studentId) runnerUp = best;
+      best = scored;
+    } else if (
+      c.studentId !== best.studentId &&
+      (!runnerUp || s > runnerUp.similarity)
+    ) {
+      runnerUp = scored;
     }
   }
+  // Invariant maintained by both branches above: `runnerUp` is never the same
+  // student as `best`.
   if (!best) {
-    return { best: null, runnerUp: null, decision: "UNMATCHED", wasAmbiguous: false, skippedIncompatible: skipped };
+    return {
+      best: null,
+      runnerUp: null,
+      decision: "UNMATCHED",
+      wasAmbiguous: false,
+      skippedIncompatible: skipped,
+    };
   }
   let decision = classifyBySimilarity(best.similarity, policy);
-  // Ambiguity rule: two candidates near-tied for the top match must never
-  // auto-mark a "confident" match — the Phase 5 spec explicitly forbids
-  // silently converting uncertainty into PRESENT.
+  // Ambiguity rule: two *different students* near-tied for the top match must
+  // never auto-mark a "confident" match — the spec explicitly forbids silently
+  // converting uncertainty into PRESENT.
   const wasAmbiguous =
     decision === "MATCHED" &&
     runnerUp !== null &&
@@ -187,54 +230,103 @@ export function classifyBySimilarity(similarity: number, policy: RecognitionPoli
 }
 
 /**
- * Reduce a flat list of per-face results into one row per candidate
- * student — the whole point of the Phase 5 deduplication requirement:
- * "if Rahul appears in image 1 and image 2, Rahul must only count once".
+ * Reduce a flat list of per-face results into one row per candidate student —
+ * the deduplication requirement: "if Rahul appears in image 1 and image 2,
+ * Rahul must only count once".
  *
- * For each student that any face pointed at, we take that student's
- * highest similarity across all faces (from any image). Ties on similarity
- * fall back to detection confidence. A student whose only face-level
- * results were UNMATCHED does not appear in the aggregate at all — the
- * "unmatchedStudentIds" list is computed separately from the candidate
- * pool so that "no candidate for me anywhere" is distinguishable from
- * "someone pointed at me weakly".
+ * The policy this implements is written out in full on
+ * `StudentRecognitionAggregate` in ./types.ts. In short: pick a deterministic
+ * representative observation, classify it, then apply demotion rules that can
+ * only ever make the answer more cautious. Nothing here can promote a student
+ * above what their own best face earned.
+ *
+ * A student whose only face-level results were UNMATCHED does not appear in the
+ * aggregate at all — `unmatchedStudentIds` is computed separately from the
+ * candidate pool so that "no candidate for me anywhere" stays distinguishable
+ * from "someone pointed at me weakly".
  */
 export function aggregateByStudent(
   perFace: FaceRecognitionResult[],
   policy: RecognitionPolicy,
 ): StudentRecognitionAggregate[] {
-  const bestByStudent = new Map<string, FaceRecognitionResult>();
+  // Step 0: collect every observation per student, preserving capture order.
+  const observationsByStudent = new Map<string, StudentObservation[]>();
   for (const r of perFace) {
     if (!r.candidateStudentId || r.similarityScore === null) continue;
     if (r.decision === "UNMATCHED") continue;
-    const existing = bestByStudent.get(r.candidateStudentId);
-    const isBetter =
-      !existing ||
-      (r.similarityScore ?? -Infinity) > (existing.similarityScore ?? -Infinity) ||
-      ((r.similarityScore ?? -Infinity) === (existing.similarityScore ?? -Infinity) &&
-        r.detectionConfidence > existing.detectionConfidence);
-    if (isBetter) bestByStudent.set(r.candidateStudentId, r);
+    const list = observationsByStudent.get(r.candidateStudentId) ?? [];
+    list.push({
+      captureNumber: r.imageSequenceNumber,
+      faceIndex: r.faceIndex,
+      detectedFaceId: r.detectedFaceId,
+      similarity: r.similarityScore,
+      detectionConfidence: r.detectionConfidence,
+      qualityScore: r.qualityScore,
+      matchStatus: r.decision,
+      wasAmbiguous: r.decision === "UNCERTAIN" && r.runnerUpSimilarity !== null,
+      candidateEmbeddingId: r.candidateEmbeddingId,
+    });
+    observationsByStudent.set(r.candidateStudentId, list);
   }
-  return Array.from(bestByStudent.values()).map<StudentRecognitionAggregate>((r) => {
-    // Recompute decision from the winning face's raw similarity so that
-    // any policy change is applied consistently to the aggregate too.
-    let matchStatus: MatchStatus =
-      r.similarityScore === null ? "UNMATCHED" : classifyBySimilarity(r.similarityScore, policy);
-    // Ambiguity that fired at the face level carries forward — a review
-    // gate must persist even after cross-image aggregation.
-    const wasAmbiguous = r.decision === "UNCERTAIN" && matchStatus === "MATCHED";
-    if (wasAmbiguous) matchStatus = "UNCERTAIN";
-    return {
-      studentId: r.candidateStudentId!,
-      bestSimilarity: r.similarityScore,
-      bestDetectionConfidence: r.detectionConfidence,
-      bestQualityScore: r.qualityScore,
-      bestFaceId: r.detectedFaceId,
+
+  const aggregates: StudentRecognitionAggregate[] = [];
+  for (const [studentId, observations] of observationsByStudent) {
+    observations.sort(
+      (a, b) => a.captureNumber - b.captureNumber || a.faceIndex - b.faceIndex,
+    );
+
+    // Step 1: the representative observation. Deterministic on ties — highest
+    // similarity, then highest detection confidence, then earliest capture —
+    // so the same set of observations always produces the same register,
+    // whatever order the detector happened to return faces in.
+    const representative = observations.reduce((bestSoFar, candidate) =>
+      candidate.similarity > bestSoFar.similarity ||
+      (candidate.similarity === bestSoFar.similarity &&
+        candidate.detectionConfidence > bestSoFar.detectionConfidence)
+        ? candidate
+        : bestSoFar,
+    );
+
+    // Step 2: classify from the raw similarity, so a policy change applies
+    // consistently to the aggregate and not only to the face.
+    let matchStatus: MatchStatus = classifyBySimilarity(representative.similarity, policy);
+
+    // Step 3: demotions.
+    const downgrades: AggregationDowngrade[] = [];
+    if (representative.matchStatus === "UNCERTAIN" && matchStatus === "MATCHED") {
+      // A face-level ambiguity downgrade must survive aggregation, or the
+      // review gate could be escaped simply by re-deriving the band.
+      downgrades.push("ambiguous_face");
+      matchStatus = "UNCERTAIN";
+    }
+    // Two distinct faces in one photograph both claiming to be this student.
+    // A person appears once in a still image; two hits mean the recogniser is
+    // confusing people, and confusion must not read as confident presence.
+    const facesPerCapture = new Map<number, number>();
+    for (const o of observations) {
+      facesPerCapture.set(o.captureNumber, (facesPerCapture.get(o.captureNumber) ?? 0) + 1);
+    }
+    if (Array.from(facesPerCapture.values()).some((n) => n > 1) && matchStatus === "MATCHED") {
+      downgrades.push("duplicate_within_capture");
+      matchStatus = "UNCERTAIN";
+    }
+
+    // Step 4 is structural: there is no branch above that raises a status.
+    aggregates.push({
+      studentId,
+      bestSimilarity: representative.similarity,
+      bestDetectionConfidence: representative.detectionConfidence,
+      bestQualityScore: representative.qualityScore,
+      bestFaceId: representative.detectedFaceId,
+      bestEmbeddingId: representative.candidateEmbeddingId,
       advisoryResult: matchStatusToAttendanceResult(matchStatus),
       matchStatus,
-      wasAmbiguous,
-    };
-  });
+      wasAmbiguous: downgrades.length > 0,
+      downgrades,
+      observations,
+    });
+  }
+  return aggregates;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,11 +345,36 @@ export interface RunRecognitionForSessionDeps {
   getCohortById?: (id: string) => Promise<Cohort | null>;
   getInstitutionById?: (id: string) => Promise<Institution | null>;
   requireCohortAccess?: (u: SessionUser, cohortId: string) => Promise<void>;
+  requireCohortSubjectAccess?: (u: SessionUser, cohortSubjectId: string) => Promise<void>;
   loadCandidateEmbeddings?: LoadCandidatesFn;
   loadSubjectCandidateEmbeddings?: LoadCandidatesFn;
   detectEmbed?: DetectEmbedFn;
   fetchModelInfo?: ModelInfoFn;
   policyOverrides?: Partial<RecognitionPolicy>;
+  /**
+   * Ceiling on the whole face-ai round trip, in ms.
+   *
+   * The per-image analyse path has always had one; this one did not, so a
+   * face-ai process that accepted the connection and then stopped responding
+   * held the Server Action — and the teacher's "Processing…" screen — open
+   * indefinitely. A bounded failure the wizard can offer a retry for is the
+   * only acceptable outcome.
+   */
+  detectTimeoutMs?: number;
+  now?: () => Date;
+}
+
+/** Rejects with `face_ai_timeout` if `promise` has not settled within `ms`. */
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("face_ai_timeout")), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -277,6 +394,21 @@ export async function runRecognitionForSession(
 ): Promise<RecognitionRunSummary> {
   requirePermission(actor, "attendanceSession.capture");
 
+  // Bound the batch before anything else looks at it. The Server Action's
+  // schema caps this too, but the service is also reachable from the internal
+  // process route and from tests, and "how many images may one run carry" is
+  // a product rule, not a serialisation detail.
+  if (input.images.length === 0) throw new Error("no_images");
+  if (input.images.length > MAX_CAPTURES_PER_SESSION) {
+    throw new Error("too_many_images");
+  }
+  const sequences = new Set(input.images.map((i) => i.sequenceNumber));
+  if (sequences.size !== input.images.length) {
+    // Two payloads claiming to be capture 2 would produce colliding
+    // `detectedFaceId`s and double-count one photograph's faces.
+    throw new Error("duplicate_image_sequence");
+  }
+
   const getSession = deps.getSessionById ?? getSessionById;
   const session = await getSession(input.sessionId);
   if (!session) throw new Error("session_not_found");
@@ -284,6 +416,25 @@ export async function runRecognitionForSession(
 
   const checkAccess = deps.requireCohortAccess ?? requireCohortAccess;
   await checkAccess(actor, session.cohortId);
+
+  // A subject session is taught by a particular member of staff, and
+  // `createAttendanceSessionForRequest` already demands that link before it
+  // will open one. Recognition demanded only cohort access, so a colleague who
+  // teaches the same class a different subject could process this register.
+  // Same check, same place in the flow, so both ends of a session's life agree
+  // about who owns it.
+  if (session.cohortSubjectId) {
+    const checkSubject = deps.requireCohortSubjectAccess ?? requireCohortSubjectAccess;
+    await checkSubject(actor, session.cohortSubjectId);
+  }
+
+  // A closed register must not be re-derived. `generateAttendanceCandidates`
+  // refuses to write to one, but recognition would still have shipped the
+  // classroom photographs to face-ai first — work done on behalf of a session
+  // that can no longer accept it.
+  if (session.status === "FINALIZED" || session.status === "CANCELLED") {
+    throw new Error(`session_locked:${session.status}`);
+  }
 
   const getCohort = deps.getCohortById ?? getCohortById;
   const cohort = await getCohort(session.cohortId);
@@ -339,6 +490,7 @@ export async function runRecognitionForSession(
   }
 
   const candidates: CandidateTemplate[] = rawCandidates.map((c) => ({
+    embeddingId: c.id,
     studentId: c.studentId,
     embedding: c.embedding,
     modelName: c.modelName,
@@ -356,10 +508,15 @@ export async function runRecognitionForSession(
   // images in one request precisely so a classroom capture (1–3 photos)
   // can share detector/recogniser sessions across images. Individual
   // per-image calls would re-warm the pipeline on every frame.
-  const response = await detectEmbed({
-    sessionId: session.id,
-    images: input.images,
-  });
+  const startedAtMs = Date.now();
+  const response = await withTimeout(
+    detectEmbed({
+      sessionId: session.id,
+      images: input.images,
+    }),
+    deps.detectTimeoutMs ?? 60_000,
+  );
+  const durationMs = Date.now() - startedAtMs;
 
   let detectedFacesTotal = 0;
   let scoredFacesTotal = 0;
@@ -384,9 +541,12 @@ export async function runRecognitionForSession(
       perFace.push({
         detectedFaceId,
         imageSequenceNumber: face.sequenceNumber,
+        faceIndex: idx,
         candidateStudentId: null,
+        candidateEmbeddingId: null,
         similarityScore: null,
         runnerUpSimilarity: null,
+        runnerUpStudentId: null,
         detectionConfidence: face.detectionConfidence,
         qualityScore: face.qualityScore ?? null,
         decision: "UNMATCHED",
@@ -410,9 +570,12 @@ export async function runRecognitionForSession(
     perFace.push({
       detectedFaceId,
       imageSequenceNumber: face.sequenceNumber,
+      faceIndex: idx,
       candidateStudentId: scored.best?.studentId ?? null,
+      candidateEmbeddingId: scored.best?.embeddingId ?? null,
       similarityScore: scored.best?.similarity ?? null,
       runnerUpSimilarity: scored.runnerUp?.similarity ?? null,
+      runnerUpStudentId: scored.runnerUp?.studentId ?? null,
       detectionConfidence: face.detectionConfidence,
       qualityScore: face.qualityScore ?? null,
       decision: scored.decision,
@@ -426,7 +589,7 @@ export async function runRecognitionForSession(
     .map((c) => c.studentId)
     .filter((id) => !claimedStudentIds.has(id));
 
-  return {
+  const summary: RecognitionRunSummary = {
     sessionId: session.id,
     cohortId: session.cohortId,
     candidateScope,
@@ -438,8 +601,52 @@ export async function runRecognitionForSession(
     modelVersion: modelInfo.modelVersion,
     productionEligible: modelInfo.productionEligible,
     policy,
+    completedAt: (deps.now ?? (() => new Date()))().toISOString(),
+    durationMs,
     perFace,
     perStudent,
     unmatchedStudentIds,
   };
+
+  logRecognitionRun(summary);
+  return summary;
+}
+
+/**
+ * One structured line per run.
+ *
+ * Every field here is a count, an identifier an operator already holds, or a
+ * model version. Deliberately absent, and the reason this is a function rather
+ * than an inline `console.log`: no image, no embedding, no similarity score and
+ * no student id. A similarity score is an inference drawn from a biometric
+ * template, and a log line naming a student next to one is a biometric record
+ * sitting in a log aggregator with a different retention policy from the
+ * database — see ADR-0008.
+ */
+function logRecognitionRun(summary: RecognitionRunSummary): void {
+  const matched = summary.perStudent.filter((s) => s.matchStatus === "MATCHED").length;
+  const uncertain = summary.perStudent.filter((s) => s.matchStatus === "UNCERTAIN").length;
+  console.info(
+    JSON.stringify({
+      // `log` rather than `event`, matching the key `modules/integrations`
+      // already emits, so one aggregation query finds every structured line
+      // this application writes.
+      log: "recognition.run",
+      sessionId: summary.sessionId,
+      cohortId: summary.cohortId,
+      candidateScope: summary.candidateScope,
+      candidatePoolSize: summary.candidatePoolSize,
+      skippedIncompatibleCandidates: summary.skippedIncompatibleCandidates,
+      capturesProcessed: new Set(summary.perFace.map((f) => f.imageSequenceNumber)).size,
+      detectedFaces: summary.detectedFacesTotal,
+      scoredFaces: summary.scoredFacesTotal,
+      matched,
+      uncertain,
+      unmatched: summary.unmatchedStudentIds.length,
+      modelName: summary.modelName,
+      modelVersion: summary.modelVersion,
+      productionEligible: summary.productionEligible,
+      durationMs: summary.durationMs,
+    }),
+  );
 }

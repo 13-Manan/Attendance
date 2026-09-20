@@ -53,8 +53,13 @@ function policy(overrides: Partial<RecognitionPolicy> = {}): RecognitionPolicy {
   };
 }
 
-function candidate(studentId: string, similarity: number): CandidateTemplate {
+/**
+ * One enrolled template. `sampleId` distinguishes several templates belonging
+ * to the same student — the situation the runner-up rule has to survive.
+ */
+function candidate(studentId: string, similarity: number, sampleId = "a"): CandidateTemplate {
   return {
+    embeddingId: `emb-${studentId}-${sampleId}`,
     studentId,
     embedding: vecAtSimilarity(similarity),
     modelName: "mock",
@@ -66,9 +71,12 @@ function faceResult(overrides: Partial<FaceRecognitionResult> = {}): FaceRecogni
   return {
     detectedFaceId: "1:0",
     imageSequenceNumber: 1,
+    faceIndex: 0,
     candidateStudentId: "stu-1",
+    candidateEmbeddingId: "emb-stu-1-a",
     similarityScore: 0.9,
     runnerUpSimilarity: 0.1,
+    runnerUpStudentId: "stu-2",
     detectionConfidence: 0.95,
     qualityScore: 0.8,
     decision: "MATCHED",
@@ -195,6 +203,7 @@ interface RunHarness {
     loadCandidates: Array<[string, unknown]>;
     loadSubjectCandidates: Array<[string, unknown]>;
     detectEmbed: DetectEmbedRequest[];
+    requireCohortSubjectAccess: string[];
   };
   deps: Parameters<typeof runRecognitionForSession>[2];
 }
@@ -208,11 +217,14 @@ function harness(opts: {
   faces?: DetectEmbedResponse["faces"];
   modelInfo?: ModelInfoResponse;
   policyOverrides?: Partial<RecognitionPolicy>;
+  /** Made to reject so a test can assert the subject-ownership gate. */
+  subjectAccessError?: Error;
 } = {}): RunHarness {
   const calls: RunHarness["calls"] = {
     loadCandidates: [],
     loadSubjectCandidates: [],
     detectEmbed: [],
+    requireCohortSubjectAccess: [],
   };
   const modelInfo = opts.modelInfo ?? makeModelInfo();
   return {
@@ -222,6 +234,10 @@ function harness(opts: {
       getCohortById: async () => opts.cohort ?? makeCohort(),
       getInstitutionById: async () => opts.institution ?? makeInstitution(),
       requireCohortAccess: async () => {},
+      requireCohortSubjectAccess: async (_user, cohortSubjectId) => {
+        calls.requireCohortSubjectAccess.push(cohortSubjectId);
+        if (opts.subjectAccessError) throw opts.subjectAccessError;
+      },
       fetchModelInfo: async () => modelInfo,
       loadCandidateEmbeddings: async (cohortId, model) => {
         calls.loadCandidates.push([cohortId, model]);
@@ -427,6 +443,7 @@ test("scoreFaceAgainstCandidates handles an empty candidate pool", () => {
 
 test("candidates enrolled at a different embedding dimension are skipped and counted", () => {
   const wrongDim: CandidateTemplate = {
+    embeddingId: "emb-legacy",
     studentId: "stu-old-model",
     embedding: new Array<number>(128).fill(0.5),
     modelName: "legacy",
@@ -802,4 +819,308 @@ test("runRecognitionForSession reports a missing session rather than guessing", 
   const h = harness();
   h.deps!.getSessionById = async () => null;
   await assert.rejects(() => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps), /session_not_found/);
+});
+
+// ===========================================================================
+// 8. Multiple templates per student
+//
+// A student may hold up to MAX_SAMPLES_PER_STUDENT (5) enrolled templates, and
+// the enrollment UI encourages several. Every test here exists because the
+// engine previously ranked those samples against one another, which made the
+// ambiguity rule fire on well-enrolled students and demoted them to review.
+// ===========================================================================
+
+test("a student's own second template is never their runner-up", () => {
+  // Two samples of the same face: 0.95 and 0.93. Ranked against each other the
+  // margin is 0.02, inside the 0.05 ambiguity band.
+  const result = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [candidate("stu-a", 0.95, "one"), candidate("stu-a", 0.93, "two")],
+    DIM,
+    policy(),
+  );
+  assert.equal(result.best?.studentId, "stu-a");
+  assert.equal(result.runnerUp, null, "nobody else was enrolled, so there is no runner-up");
+  assert.equal(result.wasAmbiguous, false);
+  assert.equal(result.decision, "MATCHED");
+});
+
+test("five samples of one student still produce a confident match", () => {
+  // The realistic shape of a fully enrolled student. Every sample is a near-tie
+  // with every other, which is the whole point of enrolling several.
+  const samples = [0.95, 0.94, 0.93, 0.92, 0.91].map((s, i) =>
+    candidate("stu-a", s, `s${i}`),
+  );
+  const result = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [...samples, candidate("stu-b", 0.3)],
+    DIM,
+    policy(),
+  );
+  assert.equal(result.best?.studentId, "stu-a");
+  assert.equal(result.runnerUp?.studentId, "stu-b");
+  assert.equal(result.decision, "MATCHED", "a well-enrolled student must not be sent to review");
+});
+
+test("a genuine look-alike is still caught when both students hold several samples", () => {
+  // The rule must keep working, not merely stop misfiring: two *different*
+  // students inside the margin still go to review.
+  const result = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [
+      candidate("stu-a", 0.95, "one"),
+      candidate("stu-a", 0.94, "two"),
+      candidate("stu-twin", 0.93, "one"),
+      candidate("stu-twin", 0.92, "two"),
+    ],
+    DIM,
+    policy(),
+  );
+  assert.equal(result.best?.studentId, "stu-a");
+  assert.equal(result.runnerUp?.studentId, "stu-twin");
+  assert.equal(result.wasAmbiguous, true);
+  assert.equal(result.decision, "UNCERTAIN");
+});
+
+test("the runner-up is a different student whatever order candidates arrive in", () => {
+  // Ordering matters to a single-pass scan, so exercise several permutations of
+  // the same pool and assert the invariant directly.
+  const pool = [
+    candidate("stu-a", 0.9, "one"),
+    candidate("stu-b", 0.8),
+    candidate("stu-a", 0.95, "two"),
+    candidate("stu-c", 0.5),
+  ];
+  const orders = [
+    [0, 1, 2, 3],
+    [2, 0, 3, 1],
+    [3, 1, 0, 2],
+    [1, 2, 0, 3],
+    [3, 2, 1, 0],
+  ];
+  for (const order of orders) {
+    const result = scoreFaceAgainstCandidates(REFERENCE, order.map((i) => pool[i]), DIM, policy());
+    assert.equal(result.best?.studentId, "stu-a", `order ${order.join("")}`);
+    assert.notEqual(
+      result.runnerUp?.studentId,
+      result.best?.studentId,
+      `order ${order.join("")}: runner-up must not be the same student as the best match`,
+    );
+    assert.equal(result.runnerUp?.studentId, "stu-b", `order ${order.join("")}`);
+  }
+});
+
+test("the winning template is named, not just the winning student", () => {
+  const result = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [candidate("stu-a", 0.93, "old"), candidate("stu-a", 0.97, "new")],
+    DIM,
+    policy(),
+  );
+  assert.equal(result.best?.embeddingId, "emb-stu-a-new");
+});
+
+// ===========================================================================
+// 9. Aggregation policy
+// ===========================================================================
+
+test("two faces in ONE capture claiming the same student is demoted to review", () => {
+  // A person appears once in a still photograph. Two hits mean the recogniser
+  // is confusing people, and confusion must not read as confident presence.
+  const rows = aggregateByStudent(
+    [
+      faceResult({ detectedFaceId: "1:0", faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.95 }),
+      faceResult({ detectedFaceId: "1:1", faceIndex: 1, candidateStudentId: "stu-a", similarityScore: 0.88 }),
+    ],
+    policy(),
+  );
+  assert.equal(rows.length, 1, "still one row per student");
+  assert.equal(rows[0].matchStatus, "UNCERTAIN");
+  assert.equal(rows[0].advisoryResult, "NEEDS_REVIEW");
+  assert.deepEqual(rows[0].downgrades, ["duplicate_within_capture"]);
+});
+
+test("the same student across TWO captures is not demoted — that is the point of a second photo", () => {
+  const rows = aggregateByStudent(
+    [
+      faceResult({ detectedFaceId: "1:0", imageSequenceNumber: 1, faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.5, decision: "UNCERTAIN" }),
+      faceResult({ detectedFaceId: "2:0", imageSequenceNumber: 2, faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.95 }),
+    ],
+    policy(),
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].matchStatus, "MATCHED");
+  assert.deepEqual(rows[0].downgrades, []);
+  assert.equal(rows[0].bestFaceId, "2:0", "the clearer photo wins");
+});
+
+test("aggregation is deterministic when two observations tie exactly", () => {
+  // Same similarity, same confidence: the earliest capture wins, so re-running
+  // the pipeline on the same faces cannot produce a different register.
+  const faces = [
+    faceResult({ detectedFaceId: "2:0", imageSequenceNumber: 2, faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.9, detectionConfidence: 0.9 }),
+    faceResult({ detectedFaceId: "1:0", imageSequenceNumber: 1, faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.9, detectionConfidence: 0.9 }),
+  ];
+  const forwards = aggregateByStudent(faces, policy());
+  const backwards = aggregateByStudent([...faces].reverse(), policy());
+  assert.equal(forwards[0].bestFaceId, "1:0");
+  assert.equal(backwards[0].bestFaceId, "1:0");
+  assert.deepEqual(forwards, backwards);
+});
+
+test("a tie on similarity is broken by detection confidence before capture order", () => {
+  const rows = aggregateByStudent(
+    [
+      faceResult({ detectedFaceId: "1:0", imageSequenceNumber: 1, faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.9, detectionConfidence: 0.7 }),
+      faceResult({ detectedFaceId: "2:0", imageSequenceNumber: 2, faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.9, detectionConfidence: 0.99 }),
+    ],
+    policy(),
+  );
+  assert.equal(rows[0].bestFaceId, "2:0");
+});
+
+test("no combination of observations can promote a student above their best face", () => {
+  // Three uncertain looks are not one certain one.
+  const rows = aggregateByStudent(
+    [
+      faceResult({ detectedFaceId: "1:0", imageSequenceNumber: 1, faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.5, decision: "UNCERTAIN" }),
+      faceResult({ detectedFaceId: "2:0", imageSequenceNumber: 2, faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.52, decision: "UNCERTAIN" }),
+      faceResult({ detectedFaceId: "3:0", imageSequenceNumber: 3, faceIndex: 0, candidateStudentId: "stu-a", similarityScore: 0.55, decision: "UNCERTAIN" }),
+    ],
+    policy(),
+  );
+  assert.equal(rows[0].matchStatus, "UNCERTAIN");
+  assert.equal(rows[0].advisoryResult, "NEEDS_REVIEW");
+});
+
+test("every observation is preserved as provenance, in capture order", () => {
+  const rows = aggregateByStudent(
+    [
+      faceResult({ detectedFaceId: "3:1", imageSequenceNumber: 3, faceIndex: 1, candidateStudentId: "stu-a", similarityScore: 0.7, decision: "UNCERTAIN" }),
+      faceResult({ detectedFaceId: "1:2", imageSequenceNumber: 1, faceIndex: 2, candidateStudentId: "stu-a", similarityScore: 0.95 }),
+    ],
+    policy(),
+  );
+  assert.equal(rows[0].observations.length, 2);
+  assert.deepEqual(
+    rows[0].observations.map((o) => [o.captureNumber, o.faceIndex]),
+    [[1, 2], [3, 1]],
+  );
+  assert.equal(rows[0].observations[0].similarity, 0.95);
+  assert.equal(rows[0].observations[1].matchStatus, "UNCERTAIN");
+});
+
+// ===========================================================================
+// 10. Authorization, bounds and failure modes
+// ===========================================================================
+
+test("a subject session demands the subject link, not merely cohort access", async () => {
+  const h = harness({
+    session: makeSession({ cohortSubjectId: "cs-1" }),
+    subjectPool: [poolRow("stu-a", 0.95)],
+    faces: [detectedFace(1, REFERENCE)],
+  });
+  await runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps);
+  assert.deepEqual(h.calls.requireCohortSubjectAccess, ["cs-1"]);
+});
+
+test("a colleague who teaches the class but not the subject is refused", async () => {
+  const h = harness({
+    session: makeSession({ cohortSubjectId: "cs-1" }),
+    subjectAccessError: new ForbiddenError("not_subject_faculty"),
+    faces: [detectedFace(1, REFERENCE)],
+  });
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps),
+    ForbiddenError,
+  );
+  assert.equal(h.calls.detectEmbed.length, 0, "no classroom image may leave the process");
+});
+
+test("a daily session never consults the subject gate", async () => {
+  const h = harness({ faces: [] });
+  await runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps);
+  assert.deepEqual(h.calls.requireCohortSubjectAccess, []);
+});
+
+test("a finalized session is refused before any image is sent", async () => {
+  const h = harness({ session: makeSession({ status: "FINALIZED" }) });
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps),
+    /session_locked:FINALIZED/,
+  );
+  assert.equal(h.calls.detectEmbed.length, 0);
+});
+
+test("a cancelled session is refused before any image is sent", async () => {
+  const h = harness({ session: makeSession({ status: "CANCELLED" }) });
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps),
+    /session_locked:CANCELLED/,
+  );
+  assert.equal(h.calls.detectEmbed.length, 0);
+});
+
+test("a fourth image is refused by the service, not only by the action schema", async () => {
+  const h = harness();
+  const four = {
+    sessionId: "sess-1",
+    images: [1, 2, 3, 1].map((n) => ({
+      sequenceNumber: n as 1 | 2 | 3,
+      imageBase64: "x".repeat(64),
+    })),
+  };
+  await assert.rejects(() => runRecognitionForSession(makeUser(), four, h.deps), /too_many_images/);
+  assert.equal(h.calls.detectEmbed.length, 0);
+});
+
+test("two payloads claiming the same capture number are refused", async () => {
+  // Otherwise both would produce `1:0` and one photograph's faces would be
+  // counted twice — including by the duplicate-within-capture rule.
+  const h = harness();
+  const collide = {
+    sessionId: "sess-1",
+    images: [
+      { sequenceNumber: 2 as const, imageBase64: "x".repeat(64) },
+      { sequenceNumber: 2 as const, imageBase64: "y".repeat(64) },
+    ],
+  };
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), collide, h.deps),
+    /duplicate_image_sequence/,
+  );
+  assert.equal(h.calls.detectEmbed.length, 0);
+});
+
+test("an empty image list is refused rather than reported as a class of absentees", async () => {
+  const h = harness();
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), { sessionId: "sess-1", images: [] }, h.deps),
+    /no_images/,
+  );
+});
+
+test("a face-ai service that stops responding fails within the timeout", async () => {
+  const h = harness();
+  h.deps!.detectTimeoutMs = 20;
+  h.deps!.detectEmbed = () => new Promise(() => {});
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps),
+    /face_ai_timeout/,
+  );
+});
+
+test("a run carries the template behind each advisory, so a match can be traced", async () => {
+  const h = harness({ pool: [poolRow("stu-a", 0.95)], faces: [detectedFace(1, REFERENCE)] });
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps);
+  assert.equal(summary.perStudent[0].bestEmbeddingId, "emb-stu-a");
+  assert.equal(summary.perFace[0].candidateEmbeddingId, "emb-stu-a");
+});
+
+test("a run records when it happened and how long it took", async () => {
+  const h = harness({ faces: [] });
+  h.deps!.now = () => new Date("2026-09-20T09:30:00.000Z");
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps);
+  assert.equal(summary.completedAt, "2026-09-20T09:30:00.000Z");
+  assert.ok(summary.durationMs >= 0);
 });

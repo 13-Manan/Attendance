@@ -165,6 +165,22 @@ is where a single number silently becomes the wrong person. The rule only
 fires where it can change an outcome: a near-tie that was already below
 `presentMin` is not flagged, because it was already going to review.
 
+**The runner-up is always a different student.** This is load-bearing, and it
+was wrong until Phase 4. A student may hold up to `MAX_SAMPLES_PER_STUDENT`
+(5) enrolled templates, and the enrollment UI encourages several because
+varied lighting recognises somebody more reliably. Those samples are all of
+the same face, so they score within a hair of one another — and while the
+scan ranked *every template* against every other, the runner-up for a
+well-enrolled student was almost always their own second photograph. The
+margin was tiny, the rule fired, and the student was demoted to NEEDS_REVIEW.
+
+The effect was that the better a student enrolled, the more certainly they
+were sent to manual review: multi-sample enrollment made recognition worse.
+A student's own templates now compete to represent that student, and only the
+best score from a *different* student can be the runner-up. The rule still
+catches genuine look-alikes — that case is tested with two students holding
+two samples each.
+
 ### Low-confidence detections
 
 A face below `minDetectionConfidence` — a poster on the back wall, a blurred
@@ -192,22 +208,46 @@ A capture is 1–3 photos of the same room. Rahul is very likely in all of
 them.
 
 Deduplication is by `studentId` across every face of every image: each
-student gets **one** row, at their **best** similarity, with `bestFaceId`
-recording which frame produced it (`<sequenceNumber>:<faceIndex>`, e.g.
-`2:0`) so review can jump straight to the winning frame. Ties break on
-detection confidence.
+student gets **one** row. The rule is written out below rather than left as
+"whatever the code does", because "take the maximum" is not a policy — it is
+the absence of one, and it silently rewards the single most over-confident
+frame.
 
-Best-score-wins is the right rule because the photos are attempts at the same
-observation, not independent evidence: the clearest look at a student is the
-most informative one, and averaging a clear frame with a motion-blurred one
-throws away the good measurement. It is also conservative in the direction
-that matters — a student is not penalised for having been mid-blink in photo
-1.
+### The aggregation policy
+
+1. **Collect every observation.** One per face that named this student, each
+   carrying capture number, face index, similarity, detection confidence and
+   the face-level verdict. All of them are kept — `StudentRecognitionAggregate
+   .observations` — so the policy can reason about disagreement instead of
+   discarding it, and so a reviewer can be told "photo 1 face 3 at 71%,
+   photo 2 face 0 at 68%".
+2. **Pick a representative.** Highest similarity; ties break on detection
+   confidence, then on the lowest capture number. Fully deterministic: the
+   same observations always produce the same register, whatever order the
+   detector returned faces in.
+3. **Classify** the representative's raw similarity through the same
+   `presentMin` / `reviewMin` bands every other decision uses.
+4. **Apply demotions.** Each can only make the answer more cautious:
+   - `ambiguous_face` — the representative's runner-up (a different student)
+     was inside the margin.
+   - `duplicate_within_capture` — see §6.
+5. **Never promote.** A student whose representative observation is UNCERTAIN
+   stays UNCERTAIN no matter how many other captures agreed. Agreement
+   between two uncertain looks is not certainty. There is no branch in
+   `aggregateByStudent` that raises a status; this is structural, not a
+   convention.
+
+Taking the maximum *across captures* is deliberate and is not a demotion
+case: the photos are attempts at the same observation, not independent
+evidence. The clearest look is the most informative one, averaging a sharp
+frame with a motion-blurred one throws away the good measurement, and a
+student is not penalised for having been mid-blink in photo 1 — rescuing them
+is exactly what the second photo is for.
 
 Consequences that are tested explicitly:
 
 - Two images, one student → one aggregate row, not two.
-- An ambiguity flag raised on any contributing face is carried forward.
+- An ambiguity flag raised on the winning face is carried forward.
 - Faces that matched nobody contribute no rows at all.
 - `unmatchedStudentIds` is computed from the pool minus the claimed set, so
   the three advisory buckets always partition the class exactly once.
@@ -216,19 +256,22 @@ Consequences that are tested explicitly:
 
 ## 6. Conflicts
 
-Two faces in the same capture can claim the same student — a real
-possibility with twins, siblings, or simply a hard frame.
+Two faces **in the same capture** can claim the same student.
 
-The engine does not arbitrate. The higher-scoring face wins the student's
-single row, and if the two faces were within the ambiguity margin of one
-another's candidates, the student carries `wasAmbiguous` into review. The
-losing face keeps its own `perFace` record with its own decision, so the
-reviewer can see that two faces competed rather than being shown a tidy
-answer that hides the collision.
+A person appears once in a still photograph. Two hits therefore mean the
+recogniser is confusing people, not that the student is especially present —
+so the student is demoted to UNCERTAIN with `duplicate_within_capture`, and
+the review board explains it in those words. Previously the higher-scoring
+face simply won and the collision was visible only to somebody reading
+`perFace`; a confident-looking PRESENT produced by a coin flip is
+unreviewable, because nobody reviews a confident Present.
 
-Choosing blindly is the failure mode being avoided: a confident-looking
-PRESENT produced by a coin flip is unreviewable, because nobody reviews a
-confident Present.
+The losing face keeps its own `perFace` record with its own decision, so the
+collision is still legible rather than being tidied away.
+
+The *cross-capture* case is the opposite signal and is left alone: the same
+student in photo 1 and photo 2 is one person photographed twice, which is the
+normal and intended case.
 
 ---
 
@@ -312,7 +355,9 @@ faculty member must still be able to finish by roll-call.
 
 | Suite | Command | Covers |
 | --- | --- | --- |
-| Engine unit tests | `npm test --workspace=web` | Cosine math, threshold bands, ambiguity, dedup, class scope, multi-image aggregation, leak check |
+| Engine unit tests | `npm test --workspace=web` | Cosine math, threshold bands, ambiguity, multi-template ranking, aggregation policy, class scope, multi-image dedup, leak check |
+| Camera unit tests | `npm test --workspace=web` | State machine, failure classification, capture geometry, frame validation, source contract — no webcam |
+| Classroom scenarios | `npm test --workspace=web` | The phase's enumerated scenario list end to end, against fixtures |
 | face-ai unit tests | `pytest` in `services/face-ai` | Provider contract, matching, routes, benchmark harness |
 | Integration | `./scripts/integration-test.sh` | Real HTTP against a live FastAPI process |
 | Benchmark | `python -m bench` | Accuracy and threshold selection on a real dataset |
@@ -343,10 +388,58 @@ run against a real dataset.
 - **Thresholds are unvalidated defaults.** See §4.
 - **No accuracy claim is supported by evidence.** No benchmark run against
   real classroom data exists.
-- **Attendance is never finalized by the engine.** Writing `AttendanceRecord`
-  rows from an advisory summary is a later phase.
+- **Attendance is never finalized by the engine.** It returns an advisory
+  summary and writes nothing; `modules/attendance-review` turns that into a
+  register, and only a faculty member closes one.
+- **Camera hardware is not covered by any automated test.** The browser path
+  calls `navigator.mediaDevices.getUserMedia` and is exercised only by hand.
+  Everything around it — states, failures, lifecycle, payload bounds — runs
+  against `fixtureCameraSource`, which proves the software and says nothing
+  about a lens. See §12.
 - Occlusion, extreme angles and back-row distance are known-hard and
   unmeasured here; the benchmark manifest has slots for exactly those
   conditions.
 
 **License verification required before production deployment.**
+
+---
+
+## 12. The camera
+
+The classroom camera lives in three files, split so that the only part that
+cannot be tested is as small as possible:
+
+| File | Role | Tested |
+| --- | --- | --- |
+| `modules/attendance-capture/camera.ts` | State machine, failure classification, capture geometry, frame validation. Pure, DOM-free. | Fully |
+| `modules/attendance-capture/camera-source.ts` | `CameraSource`: the one place `getUserMedia` is called, plus a deterministic fixture. | Fixture fully; browser path not at all |
+| `modules/attendance-capture/use-classroom-camera.ts` | Binds the two to React: stream handle, `<video>` ref, lifecycle effects. | Through the state machine |
+
+`browserCameraSource` is the production implementation and is what every
+deployed build uses. The seam exists so the wizard, the contracts and the
+lifecycle guarantees can be asserted in CI, where no webcam exists; it does
+not replace, weaken or route around the real capture path.
+
+`fixtureCameraSource` is reachable only when `NEXT_PUBLIC_ENABLE_FIXTURE_
+CAMERA=true`, which no deployment sets — the deploy workflow passes no such
+build argument, so a production bundle has `false` compiled in and the
+fixture is unreachable from it. When it *is* on, the capture page renders a
+banner saying so.
+
+### Lifecycle guarantees
+
+The stream is released on unmount, on tab-hidden (`visibilitychange`), when
+the wizard leaves the camera step, and when an `open()` resolves after the
+user already pressed stop — the race a slow permission prompt creates. Two
+concurrent `getUserMedia` calls are prevented in two places: the reducer
+ignores a second `start` from `starting`/`ready`/`capturing`, and an
+`openingRef` guard covers the async half.
+
+### Capture geometry
+
+Classroom captures cap at **1920px** on the long edge at **JPEG q0.82**,
+against enrollment's 1280px at q0.92. The subject is different: an enrollment
+photograph is one face filling the frame, a classroom photograph is thirty
+faces across a room, and at 1280 the back row lands at roughly forty pixels —
+at or below what a detector will find. Capping at all matters because a 4K
+webcam otherwise hands over a frame several times the payload bound.

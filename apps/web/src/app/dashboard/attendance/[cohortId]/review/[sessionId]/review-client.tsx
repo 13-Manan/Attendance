@@ -75,6 +75,8 @@ function reasonText(student: AttendanceReviewStudent): string {
       return "Matched a face, but below the confidence required to mark present.";
     case "ambiguous_match":
       return "The best match was too close to another enrolled student to separate confidently.";
+    case "duplicate_in_capture":
+      return "Two different faces in the same photo both matched this student, so the match is not trustworthy on its own.";
     case "no_match":
       return "Compared against every captured face; no match above the review threshold.";
     case "no_face_template":

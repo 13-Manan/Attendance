@@ -28,14 +28,26 @@ import type {
   CapturableCohortSubject,
   StartCaptureSessionResult,
 } from "./types";
-import { MAX_CAPTURES_PER_SESSION } from "./types";
-import type { DetectEmbedRequest, DetectEmbedResponse } from "@attendance/shared-types";
+import type { DetectRequest, DetectResponse } from "@attendance/shared-types";
+import { requireCohortSubjectAccess } from "@/modules/authorization/cohort-access";
+import { mergeSessionMetadata } from "@/modules/attendance-review/repository";
 
-// Type of the injected face-ai client. The concrete import happens lazily
-// inside analyzeCaptureImage so that env-validation (which runs at
-// `@/lib/env` import time) does not fire during unit tests that never touch
-// the HTTP client.
-type DetectEmbedFn = (req: DetectEmbedRequest) => Promise<DetectEmbedResponse>;
+/**
+ * Type of the injected face-ai client. The concrete import happens lazily
+ * inside `analyzeCaptureImage` so that env-validation (which runs at
+ * `@/lib/env` import time) does not fire during unit tests that never touch
+ * the HTTP client.
+ *
+ * `/v1/detect` rather than `/v1/detect-embed`, deliberately. The per-capture
+ * check answers one question — "did this photograph catch any faces, and are
+ * they sharp enough to be worth keeping?" — which the detector alone settles.
+ * Running the recognition model as well would generate an embedding for every
+ * face in the room, immediately discard it, and then generate it again during
+ * the authoritative pass. That is the expensive half of the pipeline done
+ * twice, and it means biometric vectors being produced for a frame the teacher
+ * is about to retake.
+ */
+type FaceDetectFn = (req: DetectRequest) => Promise<DetectResponse>;
 
 /**
  * Phase 4 classroom capture — the faculty-facing "start attendance" flow.
@@ -354,19 +366,13 @@ export interface AnalyzeCaptureImageInput {
   sessionId: string;
   sequenceNumber: 1 | 2 | 3;
   imageBase64: string;
-  /**
-   * How many images the client has already accepted this session (Phase 4
-   * cap: 3). Sent from the client so the server can reject a 4th capture
-   * even before touching face-ai; the server does not need to persist a
-   * counter for this because no classroom image bytes are stored.
-   */
-  acceptedSoFar: number;
 }
 
 export interface AnalyzeCaptureImageDeps {
   getSessionById?: (id: string) => Promise<AttendanceSession | null>;
   requireCohortAccess?: (u: SessionUser, cohortId: string) => Promise<void>;
-  detectEmbed?: DetectEmbedFn;
+  requireCohortSubjectAccess?: (u: SessionUser, cohortSubjectId: string) => Promise<void>;
+  faceDetect?: FaceDetectFn;
   /**
    * Timeout for the face-ai round trip, in ms. face-ai processing is
    * bounded (mock is instant; a real backend must respect this), but the
@@ -378,6 +384,12 @@ export interface AnalyzeCaptureImageDeps {
   /** Injected model-info reader so a test can force productionEligible to
    * a known value without spinning up face-ai. Optional. */
   fetchModelInfo?: () => Promise<{ productionEligible: boolean }>;
+  /** Records the accepted capture on the session, so the summary is built
+   * from what the server saw rather than from what the browser reports. */
+  recordCaptureAnalysis?: (
+    sessionId: string,
+    analysis: CaptureImageAnalysis,
+  ) => Promise<void>;
 }
 
 function classifyCaptureQuality(
@@ -423,12 +435,21 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Runs one classroom capture through face-ai's `/v1/detect-embed`, returning
- * a metadata-only summary. The embedding vectors face-ai produces for the
- * classroom faces are NOT returned to the client — they exist only inside
- * this function call and are discarded on return. Matching (Phase 5) will
- * consume the same detect response server-side against class-scoped
- * candidate embeddings; wiring for that arrives with the recognition engine.
+ * The per-capture quality gate: one classroom photograph through face-ai's
+ * `/v1/detect`, returning counts and a verdict the wizard shows beside the
+ * thumbnail.
+ *
+ * Detection only. No embedding is generated here — so nothing biometric is
+ * derived from a frame the teacher may be about to retake, and the recognition
+ * model is not run twice over the same room. The authoritative pass that does
+ * produce embeddings is `runRecognitionForSession`, once, over the final set.
+ *
+ * There is no capture counter in the input. There used to be: the browser sent
+ * `acceptedSoFar` and the server enforced the three-capture cap against it,
+ * which made a product rule depend on a number the client chose. The cap is
+ * structural instead — `sequenceNumber` is 1, 2 or 3, so a session cannot hold
+ * a fourth distinct capture, and re-analysing a sequence is a retake rather
+ * than an addition.
  */
 export async function analyzeCaptureImage(
   actor: SessionUser,
@@ -437,14 +458,6 @@ export async function analyzeCaptureImage(
 ): Promise<CaptureImageResult> {
   requirePermission(actor, "attendanceSession.capture");
 
-  if (input.acceptedSoFar >= MAX_CAPTURES_PER_SESSION) {
-    return {
-      ok: false,
-      reason: "capture_limit_reached",
-      message: `A single attendance session accepts at most ${MAX_CAPTURES_PER_SESSION} captures. Remove one before adding another.`,
-      retryable: false,
-    };
-  }
   if (input.imageBase64.length < 64) {
     return {
       ok: false,
@@ -468,6 +481,13 @@ export async function analyzeCaptureImage(
     requireSameInstitution(actor, session.institutionId);
     const checkAccess = deps.requireCohortAccess ?? requireCohortAccess;
     await checkAccess(actor, session.cohortId);
+    // Same rule as session creation and recognition: a subject register
+    // belongs to whoever teaches that subject, not to everyone who teaches
+    // the class.
+    if (session.cohortSubjectId) {
+      const checkSubject = deps.requireCohortSubjectAccess ?? requireCohortSubjectAccess;
+      await checkSubject(actor, session.cohortSubjectId);
+    }
   } catch (e) {
     if (e instanceof ForbiddenError) {
       return {
@@ -489,40 +509,34 @@ export async function analyzeCaptureImage(
     };
   }
 
-  const detect: DetectEmbedFn =
-    deps.detectEmbed ??
+  const detect: FaceDetectFn =
+    deps.faceDetect ??
     (async (req) => {
       // Lazy import — keeps `@/lib/env` (which validates process.env at
       // module load) out of the import graph of pure unit tests, matching
       // the pattern used by face-enrollment/service.ts.
-      const { detectEmbed } = await import("@/lib/face-ai-client");
-      return detectEmbed(req);
+      const { faceDetect } = await import("@/lib/face-ai-client");
+      return faceDetect(req);
     });
   const timeoutMs = deps.detectTimeoutMs ?? 30_000;
 
-  let response: DetectEmbedResponse;
+  let response: DetectResponse;
   try {
-    response = await withTimeout(
-      detect({
-        sessionId: session.id,
-        images: [{ sequenceNumber: input.sequenceNumber, imageBase64: input.imageBase64 }],
-      }),
-      timeoutMs,
-    );
+    response = await withTimeout(detect({ imageBase64: input.imageBase64 }), timeoutMs);
   } catch (e) {
     const message = e instanceof Error ? e.message : "unknown";
     if (message === "face_ai_timeout") {
       return {
         ok: false,
         reason: "service_timeout",
-        message: "Face recognition took too long to respond. Try again.",
+        message: "Face detection took too long to respond. Try again.",
         retryable: true,
       };
     }
     return {
       ok: false,
       reason: "service_unavailable",
-      message: "Face recognition service is temporarily unavailable. Try again in a moment.",
+      message: "The face service is temporarily unavailable. Try again in a moment.",
       retryable: true,
     };
   }
@@ -533,29 +547,102 @@ export async function analyzeCaptureImage(
     faceCount > 0
       ? faces.reduce((s, f) => s + (f.detectionConfidence ?? 0), 0) / faceCount
       : null;
-  const averageQualityScore =
-    faceCount > 0 ? faces.reduce((s, f) => s + (f.qualityScore ?? 0), 0) / faceCount : null;
+  // `/v1/detect` reports detector confidence but no per-face quality score —
+  // quality is a property of a crop the recogniser prepares. Reported as null
+  // rather than invented, and the authoritative run fills it in later.
+  const averageQualityScore = null;
   const quality = classifyCaptureQuality(faceCount, averageDetectionConfidence);
 
   // productionEligible lives in `/v1/model-info`; a real integration would
-  // cache it. For Phase 4 we default to false — matches the ONNX scaffold /
-  // mock backends the service ships with — unless a test overrides it.
+  // cache it. Defaults to false — matching the ONNX scaffold / mock backends
+  // the service ships with — unless a caller overrides it.
   const productionEligible = deps.fetchModelInfo
     ? (await deps.fetchModelInfo()).productionEligible
     : false;
 
-  return {
-    ok: true,
+  const analysis: CaptureImageAnalysis = {
     sequenceNumber: input.sequenceNumber,
     faceCount,
     averageDetectionConfidence,
     averageQualityScore,
+    imageWidth: response.imageWidth,
+    imageHeight: response.imageHeight,
     modelName: response.modelName,
     modelVersion: response.modelVersion,
     productionEligible,
     qualityLabel: quality.qualityLabel,
     qualityHint: quality.qualityHint,
   };
+
+  // Kept on the session so `summarizeCaptureSession` can report what the
+  // server actually saw. Re-analysing the same sequence overwrites, which is
+  // exactly what a retake should do.
+  const record = deps.recordCaptureAnalysis ?? recordCaptureAnalysisDefault;
+  await record(session.id, analysis);
+
+  return { ok: true, ...analysis };
+}
+
+/**
+ * Where the per-capture verdicts live between the capture step and the summary
+ * step.
+ *
+ * `AttendanceSession.metadata` rather than a new column or a `SessionImage`
+ * row: this is a handful of counts with the lifetime of one wizard session,
+ * the JSON column already carries the review phase's own bucket, and a schema
+ * change for it would not earn its migration. Note what is *not* stored — no
+ * image bytes, no embeddings, no bounding boxes. Just how many faces the
+ * detector found and how sure it was.
+ */
+export const CAPTURE_METADATA_KEY = "capture";
+
+export interface StoredCaptureMetadata {
+  analyses: CaptureImageAnalysis[];
+  lastCaptureAt: string;
+}
+
+export function readStoredCaptureMetadata(metadata: unknown): StoredCaptureMetadata | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const bucket = (metadata as Record<string, unknown>)[CAPTURE_METADATA_KEY];
+  if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) return null;
+  const analyses = (bucket as { analyses?: unknown }).analyses;
+  if (!Array.isArray(analyses)) return null;
+  return {
+    analyses: analyses as CaptureImageAnalysis[],
+    lastCaptureAt: String((bucket as { lastCaptureAt?: unknown }).lastCaptureAt ?? ""),
+  };
+}
+
+/**
+ * Merges one capture's verdict into the session, replacing any previous
+ * verdict for the same sequence number.
+ *
+ * Read-modify-write on a JSON column is not atomic, and two captures written
+ * at the same instant could lose one. That is acceptable here and nowhere
+ * else: the worst case is a thumbnail's face count missing from the summary,
+ * the register itself is built from the recognition run rather than from this,
+ * and a single teacher's wizard does not press capture twice at once.
+ */
+async function recordCaptureAnalysisDefault(
+  sessionId: string,
+  analysis: CaptureImageAnalysis,
+): Promise<void> {
+  const row = await prisma.attendanceSession.findUnique({
+    where: { id: sessionId },
+    select: { metadata: true },
+  });
+  const existing = readStoredCaptureMetadata(row?.metadata)?.analyses ?? [];
+  const analyses = [
+    ...existing.filter((a) => a.sequenceNumber !== analysis.sequenceNumber),
+    analysis,
+  ].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+
+  await mergeSessionMetadata(sessionId, {
+    [CAPTURE_METADATA_KEY]: {
+      analyses,
+      lastCaptureAt: new Date().toISOString(),
+    } satisfies StoredCaptureMetadata,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -564,14 +651,26 @@ export async function analyzeCaptureImage(
 
 export interface SummarizeCaptureSessionInput {
   sessionId: string;
-  analyses: CaptureImageAnalysis[];
 }
 
+/**
+ * What the wizard's summary step reports, built entirely from server-side
+ * state.
+ *
+ * This used to take an `analyses` array from the browser and echo it back as
+ * though it were a finding. It was not: a client could report three good
+ * captures and forty detected faces without ever opening a camera, and the
+ * summary screen would say so. The verdicts are now read from the session,
+ * where `analyzeCaptureImage` put them after seeing the images itself.
+ */
 export async function summarizeCaptureSession(
   actor: SessionUser,
   input: SummarizeCaptureSessionInput,
-  deps: { getSessionById?: (id: string) => Promise<AttendanceSession | null>;
+  deps: {
+    getSessionById?: (id: string) => Promise<AttendanceSession | null>;
     countEnrolledStudents?: (cohortId: string) => Promise<number>;
+    requireCohortAccess?: (u: SessionUser, cohortId: string) => Promise<void>;
+    loadCaptureAnalyses?: (sessionId: string) => Promise<CaptureImageAnalysis[]>;
   } = {},
 ): Promise<CaptureSessionSummary> {
   requirePermission(actor, "attendanceSession.capture");
@@ -580,7 +679,8 @@ export async function summarizeCaptureSession(
   const session = await getSession(input.sessionId);
   if (!session) throw new Error("session_not_found");
   requireSameInstitution(actor, session.institutionId);
-  await requireCohortAccess(actor, session.cohortId);
+  const checkAccess = deps.requireCohortAccess ?? requireCohortAccess;
+  await checkAccess(actor, session.cohortId);
 
   const countStudents =
     deps.countEnrolledStudents ??
@@ -588,17 +688,33 @@ export async function summarizeCaptureSession(
       prisma.enrollment.count({ where: { cohortId, status: "ACTIVE" } }));
   const enrolledStudentCount = await countStudents(session.cohortId);
 
-  const totalFacesDetected = input.analyses.reduce((s, a) => s + a.faceCount, 0);
-  const hasUsableCaptures = input.analyses.some(
+  const loadAnalyses =
+    deps.loadCaptureAnalyses ??
+    (async (sessionId: string) => {
+      const row = await prisma.attendanceSession.findUnique({
+        where: { id: sessionId },
+        select: { metadata: true },
+      });
+      return readStoredCaptureMetadata(row?.metadata)?.analyses ?? [];
+    });
+  const analyses = await loadAnalyses(session.id);
+
+  const totalFacesDetected = analyses.reduce((s, a) => s + a.faceCount, 0);
+  const hasUsableCaptures = analyses.some(
     (a) => a.qualityLabel === "good" || a.qualityLabel === "acceptable",
   );
-  const productionEligible = input.analyses.every((a) => a.productionEligible);
-  const modelName = input.analyses[0]?.modelName ?? "unknown";
-  const modelVersion = input.analyses[0]?.modelVersion ?? "unknown";
+  // `every` over an empty list is true, which would claim a licence-cleared
+  // backend for a session that ran no captures at all. The honest answer with
+  // nothing to go on is false.
+  const productionEligible =
+    analyses.length > 0 && analyses.every((a) => a.productionEligible);
+  const modelName = analyses[0]?.modelName ?? "unknown";
+  const modelVersion = analyses[0]?.modelVersion ?? "unknown";
 
   return {
     sessionId: session.id,
-    captureCount: input.analyses.length,
+    captureCount: analyses.length,
+    analyses,
     totalFacesDetected,
     modelName,
     modelVersion,
