@@ -693,3 +693,246 @@ not inferred from silence.
    deliberately, since it is not on the hot path.
 9. **The review-gate dissolution in `aggregateByStudent` is documented, not
    fixed** — deliberately, since changing it would change shipped behaviour.
+
+---
+
+## 10. Phase 12 — real-model compute, and the pipeline end to end
+
+Two runs, two harnesses, two disclaimers. Neither measures accuracy.
+
+- `services/face-ai/bench/model_perf.py` — the **real YuNet + SFace weights**.
+  The first time this repository has measured the production model stack at
+  all; every earlier number came from the `mock` hash stub.
+- `apps/web/scripts/bench/pipeline.ts` — everything the model's answer travels
+  through, against the `mock` backend so identity assignment is deterministic.
+
+Raw output: `services/face-ai/bench/results/model-perf.json`,
+`apps/web/bench-results/pipeline.json`.
+
+### Hardware and versions
+
+| | |
+| --- | --- |
+| Machine | macOS-26.6.2-arm64-arm-64bit, Apple M5 Pro, 15 cores, 48 GB |
+| Python / OpenCV / NumPy | 3.11.16 / 4.14.0 / 2.4.6 |
+| Node | v26.0.0 |
+| Detector | `face_detection_yunet_2023mar.onnx` (232,589 bytes) |
+| | sha256 `8f2383e4dd3cfbb4553ea8718107fc04…` — **verified** |
+| Recognizer | `face_recognition_sface_2021dec.onnx` (38,696,353 bytes) |
+| | sha256 `0ba9fbfa01b5270c96627c4ef784da85…` — **verified** |
+| Embedding width | 128 |
+| `productionEligible` | **false** — unchanged by this run |
+
+A developer laptop. Nothing here predicts Azure Container Apps capacity.
+
+### What "floor" and "exact" mean here
+
+A convolutional forward pass costs the same whatever the pixels depict. What
+varies with content is post-processing: NMS, and the per-face
+crop-align-embed loop.
+
+- **Detection figures are a floor.** Measured on synthetic noise frames
+  containing no faces. A real classroom adds NMS over real candidates.
+- **Embedding figures are exact.** SFace consumes a fixed 112x112 aligned
+  crop; a synthetic crop costs precisely what a real one does.
+
+### Cold start
+
+| | |
+| --- | --- |
+| Model load | **49.0 ms** |
+| First detect after load | 29.9 ms |
+| RSS across load | 71.6 → 228.3 MB (**+156.7 MB**) |
+
+Reported separately and never folded into the warm numbers.
+
+### Detection — YuNet forward-pass floor (ms)
+
+| Resolution | p50 | p95 | p99 | n |
+| --- | --- | --- | --- | --- |
+| VGA (640x480) | 6.458 | 7.112 | 7.259 | 30 |
+| 720p (1280x720) | 14.518 | 15.399 | 15.641 | 30 |
+| 1080p (1920x1080) | 28.419 | 29.944 | 37.598 | 30 |
+| 1440p (2560x1440) | 45.768 | 48.208 | 53.803 | 30 |
+| 4K (3840x2160) | 97.989 | 101.539 | 103.522 | 30 |
+
+Cost scales with pixel count: 4K is ~15x VGA.
+
+### Embedding — SFace, exact (ms)
+
+p50 **6.904**, p95 7.58, p99 7.886, n=30.
+
+### Composed per-capture cost at 1080p
+
+`detect floor + faces x embed`. Arithmetic, and labelled as such — a real
+scene was not available to run through the per-face loop.
+
+| Faces | Detect (ms) | Embed total (ms) | Composed (ms) |
+| --- | --- | --- | --- |
+| 1 | 28.419 | 6.9 | **35.3** |
+| 5 | 28.419 | 34.5 | **62.9** |
+| 10 | 28.419 | 69.0 | **97.5** |
+| 20 | 28.419 | 138.1 | **166.5** |
+| 30 | 28.419 | 207.1 | **235.5** |
+| 50 | 28.419 | 345.2 | **373.6** |
+
+**Embedding dominates beyond ~4 faces.** A 30-student classroom is roughly
+235.5 ms of model compute per capture, before any orchestration.
+
+### Stability — 200 sequential inferences
+
+RSS 1291.7 → 1292.7 MB, growth **1.0 MB**. No leak, and
+the model loads once.
+
+> `ru_maxrss` is a process **high-water mark**, not current RSS. Growth is a
+> valid leak signal; the absolute values are peaks and are not comparable to
+> the cold-start figures above, which were taken earlier in the process.
+
+### Concurrency — 720p detection, one shared provider, threads
+
+| Concurrency | Requests | Failures | Throughput/s | p50 | p95 | p99 | RSS MB |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 4 | 0 | 66.46 | 15.03 | 15.401 | 15.401 | 1293.0 |
+| 5 | 20 | 0 | 133.41 | 35.675 | 45.754 | 50.917 | 1397.5 |
+| 10 | 40 | 0 | 107.01 | 82.312 | 172.783 | 230.161 | 1568.6 |
+| 25 | 100 | 0 | 134.85 | 123.542 | 322.593 | 407.66 | 1755.0 |
+| 50 | 200 | 0 | 121.56 | 138.196 | 434.57 | 516.023 | 1755.0 |
+
+**Throughput does not scale with concurrency.** It plateaus around 107–135
+req/s from concurrency 1 onward, while p99 latency degrades from
+15.401 ms to 516.023 ms. OpenCV already
+parallelises a single inference across cores, so additional callers queue
+rather than add capacity. Zero failures at every level — it degrades in
+latency, not in errors.
+
+RSS rises from 1293.0 to 1755.0 MB as
+per-thread scratch buffers are allocated.
+
+### Failure modes
+
+| Input | Outcome | Detail | Fabricated a face? |
+| --- | --- | --- | --- |
+| `empty_string` | raised | `ImageDecodeError` | no |
+| `not_base64` | raised | `ImageDecodeError` | no |
+| `base64_but_not_an_image` | raised | `ImageDecodeError` | no |
+| `truncated_jpeg` | raised | `ImageDecodeError` | no |
+| `one_pixel` | returned | `0 faces` | no |
+
+Every malformed input either raises or returns zero faces. **No case
+fabricated a detection**, which is the Phase 6 principle at the model
+boundary: a recognition failure must stay a failure.
+
+### End-to-end pipeline (mock backend, orchestration only)
+
+Capture session → recognition → candidate generation → review board read,
+8 runs per capture count, 8 enrolled students.
+
+| Captures | Start | Recognise | Candidates | Board read | **Total p50** | p95 | p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 2.849 | 2.685 | 4.181 | 1.638 | **11.731** | 34.002 | 34.002 |
+| 2 | 2.244 | 2.37 | 3.239 | 1.309 | **9.139** | 11.022 | 11.022 |
+| 3 | 2.124 | 2.33 | 3.014 | 1.17 | **8.691** | 9.22 | 9.22 |
+
+Orchestration is ~11 ms p50 and is **not** the dominant cost — real model
+compute (above) is added to this, not included in it.
+
+Enrollment: p50 2.861 ms, p95 14.676 ms
+over 8 students.
+
+### Multi-image aggregation, and the Phase 6 invariant under load
+
+| Captures | Roster | **Present** | **Absent** | Awaiting confirmation | Awaiting decision |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 8 | 0 | 0 | 1 | 7 |
+| 2 | 8 | 0 | 0 | 2 | 6 |
+| 3 | 8 | 0 | 0 | 3 | 5 |
+
+Two things are measured here at once. Aggregation works — each extra capture
+surfaces one more suggestion and the roster total never inflates, so no
+student is double-counted. And **`Present` and `Absent` are 0 in every row**:
+recognition produced suggestions, never decisions. That is the Phase 6
+invariant holding under benchmark load rather than merely asserted in a test.
+
+### Class-scoped search — scenarios A–D
+
+| Scenario | Candidate pool | Per-face decision | Probe | ms |
+| --- | --- | --- | --- | --- |
+| A in selected cohort | 8 | `MATCHED` | **matched** | 2.422 |
+| B same institution other cohort | 8 | `UNMATCHED` | not matched | 2.204 |
+| C other institution | 8 | `UNMATCHED` | not matched | 2.16 |
+| D unknown person | 8 | `UNMATCHED` | not matched | 2.145 |
+
+The pool stayed at the cohort's 8 templates in every
+scenario: the search never widened to the institution. A student from another
+cohort, a student from another institution, and an unknown person are all
+`UNMATCHED` — measured, not assumed.
+
+> Scenario A's *advisory* result is `PRESENT`. That is recognition's own
+> vocabulary and is as far as it may go; the board above shows `present: 0`,
+> because the advisory is routed to review rather than written.
+
+### Concurrency correctness
+
+8 simultaneous corrections of one record:
+**1 correction row**, 0 duplicates, final result
+`PRESENT`, 7.207 ms wall. Records for the session:
+8 for a roster of 8 — no duplicate students.
+
+The Phase 6 compare-and-set holds under parallel callers.
+
+### Database read paths
+
+| Query | p50 | p95 | p99 | n |
+| --- | --- | --- | --- | --- |
+| Cohort roster | 0.153 | 0.367 | 0.609 | 30 |
+| Embedding metadata for cohort | 0.199 | 0.31 | 0.617 | 30 |
+
+Sub-millisecond at this scale. **No index was added** on the strength of these
+numbers; the roster here is 8 students, which is far too small to justify one.
+Index candidates belong to Phase 15.
+
+### What Phase 12 still did not measure
+
+Unchanged from §2, and not improved by this run:
+
+- **Detection recall** — needs photographs containing faces.
+- **Identification accuracy, FAR, FRR, EER, ROC/AUC, top-k** — need a
+  consented, labelled, multi-condition dataset with a disjoint
+  enrolment/test split.
+- **Every condition axis** — pose, lighting, occlusion, distance, face size,
+  blur, eyewear, crowding, visually-similar subjects.
+- **Demographic error rates.** Not performed, because an appropriately
+  authorized and representative benchmark dataset was not available. No
+  fairness claim is made in either direction.
+- **Live classroom capture with real faces.** The camera flow was exercised
+  (permission granted, device enumerated, wizard advanced, `<video>` mounted)
+  and the shutter correctly refused with *"No camera preview is attached"*
+  when no stream was bound — the Phase 5 fail-closed guard, verified live.
+  A stream did not attach in the automated context, so no real face was
+  captured in Phase 12.
+
+The accuracy harness (`bench/runner.py`) and its manifest format are ready and
+unchanged. What is missing is the dataset, not the tooling.
+
+### Technical readiness, stated narrowly
+
+On this hardware the model stack is **fast enough for the classroom workflow
+as designed**: ~235.5 ms of model compute for a 30-face 1080p capture, plus
+~11.731 ms of orchestration, against a teacher-facing flow that already
+shows a processing state. Memory is stable. Failures fail closed.
+
+That is a statement about **compute**, and about nothing else. Whether it
+*recognises the right people* is unmeasured, and no amount of latency data
+substitutes for that.
+
+### The two questions, kept apart
+
+- **Technical:** does the model perform sufficiently under the tested
+  conditions? — **Partially answered.** Compute: yes, on this hardware.
+  Accuracy: unmeasured.
+- **Legal / licensing:** are the weights and their training-data provenance
+  cleared for commercial production use? — **Unanswered, and untouched by
+  this phase.** Benchmarking a model does not clear it.
+
+`productionEligible` remains `false` and `FACE_AI_REQUIRE_PRODUCTION_MODEL`
+remains in force. Both release blockers stand.

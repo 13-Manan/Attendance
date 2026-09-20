@@ -1,0 +1,331 @@
+{
+  "harnessVersion": "1.0.0",
+  "generatedAt": "2026-09-20T16:10:30.452Z",
+  "environment": {
+    "node": "v26.0.0",
+    "platform": "darwin-25.6.0-arm64",
+    "cpus": 15,
+    "cpuModel": "Apple M5 Pro",
+    "totalMemGb": 48,
+    "faceAiBackend": "mock"
+  },
+  "disclaimer": "Orchestration cost only, measured against the mock face backend. Similarities are fixtures, not recognition results: NO accuracy, recall or false-acceptance metric is reported or implied. Real model inference time (see services/face-ai/bench/results/model-perf.json) is ADDED to these figures, not included in them.",
+  "enrollment": {
+    "students": 8,
+    "stats": {
+      "samples": 8,
+      "p50Ms": 2.861,
+      "p95Ms": 14.676,
+      "p99Ms": 14.676,
+      "minMs": 2.726,
+      "maxMs": 14.676,
+      "meanMs": 4.388
+    }
+  },
+  "byCaptureCount": [
+    {
+      "captureCount": 1,
+      "startSession": {
+        "samples": 8,
+        "p50Ms": 2.849,
+        "p95Ms": 6.999,
+        "p99Ms": 6.999,
+        "minMs": 2.575,
+        "maxMs": 6.999,
+        "meanMs": 3.528
+      },
+      "recognition": {
+        "samples": 8,
+        "p50Ms": 2.685,
+        "p95Ms": 5.09,
+        "p99Ms": 5.09,
+        "minMs": 2.519,
+        "maxMs": 5.09,
+        "meanMs": 3.198
+      },
+      "candidateGeneration": {
+        "samples": 8,
+        "p50Ms": 4.181,
+        "p95Ms": 7.593,
+        "p99Ms": 7.593,
+        "minMs": 3.804,
+        "maxMs": 7.593,
+        "meanMs": 4.793
+      },
+      "reviewBoardRead": {
+        "samples": 8,
+        "p50Ms": 1.638,
+        "p95Ms": 14.66,
+        "p99Ms": 14.66,
+        "minMs": 1.49,
+        "maxMs": 14.66,
+        "meanMs": 3.297
+      },
+      "endToEnd": {
+        "samples": 8,
+        "p50Ms": 11.731,
+        "p95Ms": 34.002,
+        "p99Ms": 34.002,
+        "minMs": 10.41,
+        "maxMs": 34.002,
+        "meanMs": 14.831
+      },
+      "lastBoardCounts": {
+        "total": 8,
+        "present": 0,
+        "absent": 0,
+        "awaitingDecision": 7,
+        "awaitingConfirmation": 1
+      }
+    },
+    {
+      "captureCount": 2,
+      "startSession": {
+        "samples": 8,
+        "p50Ms": 2.244,
+        "p95Ms": 2.697,
+        "p99Ms": 2.697,
+        "minMs": 1.947,
+        "maxMs": 2.697,
+        "meanMs": 2.33
+      },
+      "recognition": {
+        "samples": 8,
+        "p50Ms": 2.37,
+        "p95Ms": 2.641,
+        "p99Ms": 2.641,
+        "minMs": 2.304,
+        "maxMs": 2.641,
+        "meanMs": 2.449
+      },
+      "candidateGeneration": {
+        "samples": 8,
+        "p50Ms": 3.239,
+        "p95Ms": 3.976,
+        "p99Ms": 3.976,
+        "minMs": 2.961,
+        "maxMs": 3.976,
+        "meanMs": 3.478
+      },
+      "reviewBoardRead": {
+        "samples": 8,
+        "p50Ms": 1.309,
+        "p95Ms": 1.816,
+        "p99Ms": 1.816,
+        "minMs": 1.047,
+        "maxMs": 1.816,
+        "meanMs": 1.374
+      },
+      "endToEnd": {
+        "samples": 8,
+        "p50Ms": 9.139,
+        "p95Ms": 11.022,
+        "p99Ms": 11.022,
+        "minMs": 8.414,
+        "maxMs": 11.022,
+        "meanMs": 9.646
+      },
+      "lastBoardCounts": {
+        "total": 8,
+        "present": 0,
+        "absent": 0,
+        "awaitingDecision": 6,
+        "awaitingConfirmation": 2
+      }
+    },
+    {
+      "captureCount": 3,
+      "startSession": {
+        "samples": 8,
+        "p50Ms": 2.124,
+        "p95Ms": 2.359,
+        "p99Ms": 2.359,
+        "minMs": 1.998,
+        "maxMs": 2.359,
+        "meanMs": 2.158
+      },
+      "recognition": {
+        "samples": 8,
+        "p50Ms": 2.33,
+        "p95Ms": 2.493,
+        "p99Ms": 2.493,
+        "minMs": 2.276,
+        "maxMs": 2.493,
+        "meanMs": 2.348
+      },
+      "candidateGeneration": {
+        "samples": 8,
+        "p50Ms": 3.014,
+        "p95Ms": 3.437,
+        "p99Ms": 3.437,
+        "minMs": 2.622,
+        "maxMs": 3.437,
+        "meanMs": 3.077
+      },
+      "reviewBoardRead": {
+        "samples": 8,
+        "p50Ms": 1.17,
+        "p95Ms": 1.243,
+        "p99Ms": 1.243,
+        "minMs": 1.088,
+        "maxMs": 1.243,
+        "meanMs": 1.175
+      },
+      "endToEnd": {
+        "samples": 8,
+        "p50Ms": 8.691,
+        "p95Ms": 9.22,
+        "p99Ms": 9.22,
+        "minMs": 8.348,
+        "maxMs": 9.22,
+        "meanMs": 8.771
+      },
+      "lastBoardCounts": {
+        "total": 8,
+        "present": 0,
+        "absent": 0,
+        "awaitingDecision": 5,
+        "awaitingConfirmation": 3
+      }
+    }
+  ],
+  "classScopedSearch": [
+    {
+      "scenario": "A_in_selected_cohort",
+      "probeStudentId": "cmu5dxyv20022itguhlfu0ocx",
+      "probeIsEnrolledSomewhere": true,
+      "matchedStudentIds": [
+        "cmu5dxyv20022itguhlfu0ocx"
+      ],
+      "probeWasMatched": true,
+      "perFaceDecisions": [
+        "MATCHED"
+      ],
+      "advisoryResults": [
+        "PRESENT"
+      ],
+      "candidateScope": "cohort",
+      "candidatePoolSize": 8,
+      "detectedFaces": 1,
+      "ms": 2.422
+    },
+    {
+      "scenario": "B_same_institution_other_cohort",
+      "probeStudentId": "cmu5dxyv4002aitgugp840t9r",
+      "probeIsEnrolledSomewhere": true,
+      "matchedStudentIds": [],
+      "probeWasMatched": false,
+      "perFaceDecisions": [
+        "UNMATCHED"
+      ],
+      "advisoryResults": [],
+      "candidateScope": "cohort",
+      "candidatePoolSize": 8,
+      "detectedFaces": 1,
+      "ms": 2.204
+    },
+    {
+      "scenario": "C_other_institution",
+      "probeStudentId": "cmu5dxyvf003ritgu4vlej7p8",
+      "probeIsEnrolledSomewhere": true,
+      "matchedStudentIds": [],
+      "probeWasMatched": false,
+      "perFaceDecisions": [
+        "UNMATCHED"
+      ],
+      "advisoryResults": [],
+      "candidateScope": "cohort",
+      "candidatePoolSize": 8,
+      "detectedFaces": 1,
+      "ms": 2.16
+    },
+    {
+      "scenario": "D_unknown_person",
+      "probeStudentId": null,
+      "probeIsEnrolledSomewhere": false,
+      "matchedStudentIds": [],
+      "probeWasMatched": false,
+      "perFaceDecisions": [
+        "UNMATCHED"
+      ],
+      "advisoryResults": [],
+      "candidateScope": "cohort",
+      "candidatePoolSize": 8,
+      "detectedFaces": 1,
+      "ms": 2.145
+    }
+  ],
+  "recognitionByImageCount": [
+    {
+      "images": 1,
+      "enrolledTemplates": 8,
+      "stats": {
+        "samples": 10,
+        "p50Ms": 2.211,
+        "p95Ms": 2.399,
+        "p99Ms": 2.399,
+        "minMs": 2.142,
+        "maxMs": 2.399,
+        "meanMs": 2.23
+      }
+    },
+    {
+      "images": 2,
+      "enrolledTemplates": 8,
+      "stats": {
+        "samples": 10,
+        "p50Ms": 2.246,
+        "p95Ms": 2.294,
+        "p99Ms": 2.294,
+        "minMs": 2.206,
+        "maxMs": 2.294,
+        "meanMs": 2.251
+      }
+    },
+    {
+      "images": 3,
+      "enrolledTemplates": 8,
+      "stats": {
+        "samples": 10,
+        "p50Ms": 2.304,
+        "p95Ms": 2.389,
+        "p99Ms": 2.389,
+        "minMs": 2.159,
+        "maxMs": 2.389,
+        "meanMs": 2.301
+      }
+    }
+  ],
+  "database": {
+    "cohortRoster": {
+      "samples": 30,
+      "p50Ms": 0.153,
+      "p95Ms": 0.367,
+      "p99Ms": 0.609,
+      "minMs": 0.14,
+      "maxMs": 0.609,
+      "meanMs": 0.181
+    },
+    "embeddingMetadataForCohort": {
+      "samples": 30,
+      "p50Ms": 0.199,
+      "p95Ms": 0.31,
+      "p99Ms": 0.617,
+      "minMs": 0.19,
+      "maxMs": 0.617,
+      "meanMs": 0.228
+    }
+  },
+  "concurrency": {
+    "concurrentCorrections": 8,
+    "fulfilled": 8,
+    "rejected": 0,
+    "correctionRowsWritten": 1,
+    "duplicateCorrectionRows": 0,
+    "finalResult": "PRESENT",
+    "attendanceRecordsForSession": 8,
+    "rosterSize": 8,
+    "noDuplicateStudents": true,
+    "wallMs": 7.207
+  }
+}

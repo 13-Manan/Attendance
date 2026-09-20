@@ -1,0 +1,380 @@
+{
+  "environment": {
+    "harnessVersion": "1.0.0",
+    "generatedAt": "2026-09-20T16:06:28.179820+00:00",
+    "python": "3.11.16",
+    "opencv": "4.14.0",
+    "numpy": "2.4.6",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "processor": "arm",
+    "cpuCount": 15,
+    "backend": "opencv",
+    "artifacts": {
+      "detector": {
+        "file": "face_detection_yunet_2023mar.onnx",
+        "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+        "bytes": 232589
+      },
+      "recognizer": {
+        "file": "face_recognition_sface_2021dec.onnx",
+        "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+        "bytes": 38696353
+      }
+    },
+    "productionEligible": false,
+    "licensingNote": "Training-data provenance for YuNet/SFace is unresolved. This run measures compute only and establishes no commercial or legal clearance. productionEligible remains false."
+  },
+  "disclaimer": "Compute only. Detection figures are a forward-pass FLOOR measured on synthetic frames containing no faces; a real scene adds NMS and per-face work. Embedding figures are exact (fixed 112x112 input). NO accuracy, recall, false-acceptance or identification metric is reported or implied \u2014 that requires a consented dataset, which does not exist. See bench/README.md.",
+  "coldStart": {
+    "loadMs": 49.0,
+    "firstDetectAfterLoadMs": 29.9,
+    "rssBeforeLoadMb": 71.6,
+    "rssAfterLoadMb": 228.3,
+    "rssDeltaMb": 156.7
+  },
+  "detection": [
+    {
+      "resolution": "VGA",
+      "width": 640,
+      "height": 480,
+      "facesDetected": 0,
+      "stats": {
+        "samples": 30,
+        "p50_ms": 6.458,
+        "p95_ms": 7.112,
+        "p99_ms": 7.259,
+        "min_ms": 5.413,
+        "max_ms": 7.259,
+        "mean_ms": 6.534
+      }
+    },
+    {
+      "resolution": "720p",
+      "width": 1280,
+      "height": 720,
+      "facesDetected": 0,
+      "stats": {
+        "samples": 30,
+        "p50_ms": 14.518,
+        "p95_ms": 15.399,
+        "p99_ms": 15.641,
+        "min_ms": 13.663,
+        "max_ms": 15.641,
+        "mean_ms": 14.567
+      }
+    },
+    {
+      "resolution": "1080p",
+      "width": 1920,
+      "height": 1080,
+      "facesDetected": 0,
+      "stats": {
+        "samples": 30,
+        "p50_ms": 28.419,
+        "p95_ms": 29.944,
+        "p99_ms": 37.598,
+        "min_ms": 26.725,
+        "max_ms": 37.598,
+        "mean_ms": 28.847
+      }
+    },
+    {
+      "resolution": "1440p",
+      "width": 2560,
+      "height": 1440,
+      "facesDetected": 0,
+      "stats": {
+        "samples": 30,
+        "p50_ms": 45.768,
+        "p95_ms": 48.208,
+        "p99_ms": 53.803,
+        "min_ms": 44.078,
+        "max_ms": 53.803,
+        "mean_ms": 46.153
+      }
+    },
+    {
+      "resolution": "4K",
+      "width": 3840,
+      "height": 2160,
+      "facesDetected": 0,
+      "stats": {
+        "samples": 30,
+        "p50_ms": 97.989,
+        "p95_ms": 101.539,
+        "p99_ms": 103.522,
+        "min_ms": 95.594,
+        "max_ms": 103.522,
+        "mean_ms": 98.589
+      }
+    }
+  ],
+  "embedding": {
+    "embeddingDim": 128,
+    "stats": {
+      "samples": 30,
+      "p50_ms": 6.904,
+      "p95_ms": 7.58,
+      "p99_ms": 7.886,
+      "min_ms": 5.636,
+      "max_ms": 7.886,
+      "mean_ms": 6.833
+    }
+  },
+  "composedCost": [
+    {
+      "resolution": "720p",
+      "faces": 1,
+      "detectFloorMs": 14.518,
+      "embedTotalMs": 6.9,
+      "composedMs": 21.4,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "720p",
+      "faces": 5,
+      "detectFloorMs": 14.518,
+      "embedTotalMs": 34.5,
+      "composedMs": 49.0,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "720p",
+      "faces": 10,
+      "detectFloorMs": 14.518,
+      "embedTotalMs": 69.0,
+      "composedMs": 83.6,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "720p",
+      "faces": 20,
+      "detectFloorMs": 14.518,
+      "embedTotalMs": 138.1,
+      "composedMs": 152.6,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "720p",
+      "faces": 30,
+      "detectFloorMs": 14.518,
+      "embedTotalMs": 207.1,
+      "composedMs": 221.6,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "720p",
+      "faces": 50,
+      "detectFloorMs": 14.518,
+      "embedTotalMs": 345.2,
+      "composedMs": 359.7,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "1080p",
+      "faces": 1,
+      "detectFloorMs": 28.419,
+      "embedTotalMs": 6.9,
+      "composedMs": 35.3,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "1080p",
+      "faces": 5,
+      "detectFloorMs": 28.419,
+      "embedTotalMs": 34.5,
+      "composedMs": 62.9,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "1080p",
+      "faces": 10,
+      "detectFloorMs": 28.419,
+      "embedTotalMs": 69.0,
+      "composedMs": 97.5,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "1080p",
+      "faces": 20,
+      "detectFloorMs": 28.419,
+      "embedTotalMs": 138.1,
+      "composedMs": 166.5,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "1080p",
+      "faces": 30,
+      "detectFloorMs": 28.419,
+      "embedTotalMs": 207.1,
+      "composedMs": 235.5,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    },
+    {
+      "resolution": "1080p",
+      "faces": 50,
+      "detectFloorMs": 28.419,
+      "embedTotalMs": 345.2,
+      "composedMs": 373.6,
+      "basis": "detect p50 (floor, no faces) + faces x embed p50"
+    }
+  ],
+  "stability": {
+    "iterations": 200,
+    "rssStartMb": 1291.7,
+    "rssEndMb": 1292.7,
+    "rssGrowthMb": 1.0,
+    "checkpoints": [
+      {
+        "iteration": 40,
+        "rssMb": 1291.7
+      },
+      {
+        "iteration": 80,
+        "rssMb": 1292.6
+      },
+      {
+        "iteration": 120,
+        "rssMb": 1292.6
+      },
+      {
+        "iteration": 160,
+        "rssMb": 1292.7
+      },
+      {
+        "iteration": 200,
+        "rssMb": 1292.7
+      }
+    ]
+  },
+  "failureModes": [
+    {
+      "case": "empty_string",
+      "outcome": "raised",
+      "detail": "ImageDecodeError",
+      "ms": 0.0,
+      "fabricatedFace": false
+    },
+    {
+      "case": "not_base64",
+      "outcome": "raised",
+      "detail": "ImageDecodeError",
+      "ms": 0.0,
+      "fabricatedFace": false
+    },
+    {
+      "case": "base64_but_not_an_image",
+      "outcome": "raised",
+      "detail": "ImageDecodeError",
+      "ms": 0.01,
+      "fabricatedFace": false
+    },
+    {
+      "case": "truncated_jpeg",
+      "outcome": "raised",
+      "detail": "ImageDecodeError",
+      "ms": 0.01,
+      "fabricatedFace": false
+    },
+    {
+      "case": "one_pixel",
+      "outcome": "returned",
+      "detail": "0 faces",
+      "ms": 0.48,
+      "fabricatedFace": false
+    }
+  ],
+  "concurrency": [
+    {
+      "concurrency": 1,
+      "requests": 4,
+      "completed": 4,
+      "failures": 0,
+      "wallMs": 60.2,
+      "throughputPerSec": 66.46,
+      "stats": {
+        "samples": 4,
+        "p50_ms": 15.03,
+        "p95_ms": 15.401,
+        "p99_ms": 15.401,
+        "min_ms": 14.403,
+        "max_ms": 15.401,
+        "mean_ms": 14.975
+      },
+      "rssMb": 1293.0
+    },
+    {
+      "concurrency": 5,
+      "requests": 20,
+      "completed": 20,
+      "failures": 0,
+      "wallMs": 149.9,
+      "throughputPerSec": 133.41,
+      "stats": {
+        "samples": 20,
+        "p50_ms": 35.675,
+        "p95_ms": 45.754,
+        "p99_ms": 50.917,
+        "min_ms": 19.067,
+        "max_ms": 50.917,
+        "mean_ms": 35.134
+      },
+      "rssMb": 1397.5
+    },
+    {
+      "concurrency": 10,
+      "requests": 40,
+      "completed": 40,
+      "failures": 0,
+      "wallMs": 373.8,
+      "throughputPerSec": 107.01,
+      "stats": {
+        "samples": 40,
+        "p50_ms": 82.312,
+        "p95_ms": 172.783,
+        "p99_ms": 230.161,
+        "min_ms": 18.756,
+        "max_ms": 230.161,
+        "mean_ms": 90.67
+      },
+      "rssMb": 1568.6
+    },
+    {
+      "concurrency": 25,
+      "requests": 100,
+      "completed": 100,
+      "failures": 0,
+      "wallMs": 741.6,
+      "throughputPerSec": 134.85,
+      "stats": {
+        "samples": 100,
+        "p50_ms": 123.542,
+        "p95_ms": 322.593,
+        "p99_ms": 407.66,
+        "min_ms": 24.9,
+        "max_ms": 530.114,
+        "mean_ms": 136.623
+      },
+      "rssMb": 1755.0
+    },
+    {
+      "concurrency": 50,
+      "requests": 200,
+      "completed": 200,
+      "failures": 0,
+      "wallMs": 1645.3,
+      "throughputPerSec": 121.56,
+      "stats": {
+        "samples": 200,
+        "p50_ms": 138.196,
+        "p95_ms": 434.57,
+        "p99_ms": 516.023,
+        "min_ms": 30.032,
+        "max_ms": 545.176,
+        "mean_ms": 185.435
+      },
+      "rssMb": 1755.0
+    }
+  ]
+}
