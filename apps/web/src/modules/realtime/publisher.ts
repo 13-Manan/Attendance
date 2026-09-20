@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { env } from "@/lib/env";
+import { PostgresAttendanceEventPublisher } from "./publisher-postgres";
 import type {
   AttendanceEventPublisher,
   AttendanceRealtimeEvent,
@@ -6,16 +8,20 @@ import type {
 } from "./types";
 
 /**
- * In-memory, single-instance pub/sub (ADR-0004). Sufficient for local dev
- * and a single Next.js server process. Once deployed behind more than one
- * instance, events published on instance A won't reach a client connected to
- * instance B — upgrade to Postgres LISTEN/NOTIFY or Redis pub/sub at that
- * point, behind this same AttendanceEventPublisher interface.
+ * In-memory, single-instance pub/sub (ADR-0004).
+ *
+ * Correct only when exactly one process is running: an event published on
+ * instance A never reaches a client connected to instance B. Phase 15 took
+ * the upgrade path that ADR named — see `publisher-postgres.ts`, which carries
+ * events over `LISTEN`/`NOTIFY` behind this same interface and is now the
+ * default. This implementation is kept for `REALTIME_BACKEND=memory`: a single
+ * dev process, and the unit tests, which have no reason to open a second
+ * database connection to talk to themselves.
  */
 const sessionChannel = (sessionId: string) => `session:${sessionId}`;
 const studentChannel = (studentId: string) => `student:${studentId}`;
 
-class InMemoryAttendanceEventPublisher implements AttendanceEventPublisher {
+export class InMemoryAttendanceEventPublisher implements AttendanceEventPublisher {
   private readonly emitter = new EventEmitter().setMaxListeners(0);
 
   publish(event: AttendanceRealtimeEvent): void {
@@ -42,5 +48,19 @@ class InMemoryAttendanceEventPublisher implements AttendanceEventPublisher {
   }
 }
 
+/**
+ * The transport this process uses.
+ *
+ * A module singleton: the listener socket and the local subscriber table only
+ * mean anything if every SSE connection in the process shares them.
+ *
+ * `DATABASE_URL` is reused deliberately — the transport needs no credential of
+ * its own, so there is no new secret to provision, rotate, or accidentally
+ * expose. Nothing here is `NEXT_PUBLIC_`, and no part of it is reachable from
+ * the browser: clients speak to `/api/realtime/**`, which authorizes them and
+ * then subscribes on their behalf.
+ */
 export const attendanceEventPublisher: AttendanceEventPublisher =
-  new InMemoryAttendanceEventPublisher();
+  env.REALTIME_BACKEND === "memory"
+    ? new InMemoryAttendanceEventPublisher()
+    : new PostgresAttendanceEventPublisher(env.DATABASE_URL);

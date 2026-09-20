@@ -866,3 +866,34 @@ model AuditLog {
   @@index([institutionId, createdAt(sort: Desc)])
   @@index([entityType, entityId])
 }
+
+/// Token-bucket state for the public API rate limiter, shared across replicas.
+///
+/// Phase 15. The limiter counted in process memory, so behind the
+/// `maxReplicas: 5` this app is already configured for, an API key received up
+/// to five times its allowance and lost its counters on every restart. This
+/// table is the shared state that fixes it.
+///
+/// Deliberately free-standing: no foreign key to Institution or ApiKey. The
+/// key is an opaque string (`<apiKeyId>:<bucket>`) and a row is disposable
+/// bookkeeping, not a record of anything. A cascade from ApiKey would put a
+/// lock on the hot path of every request, and an orphaned row costs nothing
+/// because it expires.
+///
+/// Rows are ephemeral. `expiresAt` is what makes a bucket forgettable: past
+/// it, the bucket is indistinguishable from a full one, because an untouched
+/// bucket refills to capacity anyway. Dropping this table loses nothing but
+/// the current minute's counters.
+model RateLimitBucket {
+  /// `<apiKeyId>:<bucket>` — see `rateLimitKey()`. Opaque here on purpose.
+  key       String   @id
+  /// Fractional tokens remaining as of `updatedAt`. Fractional because refill
+  /// is continuous; rounding here would quietly hand out free requests.
+  tokens    Float
+  updatedAt DateTime
+  /// When this row stops meaning anything. Postgres has no row TTL, so the
+  /// limiter treats an expired row as full and a sweep deletes it.
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}

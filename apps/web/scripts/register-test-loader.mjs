@@ -32,7 +32,14 @@ registerHooks({
       return nextResolve(withResolvedExtension(aliasedUrl), context);
     }
 
-    if (specifier.startsWith("./") || specifier.startsWith("../")) {
+    // Only first-party source needs the extensionless rewrite. A dependency
+    // resolves its own internals perfectly well, and rewriting them breaks
+    // packages whose CommonJS entry points are reached through an ESM wrapper
+    // — `pg` was the one that surfaced this, via `./client` inside pg/lib.
+    if (
+      (specifier.startsWith("./") || specifier.startsWith("../")) &&
+      !context.parentURL?.includes("/node_modules/")
+    ) {
       const candidateUrl = new URL(specifier, context.parentURL).href;
       const resolved = withResolvedExtension(candidateUrl);
       if (resolved !== candidateUrl) {

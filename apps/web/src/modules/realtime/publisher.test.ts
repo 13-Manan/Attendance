@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { attendanceEventPublisher } from "./publisher.ts";
+import { InMemoryAttendanceEventPublisher } from "./publisher.ts";
 import type { AttendanceRealtimeEvent, StudentAttendanceUpdatedEvent } from "./types.ts";
 
 /**
@@ -17,7 +17,16 @@ import type { AttendanceRealtimeEvent, StudentAttendanceUpdatedEvent } from "./t
  * results.
  *
  * So these tests are about who does *not* receive an event.
+ *
+ * Phase 15 note: this exercises `InMemoryAttendanceEventPublisher` by name
+ * rather than the exported singleton, which is now the Postgres transport by
+ * default. The channel split is a property of both implementations and is
+ * asserted for the shared one in `publisher-postgres.integration.test.ts`;
+ * what is unit-testable without a database is this one, and these assertions
+ * rely on its synchronous delivery.
  */
+
+const publisher = new InMemoryAttendanceEventPublisher();
 
 function studentEvent(
   studentId: string,
@@ -36,9 +45,9 @@ function studentEvent(
 
 test("a student receives their own result", () => {
   const seen: StudentAttendanceUpdatedEvent[] = [];
-  const off = attendanceEventPublisher.subscribeToStudent("stu-1", (e) => seen.push(e));
+  const off = publisher.subscribeToStudent("stu-1", (e) => seen.push(e));
 
-  attendanceEventPublisher.publishToStudent("stu-1", studentEvent("stu-1"));
+  publisher.publishToStudent("stu-1", studentEvent("stu-1"));
   off();
 
   assert.equal(seen.length, 1);
@@ -48,10 +57,10 @@ test("a student receives their own result", () => {
 test("one student's result never reaches another student's channel", () => {
   const mine: StudentAttendanceUpdatedEvent[] = [];
   const theirs: StudentAttendanceUpdatedEvent[] = [];
-  const offMine = attendanceEventPublisher.subscribeToStudent("stu-1", (e) => mine.push(e));
-  const offTheirs = attendanceEventPublisher.subscribeToStudent("stu-2", (e) => theirs.push(e));
+  const offMine = publisher.subscribeToStudent("stu-1", (e) => mine.push(e));
+  const offTheirs = publisher.subscribeToStudent("stu-2", (e) => theirs.push(e));
 
-  attendanceEventPublisher.publishToStudent("stu-1", studentEvent("stu-1"));
+  publisher.publishToStudent("stu-1", studentEvent("stu-1"));
   offMine();
   offTheirs();
 
@@ -63,7 +72,7 @@ test("a session event does not leak onto a student channel with the same id", ()
   // The namespaces are prefixed for exactly this reason: a session id and a
   // student id are both opaque cuids and could collide as bare channel keys.
   const student: StudentAttendanceUpdatedEvent[] = [];
-  const off = attendanceEventPublisher.subscribeToStudent("shared-id", (e) => student.push(e));
+  const off = publisher.subscribeToStudent("shared-id", (e) => student.push(e));
 
   const sessionEvent: AttendanceRealtimeEvent = {
     type: "attendance-session-finalized",
@@ -73,7 +82,7 @@ test("a session event does not leak onto a student channel with the same id", ()
     finalizedAt: "2026-09-20T09:00:00.000Z",
     occurredAt: "2026-09-20T09:00:00.000Z",
   };
-  attendanceEventPublisher.publish(sessionEvent);
+  publisher.publish(sessionEvent);
   off();
 
   assert.equal(
@@ -85,9 +94,9 @@ test("a session event does not leak onto a student channel with the same id", ()
 
 test("a student channel does not receive another session's whole-class event", () => {
   const board: AttendanceRealtimeEvent[] = [];
-  const off = attendanceEventPublisher.subscribe("sess-1", (e) => board.push(e));
+  const off = publisher.subscribe("sess-1", (e) => board.push(e));
 
-  attendanceEventPublisher.publishToStudent("stu-1", studentEvent("stu-1"));
+  publisher.publishToStudent("stu-1", studentEvent("stu-1"));
   off();
 
   assert.equal(board.length, 0, "the student fan-out is not an extra write to the board");
@@ -95,10 +104,10 @@ test("a student channel does not receive another session's whole-class event", (
 
 test("unsubscribing stops delivery, so a closed portal tab receives nothing", () => {
   const seen: StudentAttendanceUpdatedEvent[] = [];
-  const off = attendanceEventPublisher.subscribeToStudent("stu-1", (e) => seen.push(e));
+  const off = publisher.subscribeToStudent("stu-1", (e) => seen.push(e));
   off();
 
-  attendanceEventPublisher.publishToStudent("stu-1", studentEvent("stu-1"));
+  publisher.publishToStudent("stu-1", studentEvent("stu-1"));
 
   assert.equal(seen.length, 0);
 });
@@ -109,10 +118,10 @@ test("two tabs of the same student both receive the update", () => {
   // is also what a resumed stream looks like.
   const tabA: StudentAttendanceUpdatedEvent[] = [];
   const tabB: StudentAttendanceUpdatedEvent[] = [];
-  const offA = attendanceEventPublisher.subscribeToStudent("stu-1", (e) => tabA.push(e));
-  const offB = attendanceEventPublisher.subscribeToStudent("stu-1", (e) => tabB.push(e));
+  const offA = publisher.subscribeToStudent("stu-1", (e) => tabA.push(e));
+  const offB = publisher.subscribeToStudent("stu-1", (e) => tabB.push(e));
 
-  attendanceEventPublisher.publishToStudent("stu-1", studentEvent("stu-1"));
+  publisher.publishToStudent("stu-1", studentEvent("stu-1"));
   offA();
   offB();
 
@@ -124,15 +133,15 @@ test("publishing to a channel nobody is listening on is not an error", () => {
   // The ordinary case: attendance is finalized at 09:05 and nobody has the
   // portal open. Finalization must not depend on an audience.
   assert.doesNotThrow(() => {
-    attendanceEventPublisher.publishToStudent("nobody-here", studentEvent("nobody-here"));
+    publisher.publishToStudent("nobody-here", studentEvent("nobody-here"));
   });
 });
 
 test("a correction carries the revised result, not the original", () => {
   const seen: StudentAttendanceUpdatedEvent[] = [];
-  const off = attendanceEventPublisher.subscribeToStudent("stu-1", (e) => seen.push(e));
+  const off = publisher.subscribeToStudent("stu-1", (e) => seen.push(e));
 
-  attendanceEventPublisher.publishToStudent(
+  publisher.publishToStudent(
     "stu-1",
     studentEvent("stu-1", { finalResult: "ABSENT", isFinalized: true }),
   );

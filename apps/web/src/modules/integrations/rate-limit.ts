@@ -4,25 +4,26 @@
  * ## The abstraction is the deliverable
  *
  * `RateLimiter` is an interface with one method, and every caller depends on
- * the interface. The in-process token bucket below is the implementation this
- * build ships; a Redis or Upstash implementation is the same 20 lines against
- * a `INCR`/`EXPIRE` pair or a Lua script, and swapping it changes no route, no
- * service, and no test.
+ * the interface. That is what let Phase 15 move the state into Postgres
+ * without touching a route, a service or a caller: see
+ * `rate-limit-postgres.ts`, selected by `RATE_LIMIT_BACKEND`.
  *
- * ## Read this before trusting the in-process limiter in production
+ * ## Which implementation you are getting
  *
- * `MemoryRateLimiter` counts *per process*. Behind two app instances an API
- * key gets twice its limit; behind serverless functions that scale to n, it
- * gets n times its limit and loses its counters on every cold start. That is
- * not a bug to be fixed here — a correct distributed limiter needs shared
- * state, and inventing one over Postgres would put a write on the hot path of
- * every read request.
+ * `PostgresRateLimiter` is the default and is the one that is correct behind
+ * more than one replica. `MemoryRateLimiter` below counts *per process*: with
+ * it selected, two instances give an API key twice its limit, five give it
+ * five times, and every restart hands back a full bucket. It remains here for
+ * a single-process developer checkout that has no reason to write a row per
+ * request, and for a deployment that terminates rate limiting at its gateway.
  *
- * So the honest statement: this limiter stops a runaway integration script
- * and a misconfigured polling loop, which is what it is for. It is not a
- * defence against a determined attacker, and on a multi-instance deployment
- * the real ceiling is `instances × limit`. `RATE_LIMIT_BACKEND` in
- * docs/INTEGRATIONS.md records what to set before that matters.
+ * Neither is a defence against a determined attacker with many keys; both stop
+ * a runaway integration script and a misconfigured polling loop, which is what
+ * this is for.
+ *
+ * The bucket arithmetic below is the specification. The Postgres
+ * implementation reproduces it in SQL and is tested against this one for
+ * agreement, so a change here must be mirrored there.
  *
  * ## Why a token bucket
  *
@@ -35,6 +36,9 @@
  *
  * Pure except for the clock, which is injected. See rate-limit.test.ts.
  */
+
+import { env } from "@/lib/env";
+import { PostgresRateLimiter } from "./rate-limit-postgres";
 
 export interface RateLimitRule {
   /** Maximum requests that can arrive back-to-back. Bucket capacity. */
@@ -199,13 +203,20 @@ export class NoopRateLimiter implements RateLimiter {
 }
 
 /**
- * The process-wide limiter.
+ * The limiter this process uses.
  *
- * Module-level singleton for the same reason `lib/prisma.ts` is one: the
- * state only means anything if every request shares it. A limiter constructed
- * per request would permit every request.
+ * Module-level singleton for the same reason `lib/prisma.ts` is one: the state
+ * only means anything if every request shares it. A limiter constructed per
+ * request would permit every request.
+ *
+ * Phase 15: the default is now the Postgres-backed limiter, so the state is
+ * shared by every replica rather than by every request *within* a replica.
+ * `RATE_LIMIT_BACKEND=memory` restores the old behaviour for a single-process
+ * checkout. The import is lazy so that selecting `memory` — which is what the
+ * unit tests do — pulls in neither Prisma nor a database connection.
  */
-export const rateLimiter: RateLimiter = new MemoryRateLimiter();
+export const rateLimiter: RateLimiter =
+  env.RATE_LIMIT_BACKEND === "memory" ? new MemoryRateLimiter() : new PostgresRateLimiter();
 
 /**
  * Bucket identity.
