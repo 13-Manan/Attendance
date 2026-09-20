@@ -476,3 +476,45 @@ export function listCohortStudentCounts(
     })
     .then((rows) => rows.map((r) => ({ cohortId: r.cohortId, students: r._count._all })));
 }
+
+// ---------------------------------------------------------------------------
+// Student enrollment context
+// ---------------------------------------------------------------------------
+
+const STUDENT_ENROLLMENT_SELECT = {
+  cohortId: true,
+  cohort: {
+    select: {
+      name: true,
+      termLabel: true,
+      academicUnit: { select: { name: true, kind: true } },
+      academicSession: { select: { name: true, isCurrent: true } },
+    },
+  },
+} as const;
+
+export type StudentEnrollmentRow = Prisma.EnrollmentGetPayload<{
+  select: typeof STUDENT_ENROLLMENT_SELECT;
+}>;
+
+/**
+ * Which class a student is actually in, and under which academic year.
+ *
+ * The portal knew a student's attendance before it knew where they sat: the
+ * header could say "82%" without saying 82% of what. This is the missing
+ * half — class, section/department and academic year, so a figure on the
+ * student's own dashboard is attributable to something.
+ *
+ * ACTIVE enrollments only. A student who moved class mid-year still has the
+ * old register in their history, but the heading of their portal should name
+ * the class they are in now, not every class they have ever been in.
+ */
+export function listStudentEnrollmentContext(
+  studentId: string,
+): Promise<StudentEnrollmentRow[]> {
+  return prisma.enrollment.findMany({
+    where: { studentId, status: "ACTIVE" },
+    select: STUDENT_ENROLLMENT_SELECT,
+    orderBy: [{ enrolledAt: "desc" }],
+  });
+}

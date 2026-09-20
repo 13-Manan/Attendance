@@ -1,7 +1,13 @@
 import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
-import { getStudentDashboard } from "@/modules/attendance-analytics/service";
-import type { StudentAttendanceItem } from "@/modules/attendance-analytics/types";
+import {
+  describeEnrollment,
+  getStudentDashboard,
+} from "@/modules/attendance-analytics/service";
+import type {
+  AttendanceTrendPoint,
+  StudentAttendanceItem,
+} from "@/modules/attendance-analytics/types";
 import {
   RateBar,
   RatePercent,
@@ -54,6 +60,27 @@ export default async function StudentPortalHome() {
           {dashboard.studentCode} ·{" "}
           {isCollege ? "Subject-wise attendance" : "Daily attendance"}
         </p>
+        {/* A percentage is meaningless without the class and year it is a
+            percentage of. Most students have exactly one active enrollment;
+            the list handles the student who has moved or takes an elective
+            cohort, rather than silently showing the first one. */}
+        {dashboard.enrollments.length > 0 ? (
+          <ul className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-neutral-600">
+            {dashboard.enrollments.map((enrollment) => (
+              <li
+                key={enrollment.cohortId}
+                className="rounded-md border border-neutral-200 px-2 py-0.5"
+              >
+                {describeEnrollment(enrollment).map((part, index) => (
+                  <span key={part} className={index === 0 ? "font-medium text-neutral-900" : ""}>
+                    {index === 0 ? "" : " · "}
+                    {part}
+                  </span>
+                ))}
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </header>
 
       <StatGrid>
@@ -115,32 +142,37 @@ export default async function StudentPortalHome() {
       {isCollege ? (
         <Panel
           title="Subject-wise attendance"
-          description="Counts only classes your faculty has confirmed."
+          description="Counts only classes your faculty has confirmed. Open a subject for its lecture history."
         >
           {dashboard.subjects.length === 0 ? (
             <EmptyState>No subject attendance recorded yet.</EmptyState>
           ) : (
             <ul className="flex flex-col gap-4">
               {dashboard.subjects.map((subject) => (
-                <li key={subject.cohortSubjectId} className="flex flex-col gap-1.5">
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                    <span className="text-sm font-medium text-neutral-900">
-                      {subject.subjectName}
-                      {subject.subjectCode ? (
-                        <span className="ml-2 text-xs font-normal text-neutral-500">
-                          {subject.subjectCode}
-                        </span>
-                      ) : null}
+                <li key={subject.cohortSubjectId}>
+                  <Link
+                    href={`/portal/subjects/${subject.cohortSubjectId}`}
+                    className="-mx-2 flex flex-col gap-1.5 rounded-md px-2 py-1.5 hover:bg-neutral-50"
+                  >
+                    <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                      <span className="text-sm font-medium text-neutral-900">
+                        {subject.subjectName}
+                        {subject.subjectCode ? (
+                          <span className="ml-2 text-xs font-normal text-neutral-500">
+                            {subject.subjectCode}
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="text-sm font-semibold tabular-nums text-neutral-900">
+                        <RatePercent rate={subject.rate} />
+                      </span>
+                    </div>
+                    <RateBar rate={subject.rate} threshold={dashboard.lowAttendanceThreshold} />
+                    <span className="text-xs text-neutral-500">
+                      Present: {subject.rate.present} · Total: {subject.rate.total}
+                      {subject.facultyName ? ` · ${subject.facultyName}` : ""}
                     </span>
-                    <span className="text-sm font-semibold tabular-nums text-neutral-900">
-                      <RatePercent rate={subject.rate} />
-                    </span>
-                  </div>
-                  <RateBar rate={subject.rate} threshold={dashboard.lowAttendanceThreshold} />
-                  <span className="text-xs text-neutral-500">
-                    Present: {subject.rate.present} · Total: {subject.rate.total}
-                    {subject.facultyName ? ` · ${subject.facultyName}` : ""}
-                  </span>
+                  </Link>
                 </li>
               ))}
             </ul>
@@ -175,6 +207,15 @@ export default async function StudentPortalHome() {
         </Panel>
       )}
 
+      {dashboard.trend.length > 1 ? (
+        <Panel title="Trend" description="Your attendance month by month.">
+          <TrendChart
+            points={dashboard.trend}
+            threshold={dashboard.lowAttendanceThreshold}
+          />
+        </Panel>
+      ) : null}
+
       <Panel
         title="Recent attendance"
         action={
@@ -193,6 +234,79 @@ export default async function StudentPortalHome() {
           </ul>
         )}
       </Panel>
+    </div>
+  );
+}
+
+/**
+ * The trend, as bars.
+ *
+ * Deliberately not a line chart: a month with four lectures and a month with
+ * twenty are not comparable points on a line, and joining them draws a slope
+ * that was never measured. Each month is its own bar, labelled with its own
+ * denominator, and the table underneath is the real content — the bars are
+ * the decoration. Everything here is also stated in text, because a chart
+ * that only works visually communicates by colour and shape alone.
+ */
+function TrendChart({
+  points,
+  threshold,
+}: {
+  points: AttendanceTrendPoint[];
+  threshold: number;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <ol className="flex items-end gap-2 sm:gap-3" aria-hidden>
+        {points.map((point) => {
+          const height = point.rate.percentage ?? 0;
+          const low = point.rate.percentage !== null && point.rate.percentage < threshold;
+          return (
+            <li key={point.month} className="flex min-w-0 flex-1 flex-col items-center gap-1">
+              <div className="flex h-24 w-full items-end rounded-sm bg-neutral-100">
+                <div
+                  className={`w-full rounded-sm ${low ? "bg-amber-500" : "bg-neutral-900"}`}
+                  style={{ height: `${Math.max(height, 2)}%` }}
+                />
+              </div>
+              <span className="w-full truncate text-center text-[10px] text-neutral-500">
+                {point.label}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+      <table className="w-full border-collapse text-left">
+        <caption className="sr-only">Attendance by month</caption>
+        <thead>
+          <tr className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
+            <th scope="col" className="py-1.5 pr-4 font-medium">
+              Month
+            </th>
+            <th scope="col" className="py-1.5 pr-4 font-medium">
+              Present
+            </th>
+            <th scope="col" className="py-1.5 font-medium">
+              Attendance
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {points.map((point) => (
+            <tr key={point.month} className="border-b border-neutral-100 last:border-0">
+              <th scope="row" className="py-1.5 pr-4 text-sm font-normal text-neutral-900">
+                {point.label}
+              </th>
+              <td className="py-1.5 pr-4 text-sm tabular-nums text-neutral-600">
+                {point.rate.present} / {point.rate.total}
+              </td>
+              <td className="py-1.5 text-sm font-medium tabular-nums text-neutral-900">
+                <RatePercent rate={point.rate} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

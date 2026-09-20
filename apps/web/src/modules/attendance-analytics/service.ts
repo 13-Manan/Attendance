@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import {
   hasPermission,
@@ -21,12 +22,15 @@ import type {
   SessionScope,
   SessionSummaryRow,
   SessionWithStudentsRow,
+  StudentEnrollmentRow,
   StudentRecordRow,
 } from "./repository";
+import { SESSION_STATUSES } from "./types";
 import type {
   AbsentStudentEntry,
   AttendanceCorrectionEntry,
   AttendanceRate,
+  AttendanceTrendPoint,
   CohortAttendanceHistory,
   CohortAttendanceHistoryEntry,
   CohortCorrectionEntry,
@@ -34,6 +38,8 @@ import type {
   DailyAttendanceSummary,
   FacultyCohortSummary,
   FacultyDashboard,
+  FacultySessionFilters,
+  FacultySessionList,
   FacultySessionSummary,
   FacultySubjectSummary,
   InstitutionAttendanceReport,
@@ -42,6 +48,8 @@ import type {
   StudentAttendanceDetail,
   StudentAttendanceItem,
   StudentDashboard,
+  StudentEnrollmentContext,
+  StudentSubjectDetail,
   SubjectAttendanceSummary,
 } from "./types";
 
@@ -176,6 +184,7 @@ export interface AnalyticsDeps {
   getStudentProfileByUserId?: AsDep<typeof repo.getStudentProfileByUserId>;
   listFinalizedRecordsForStudent?: AsDep<typeof repo.listFinalizedRecordsForStudent>;
   listActiveCohortIdsForStudent?: AsDep<typeof repo.listActiveCohortIdsForStudent>;
+  listStudentEnrollmentContext?: AsDep<typeof repo.listStudentEnrollmentContext>;
   countUnconfirmedSessionsToday?: AsDep<typeof repo.countUnconfirmedSessionsToday>;
   getAttendanceRecordDetail?: AsDep<typeof repo.getAttendanceRecordDetail>;
   listCohortFacultyLinks?: AsDep<typeof repo.listCohortFacultyLinks>;
@@ -293,6 +302,103 @@ export function summarizeByDay(rows: StudentRecordRow[]): DailyAttendanceSummary
   }));
 }
 
+/** `Enrollment` rows as the portal header needs them. */
+export function toEnrollmentContext(rows: StudentEnrollmentRow[]): StudentEnrollmentContext[] {
+  return rows.map((row) => ({
+    cohortId: row.cohortId,
+    cohortName: row.cohort?.name ?? "",
+    termLabel: row.cohort?.termLabel ?? null,
+    academicUnitName: row.cohort?.academicUnit?.name ?? null,
+    academicSessionName: row.cohort?.academicSession?.name ?? null,
+    isCurrentSession: row.cohort?.academicSession?.isCurrent ?? false,
+  }));
+}
+
+/**
+ * The enrollment context as a line of distinct parts.
+ *
+ * Every part is optional in the data and several of them routinely say the
+ * same thing twice. A school class sits in a unit called "Section A" while the
+ * class itself is called "Grade 8 - Section A", and its term label and its
+ * academic session are both "2026-2027" — rendered verbatim that is
+ * "Grade 8 - Section A · Section A · 2026-2027 · 2026-2027", which reads like
+ * a bug. A college is the mirror image: term "2026 Odd" sits beside session
+ * "2026 Odd Semester", where the *longer* string is the one worth keeping.
+ *
+ * So redundancy is judged in both directions — a candidate is dropped when an
+ * existing part already contains it, and replaces an existing part when it
+ * contains that instead. The class name is never dropped: it is the thing
+ * being named, and a longer unit name that swallowed it would leave the
+ * student's own class off their own dashboard.
+ *
+ * Dropping, never rewriting. No label here is invented; institutions that
+ * genuinely name these things differently keep all four parts.
+ */
+export function describeEnrollment(context: StudentEnrollmentContext): string[] {
+  const parts = context.cohortName ? [context.cohortName] : [];
+  const covers = (a: string, b: string) => a.toLowerCase().includes(b.toLowerCase());
+
+  for (const candidate of [
+    context.academicUnitName,
+    context.termLabel,
+    context.academicSessionName,
+  ]) {
+    if (!candidate) continue;
+    if (parts.some((part) => covers(part, candidate))) continue;
+    // More specific than something already shown: take its place rather than
+    // sitting next to it.
+    for (let i = parts.length - 1; i >= 1; i--) {
+      if (covers(candidate, parts[i])) parts.splice(i, 1);
+    }
+    parts.push(candidate);
+  }
+
+  return parts;
+}
+
+const TREND_MONTHS = 6;
+
+/**
+ * The student's own attendance, by calendar month, oldest first.
+ *
+ * Months with no class are left out rather than drawn at 0%. A student who
+ * had no lectures in December did not attend 0% of them, and a chart is
+ * exactly where that distinction gets lost — the same reason `AttendanceRate`
+ * reports a null percentage instead of zero.
+ *
+ * Bucketed in UTC to agree with `utcDayRange` and with `sessionDate`, which
+ * is stored as a UTC calendar date.
+ */
+export function summarizeTrend(
+  rows: StudentRecordRow[],
+  months: number = TREND_MONTHS,
+): AttendanceTrendPoint[] {
+  const buckets = new Map<string, StudentRecordRow[]>();
+  for (const row of rows) {
+    const date = row.session.sessionDate;
+    const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(row);
+    else buckets.set(key, [row]);
+  }
+
+  return Array.from(buckets.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-months)
+    .map(([month, bucketRows]) => {
+      const [year, monthIndex] = month.split("-").map(Number);
+      return {
+        month,
+        label: new Date(Date.UTC(year, monthIndex - 1, 1)).toLocaleDateString("en-GB", {
+          month: "short",
+          year: "2-digit",
+          timeZone: "UTC",
+        }),
+        rate: rateOf(bucketRows),
+      };
+    });
+}
+
 /**
  * The student dashboard: today, overall, and the breakdown their institution
  * actually uses (subject-wise for college, day-by-day for school).
@@ -319,7 +425,12 @@ export async function getStudentDashboard(
 
   const listCohortIds = deps.listActiveCohortIdsForStudent ?? repo.listActiveCohortIdsForStudent;
   const countUnconfirmed = deps.countUnconfirmedSessionsToday ?? repo.countUnconfirmedSessionsToday;
-  const cohortIds = await listCohortIds(student.id);
+  const listEnrollments =
+    deps.listStudentEnrollmentContext ?? repo.listStudentEnrollmentContext;
+  const [cohortIds, enrollmentRows] = await Promise.all([
+    listCohortIds(student.id),
+    listEnrollments(student.id),
+  ]);
   const todayAwaitingConfirmation = await countUnconfirmed(cohortIds, start, end);
 
   const { mode, lowAttendanceThreshold } = await attendanceModeFor(student.institutionId, deps);
@@ -338,6 +449,50 @@ export async function getStudentDashboard(
     subjects: mode === "SUBJECT_WISE" ? summarizeBySubject(rows) : [],
     daily: summarizeByDay(rows).slice(0, 30),
     recent: rows.slice(0, 10).map(toStudentItem),
+    enrollments: toEnrollmentContext(enrollmentRows),
+    trend: summarizeTrend(rows),
+  };
+}
+
+/**
+ * One subject's attendance, for the student who studies it.
+ *
+ * `cohortSubjectId` is a lookup key, never a credential. The candidate rows
+ * are the caller's own finalized records — resolved from the server session,
+ * exactly as `getStudentDashboard` does — and the id only chooses among them.
+ * Passing a subject the caller does not study therefore selects an empty set
+ * and returns `null`, which the page renders as a 404. There is no code path
+ * here that could read another student's attendance, because no other
+ * student's rows are ever loaded.
+ */
+export async function getStudentSubjectDetail(
+  actor: SessionUser,
+  cohortSubjectId: string,
+  deps: AnalyticsDeps = {},
+): Promise<StudentSubjectDetail | null> {
+  requirePermission(actor, "attendanceRecord.read.own");
+
+  const findStudent = deps.getStudentProfileByUserId ?? repo.getStudentProfileByUserId;
+  const student = await findStudent(actor.userId);
+  if (!student) return null;
+
+  const listRecords = deps.listFinalizedRecordsForStudent ?? repo.listFinalizedRecordsForStudent;
+  const rows = await listRecords(student.id);
+  const mine = rows.filter((row) => row.session.cohortSubjectId === cohortSubjectId);
+  if (mine.length === 0) return null;
+
+  const { lowAttendanceThreshold } = await attendanceModeFor(student.institutionId, deps);
+  const first = mine[0];
+
+  return {
+    cohortSubjectId,
+    subjectName: first.session.cohortSubject?.subject?.name ?? "Subject",
+    subjectCode: first.session.cohortSubject?.subject?.code ?? "",
+    facultyName: first.session.cohortSubject?.faculty?.name ?? null,
+    cohortName: first.session.cohort?.name ?? "",
+    lowAttendanceThreshold,
+    rate: rateOf(mine),
+    sessions: mine.map(toStudentItem),
   };
 }
 
@@ -715,6 +870,133 @@ async function resolveCohortViewScope(
   );
   if (subjects.length === 0) throw new ForbiddenError("cohort_access_denied");
   return { restrictToCohortSubjectIds: subjects.map((s) => s.id), isClassTeacher: false };
+}
+
+/** Cap on one page of the session list. High enough for a term of one class. */
+const SESSION_LIST_LIMIT = 200;
+
+function isSessionStatus(value: string): value is FacultySessionFilters["status"] & string {
+  return (SESSION_STATUSES as readonly string[]).includes(value);
+}
+
+/** A `YYYY-MM-DD` string as a UTC midnight, or null if it is not one. */
+function parseIsoDate(value: string | null | undefined): Date | null {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/**
+ * The session list's URL, normalized into filters.
+ *
+ * Pure, and exported, so the page and its tests agree on what a query string
+ * means without either of them reaching a database. Anything unparseable
+ * becomes "no constraint" rather than an error: a mistyped date in a
+ * bookmarked URL should widen the list, not break the page.
+ *
+ * A reversed range (`from` after `to`) is swapped rather than rejected, which
+ * is what a person who typed them the wrong way round meant.
+ */
+export function normalizeSessionFilters(raw: {
+  today?: string | null;
+  from?: string | null;
+  to?: string | null;
+  cohortId?: string | null;
+  cohortSubjectId?: string | null;
+  status?: string | null;
+}): FacultySessionFilters {
+  const today = raw.today === "1" || raw.today === "true";
+  let from = parseIsoDate(raw.from);
+  let to = parseIsoDate(raw.to);
+  if (from && to && from > to) [from, to] = [to, from];
+
+  const status = raw.status && isSessionStatus(raw.status) ? raw.status : null;
+
+  return {
+    today,
+    from: today || !from ? null : from.toISOString().slice(0, 10),
+    to: today || !to ? null : to.toISOString().slice(0, 10),
+    cohortId: raw.cohortId || null,
+    cohortSubjectId: raw.cohortSubjectId || null,
+    status,
+  };
+}
+
+/**
+ * Turns normalized filters into a Prisma WHERE.
+ *
+ * Note what is *not* here: anything about who the caller is. This clause is
+ * ANDed with `sessionScopeWhere` inside the repository, so a `cohortId` for a
+ * class the caller does not teach narrows an already-scoped query and matches
+ * nothing. The filter cannot widen access, only restrict it — which is why it
+ * is safe to take these values straight from the URL.
+ */
+export function sessionFilterWhere(
+  filters: FacultySessionFilters,
+  now: Date,
+): Prisma.AttendanceSessionWhereInput {
+  const where: Prisma.AttendanceSessionWhereInput = {};
+
+  if (filters.today) {
+    const { start, end } = utcDayRange(now);
+    where.sessionDate = { gte: start, lt: end };
+  } else if (filters.from || filters.to) {
+    const range: { gte?: Date; lt?: Date } = {};
+    const from = parseIsoDate(filters.from);
+    const to = parseIsoDate(filters.to);
+    if (from) range.gte = from;
+    // `to` is inclusive to a reader of the form, so the exclusive bound is the
+    // following midnight. Without this, "to 20 September" silently drops the
+    // 20th — the single most common off-by-one in a date filter.
+    if (to) range.lt = new Date(to.getTime() + 24 * 60 * 60 * 1000);
+    where.sessionDate = range;
+  }
+
+  if (filters.cohortId) where.cohortId = filters.cohortId;
+  if (filters.cohortSubjectId) where.cohortSubjectId = filters.cohortSubjectId;
+  if (filters.status) where.status = filters.status;
+
+  return where;
+}
+
+/**
+ * Every session this faculty member may see, filtered.
+ *
+ * The cross-class view the dashboard deliberately does not give: the dashboard
+ * answers "what needs me today", this answers "what happened in 9B last
+ * month". Same scope resolution, same repository, same authorization — the
+ * only new thing is the WHERE, and it can only narrow.
+ */
+export async function listFacultySessions(
+  actor: SessionUser,
+  filters: FacultySessionFilters,
+  deps: AnalyticsDeps = {},
+): Promise<FacultySessionList> {
+  requirePermission(actor, "attendanceRecord.read");
+
+  const institutionId = requireInstitutionScope(actor);
+  const resolved = await resolveFacultyScope(actor, deps);
+  const listSessions = deps.listSessionsInScope ?? repo.listSessionsInScope;
+  const now = (deps.now ?? (() => new Date()))();
+
+  const rows = await listSessions(
+    resolved.scope,
+    sessionFilterWhere(filters, now),
+    SESSION_LIST_LIMIT + 1,
+  );
+
+  const { mode } = await attendanceModeFor(institutionId, deps);
+  const truncated = rows.length > SESSION_LIST_LIMIT;
+
+  return {
+    attendanceMode: mode,
+    scope: resolved.kind,
+    filters,
+    cohorts: resolved.cohorts,
+    subjects: resolved.subjects,
+    sessions: rows.slice(0, SESSION_LIST_LIMIT).map(toSessionSummary),
+    truncated,
+  };
 }
 
 /**

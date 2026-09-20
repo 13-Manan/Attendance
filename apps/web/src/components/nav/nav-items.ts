@@ -91,6 +91,16 @@ export const NAV_ITEMS: NavItem[] = [
     permission: "attendanceSession.create",
   },
   {
+    // `attendanceRecord.read`, not `attendanceSession.create`: this is the
+    // register history, and reading it is a different thing from being
+    // allowed to take one. An attendance operator may capture but not read
+    // back, so they get "Attendance" above and not this.
+    href: "/dashboard/attendance/sessions",
+    label: "Sessions",
+    group: "Attendance",
+    permission: "attendanceRecord.read",
+  },
+  {
     href: "/dashboard/offline",
     label: "Offline attendance",
     group: "Attendance",

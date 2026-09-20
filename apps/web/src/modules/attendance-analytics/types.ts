@@ -65,6 +65,37 @@ export interface DailyAttendanceSummary {
   isManuallyCorrected: boolean;
 }
 
+/**
+ * Where a student actually sits: class, section/department, academic year.
+ *
+ * The portal could state a percentage before it could state what the
+ * percentage was of. This is the other half of that sentence.
+ */
+export interface StudentEnrollmentContext {
+  cohortId: string;
+  cohortName: string;
+  termLabel: string | null;
+  /** The academic unit the class hangs off — a section, a department. */
+  academicUnitName: string | null;
+  academicSessionName: string | null;
+  /** True when this is the institution's current academic year. */
+  isCurrentSession: boolean;
+}
+
+/**
+ * One calendar month of the student's own attendance.
+ *
+ * A trend, not a forecast. Months in which the student had no class are
+ * omitted rather than plotted as zero — the same rule `AttendanceRate`
+ * already applies to a null percentage, for the same reason.
+ */
+export interface AttendanceTrendPoint {
+  /** `YYYY-MM`, UTC, so it sorts lexicographically. */
+  month: string;
+  label: string;
+  rate: AttendanceRate;
+}
+
 export interface StudentDashboard {
   studentId: string;
   studentCode: string;
@@ -88,6 +119,31 @@ export interface StudentDashboard {
   /** SCHOOL view of the same records, newest first. */
   daily: DailyAttendanceSummary[];
   recent: StudentAttendanceItem[];
+  /** Active classes, so the portal can say which class these figures are for. */
+  enrollments: StudentEnrollmentContext[];
+  /** Oldest month first, capped to the most recent few. */
+  trend: AttendanceTrendPoint[];
+}
+
+/**
+ * One subject, opened, for the student who studies it.
+ *
+ * The drill-down behind a subject row: the same rate the summary showed, plus
+ * the individual classes it was computed from. Reached by `cohortSubjectId`,
+ * but that id is *not* the authorization — the sessions are selected from the
+ * caller's own finalized records, so a `cohortSubjectId` belonging to a
+ * subject the caller does not study resolves to nothing at all.
+ */
+export interface StudentSubjectDetail {
+  cohortSubjectId: string;
+  subjectName: string;
+  subjectCode: string;
+  facultyName: string | null;
+  cohortName: string;
+  lowAttendanceThreshold: number;
+  rate: AttendanceRate;
+  /** Newest first. Every one of these is a finalized, confirmed register. */
+  sessions: StudentAttendanceItem[];
 }
 
 /** One correction as history renders it. */
@@ -188,6 +244,49 @@ export interface FacultyDashboard {
   recent: FacultySessionSummary[];
   /** True when the actor is PRIMARY faculty on at least one cohort. */
   isClassTeacher: boolean;
+}
+
+/** Every attendance session status, in the order a register moves through them. */
+export const SESSION_STATUSES = [
+  "OPEN",
+  "CAPTURING",
+  "PROCESSING",
+  "REVIEW",
+  "FINALIZED",
+  "CANCELLED",
+] as const;
+
+export type SessionStatusFilter = (typeof SESSION_STATUSES)[number];
+
+/**
+ * The faculty session list's query, normalized.
+ *
+ * Every field is nullable and means "no constraint" when null. `today` is not
+ * a shorthand for a date range that the page then has to reproduce — it is
+ * resolved against the server's clock, so "today" cannot drift with a stale
+ * bookmark the way `?from=2026-09-20` silently does tomorrow.
+ */
+export interface FacultySessionFilters {
+  today: boolean;
+  /** Inclusive ISO date (YYYY-MM-DD). Ignored when `today` is set. */
+  from: string | null;
+  /** Inclusive ISO date (YYYY-MM-DD). Ignored when `today` is set. */
+  to: string | null;
+  cohortId: string | null;
+  cohortSubjectId: string | null;
+  status: SessionStatusFilter | null;
+}
+
+export interface FacultySessionList {
+  attendanceMode: AttendanceMode;
+  scope: "assigned" | "institution";
+  filters: FacultySessionFilters;
+  /** The classes and subjects this actor may filter by — their own scope. */
+  cohorts: FacultyCohortSummary[];
+  subjects: FacultySubjectSummary[];
+  sessions: FacultySessionSummary[];
+  /** True when the result hit the cap and there are older sessions unshown. */
+  truncated: boolean;
 }
 
 /** An absent student on one session, for the class-teacher view. */

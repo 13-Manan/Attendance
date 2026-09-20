@@ -270,6 +270,17 @@ function studentDeps(rows: StudentRecordRow[], type: "SCHOOL" | "COLLEGE", uncon
     listFinalizedRecordsForStudent: async () => rows,
     listActiveCohortIdsForStudent: async () => ["coh-1"],
     countUnconfirmedSessionsToday: async () => unconfirmed,
+    listStudentEnrollmentContext: async () => [
+      {
+        cohortId: "coh-1",
+        cohort: {
+          name: "Grade 8 - A",
+          termLabel: "Term 1",
+          academicUnit: { name: "Section A", kind: "SECTION" as const },
+          academicSession: { name: "2026-2027", isCurrent: true },
+        },
+      },
+    ],
     getInstitutionById: async () => institution(type),
     now: () => new Date("2026-09-16T10:00:00.000Z"),
   };

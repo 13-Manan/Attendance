@@ -155,6 +155,14 @@ export default async function DashboardHomePage() {
         <Panel
           title="Needs review"
           description="These registers are not visible to students until you confirm them."
+          action={
+            <Link
+              href="/dashboard/attendance/sessions?status=REVIEW"
+              className="text-xs text-neutral-600 hover:underline"
+            >
+              View all
+            </Link>
+          }
         >
           <ul className="flex flex-col divide-y divide-neutral-100">
             {dashboard.pendingReview.map((session) => (
@@ -267,7 +275,17 @@ export default async function DashboardHomePage() {
         </Panel>
       ) : null}
 
-      <Panel title="Recent attendance">
+      <Panel
+        title="Recent attendance"
+        action={
+          <Link
+            href="/dashboard/attendance/sessions"
+            className="text-xs text-neutral-600 hover:underline"
+          >
+            All sessions
+          </Link>
+        }
+      >
         {dashboard.recent.length === 0 ? (
           <EmptyState>No confirmed attendance yet.</EmptyState>
         ) : (

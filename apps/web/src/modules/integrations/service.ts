@@ -3,6 +3,7 @@ import { ApiError, invalidRequest, notFound, type ApiContext } from "./api-route
 import { buildPage, readPageRequest, type PageRequest } from "./pagination";
 import { WebhookProvider } from "./providers/webhook-provider";
 import { redact } from "./redaction";
+import { attendanceEventPublisher } from "@/modules/realtime/publisher";
 import * as repo from "./repository";
 import { buildEnvelope } from "./webhook-delivery";
 import { emitWebhookEvent } from "./webhook-dispatcher";
@@ -990,6 +991,25 @@ export async function correctAttendanceEndpoint(ctx: ApiContext): Promise<ApiIte
     previousResult: record.finalResult,
     correctedByUserId: actor.id,
     reason: reason || null,
+  });
+
+  // The student may have their portal open right now. The faculty review path
+  // already pushes a correction to their private channel; a correction that
+  // arrives over the API is the same fact about the same student and has to
+  // reach them the same way, or whether a result updates live depends on
+  // which door the correction came through.
+  //
+  // Their own result only — the student channel never carries the class.
+  attendanceEventPublisher.publishToStudent(updated.studentId, {
+    type: "student-attendance-updated",
+    sessionId: updated.sessionId,
+    studentId: updated.studentId,
+    finalResult: updated.finalResult,
+    // An API correction targets a record that already exists in a register;
+    // the portal only ever shows finalized ones, so this is the finalized
+    // value being revised rather than a provisional one being published.
+    isFinalized: true,
+    occurredAt: updated.updatedAt.toISOString(),
   });
 
   return { data, requestId: ctx.requestId };
