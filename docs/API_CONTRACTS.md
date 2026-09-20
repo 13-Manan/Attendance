@@ -130,6 +130,7 @@ check, rate limiting and audit logging before the handler runs.
 | `/api/v1/integrations` | GET | `integrations:read` |
 | `/api/v1/webhooks` | GET, POST | `integrations:read` / `integrations:write` |
 | `/api/v1/webhooks/{id}` | DELETE | `integrations:write` |
+| `/api/v1/external-ids` | GET, POST, DELETE | `integrations:read` / `integrations:write` |
 | `/api/v1/oauth/token` | POST | — (`501`, reserved) |
 
 `/api/v1/attendance-records` is retained as a GET alias of `/api/v1/attendance`
@@ -140,6 +141,52 @@ Integrations can only be **read** over the API. An API that let one integration
 create another would let a compromised key establish persistent outbound
 access to a server of its choosing; connections are created by an administrator
 in the Integration Center.
+
+### External identifiers
+
+An ERP calls a student `STU-10092`; this platform calls them a cuid. Neither
+is derivable from the other, so the mapping is explicit.
+
+```http
+POST /api/v1/external-ids
+Authorization: Bearer att_live_…
+Content-Type: application/json
+
+{ "provider": "erp-x", "entityType": "STUDENT",
+  "externalId": "STU-10092", "internalId": "cmu5dx…" }
+```
+
+`entityType` is one of `STUDENT`, `FACULTY`, `COHORT`, `SUBJECT`.
+
+Once mapped, any student route accepts the external form in place of an id:
+
+```http
+GET /api/v1/students/external:erp-x:STU-10092
+```
+
+The `external:` prefix is a deliberate opt-in. Trying an id as internal and
+falling back to external would make a request's meaning depend on what happens
+to exist, and would let a caller learn which internal ids are real by watching
+which lookups changed behaviour. An unmapped external id returns the same
+`404` as a student who does not exist.
+
+**Semantics**
+
+- **Institution-scoped.** The institution comes from the API key. Two tenants
+  using the same vendor both have a student `STU-10092` and they are different
+  people; that is representable, not a collision.
+- **Idempotent.** Re-posting an identical mapping returns the same row.
+- **Re-pointable.** Pointing an existing `externalId` at a different
+  `internalId` updates in place — students are merged and re-keyed in real
+  school offices.
+- **One id per provider per record.** Giving one student a second `erp-x` id is
+  `409`: nothing here can tell which one the external system now means. Two
+  *different* providers may both map the same record.
+- `provider` is matched case-insensitively; `externalId` is **not**, because it
+  is the other system's own string.
+
+Deleting a mapping deletes only the mapping. Disconnecting an integration is
+not a reason to delete a student, and this endpoint has no authority to.
 
 ### Envelopes
 

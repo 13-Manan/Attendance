@@ -134,6 +134,7 @@ model Institution {
   apiKeys          ApiKey[]
   webhookEndpoints WebhookEndpoint[]
   auditLogs        AuditLog[]
+  externalIdentities ExternalIdentity[]
 }
 
 // A physical branch/campus of an institution. Nullable everywhere it's
@@ -725,6 +726,70 @@ model AttendanceCorrection {
 // ---------------------------------------------------------------------------
 // Integration layer
 // ---------------------------------------------------------------------------
+
+/// What kind of internal record an external identifier points at.
+///
+/// Deliberately a small, closed list. An external system may hold ids for
+/// anything, but this table only maps the entities the public API actually
+/// exposes — adding a value here is a decision to support integrating that
+/// entity, not a convenience.
+enum ExternalEntityType {
+  STUDENT
+  FACULTY
+  COHORT
+  SUBJECT
+}
+
+/// A foreign system's identifier for something in this institution.
+///
+/// The problem it solves: an ERP calls a student `STU-10092`, this platform
+/// calls them `cmu5dx…`, and neither is wrong. Before this table the importer
+/// had nowhere to put the ERP's id except `Student.studentCode` — which is the
+/// *institution's own* roll number, a different fact that the institution may
+/// change and that a second integration would immediately contradict.
+///
+/// ## Why the unique keys are shaped this way
+///
+/// `(institutionId, provider, entityType, externalId)` is the collision guard
+/// the whole design turns on. Two institutions using the same vendor will both
+/// have a student `STU-10092`, and they are different people; including
+/// `institutionId` in the key makes that representable rather than a clash.
+/// Scoping by `provider` as well means an institution can run an ERP and an
+/// LMS at once without their id spaces colliding.
+///
+/// `(institutionId, provider, entityType, internalId)` is the reverse: one
+/// student has at most one id *per provider*. Without it a re-import under a
+/// changed external id would silently accumulate mappings, and "which id does
+/// the ERP know this student by" would have two answers.
+///
+/// ## Why `internalId` is a plain column and not a relation
+///
+/// It is polymorphic — a student, a cohort, a subject — and Prisma models no
+/// polymorphic relation. The cost is no database-level referential integrity,
+/// which is acceptable here because this platform deactivates rather than
+/// deletes people and classes; a mapping is resolved through a service that
+/// re-reads the target, so a dangling row surfaces as "not found" rather than
+/// as corrupt data.
+model ExternalIdentity {
+  id            String             @id @default(cuid())
+  institutionId String
+  institution   Institution        @relation(fields: [institutionId], references: [id])
+  /// The external system's name, as the integration administrator entered it.
+  provider      String
+  entityType    ExternalEntityType
+  /// The identifier exactly as the external system spells it.
+  externalId    String
+  /// The `id` of the internal row, interpreted per `entityType`.
+  internalId    String
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@unique([institutionId, provider, entityType, externalId])
+  @@unique([institutionId, provider, entityType, internalId])
+  // "Which external ids does this record have?" — the reverse lookup an
+  // export needs when it has to label a row for the receiving system.
+  @@index([institutionId, entityType, internalId])
+}
 
 model ApiKey {
   id            String      @id @default(cuid())

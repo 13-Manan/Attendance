@@ -188,6 +188,17 @@ export interface AttemptOutcome {
   statusCode: number | null;
   /** Already redacted. */
   error?: string;
+  /**
+   * Set when the attempt failed for a reason no retry can change.
+   *
+   * There is normally no status code for a transport failure, and
+   * `isRetryable(null)` is true because DNS blips, refused connections and
+   * timeouts all deserve another go. A delivery URL that resolves to the
+   * instance-metadata address does not: it will resolve there again on every
+   * attempt, and retrying is both pointless and a repeated attempt to send
+   * student data somewhere it must not go.
+   */
+  permanent?: boolean;
 }
 
 /**
@@ -223,7 +234,7 @@ export function nextDeliveryState(
   if (isSuccess(outcome.statusCode)) {
     return { ...base, status: "DELIVERED", nextAttemptAt: null, lastError: undefined };
   }
-  if (!isRetryable(outcome.statusCode)) {
+  if (outcome.permanent || !isRetryable(outcome.statusCode)) {
     return { ...base, status: "FAILED", nextAttemptAt: null };
   }
   if (attemptCount >= MAX_DELIVERY_ATTEMPTS) {

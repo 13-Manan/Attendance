@@ -647,6 +647,11 @@ export function getAttendanceSession(institutionId: string, id: string): Promise
  * name a real user. The service resolves and validates that; this function
  * does not invent one.
  */
+export type CorrectionOutcome =
+  | { status: "applied"; record: ApiAttendanceRow }
+  | { status: "conflict" }
+  | { status: "not_found" };
+
 export async function applyAttendanceCorrection(input: {
   institutionId: string;
   recordId: string;
@@ -654,10 +659,27 @@ export async function applyAttendanceCorrection(input: {
   newResult: NonNullable<Prisma.EnumAttendanceResultFilter["equals"]>;
   changedByUserId: string;
   reason: string | null;
-}): Promise<ApiAttendanceRow | null> {
+}): Promise<CorrectionOutcome> {
   const updated = await prisma.$transaction(async (tx) => {
+    // Compare-and-set on the result the caller believed it was correcting.
+    //
+    // `previousResult` used to be written into the trail without ever being
+    // checked, which made the trail wrong under concurrency rather than merely
+    // racy. Measured before this guard: four concurrent corrections of one
+    // record produced four rows, every one of them claiming it had changed
+    // PRESENT to ABSENT — but only the first found a PRESENT row. The other
+    // three recorded a transition that never happened, against three real
+    // people's names.
+    //
+    // The same idiom `modules/attendance/service.ts` uses for the faculty
+    // path, which was fixed in Phase 6; this is the public-API half of it,
+    // left open until now.
     const result = await tx.attendanceRecord.updateMany({
-      where: { id: input.recordId, institutionId: input.institutionId },
+      where: {
+        id: input.recordId,
+        institutionId: input.institutionId,
+        finalResult: input.previousResult ?? undefined,
+      },
       data: { finalResult: input.newResult, isManuallyCorrected: true },
     });
     if (result.count === 0) return false;
@@ -675,8 +697,15 @@ export async function applyAttendanceCorrection(input: {
     return true;
   });
 
-  if (!updated) return null;
-  return getAttendanceRecord(input.institutionId, input.recordId);
+  if (!updated) {
+    // Either the record is gone, or somebody moved it between the caller's
+    // read and this write. Distinguished so the endpoint can answer 404 or
+    // 409 rather than reporting a change it did not make.
+    const current = await getAttendanceRecord(input.institutionId, input.recordId);
+    return current ? { status: "conflict" } : { status: "not_found" };
+  }
+  const record = await getAttendanceRecord(input.institutionId, input.recordId);
+  return record ? { status: "applied", record } : { status: "not_found" };
 }
 
 // ---------------------------------------------------------------------------

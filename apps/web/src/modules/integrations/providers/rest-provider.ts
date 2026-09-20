@@ -1,4 +1,5 @@
 import { redact } from "../redaction";
+import { assertOutboundAddressAllowed } from "../outbound-guard";
 import type { IntegrationConfig, IntegrationResource } from "../types";
 import type {
   ConnectionTestResult,
@@ -127,6 +128,7 @@ export class RestProvider implements IntegrationProvider {
     const url = joinUrl(config.baseUrl!, config.testPath ?? "/");
     const startedAt = Date.now();
     try {
+      await assertOutboundAddressAllowed(url);
       const response = await this.#fetch(url, {
         method: "GET",
         headers: { Accept: "application/json", ...config.headers },

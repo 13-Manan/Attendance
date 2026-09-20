@@ -13,6 +13,11 @@ export type AuditAction =
   // webhook cannot disagree about what happened.
   | "student.archived"
   | "student.restored"
+  // Phase 10 integration hub. Linking an external identifier is a change to
+  // *who a record is* as far as another system is concerned, so it belongs in
+  // the same trail as a role change rather than in integration logs only.
+  | "integration.externalId.linked"
+  | "integration.externalId.unlinked"
   | "user.role_changed"
   | "attendance.corrected"
   | "attendance.finalized"

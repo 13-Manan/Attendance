@@ -1,5 +1,6 @@
 import { recordAuditLog } from "@/modules/audit/service";
 import { ApiError, invalidRequest, notFound, type ApiContext } from "./api-route";
+import * as externalIdentity from "./external-identity";
 import { buildPage, readPageRequest, type PageRequest } from "./pagination";
 import { WebhookProvider } from "./providers/webhook-provider";
 import { redact } from "./redaction";
@@ -447,8 +448,51 @@ export async function listStudentsEndpoint(ctx: ApiContext): Promise<ApiListResp
   return buildPage(rows.map(serializeStudent), request, ctx.requestId);
 }
 
+/**
+ * Resolves the `{id}` path segment, which may be an external id.
+ *
+ * `external:<provider>:<id>` addresses a record by what another system calls
+ * it — `external:erp-x:STU-10092` — so an ERP can use its own identifiers
+ * without first storing ours. Anything else is taken as this platform's id,
+ * unchanged, so existing integrations are unaffected.
+ *
+ * The prefix is a deliberate opt-in rather than a guess. Trying an id as
+ * internal and then falling back to external would make the meaning of a
+ * request depend on what happens to exist, and a caller could learn which
+ * internal ids are real by watching which lookups changed behaviour.
+ *
+ * Splitting on the *first two* colons only: an external id may itself contain
+ * colons, and truncating somebody's identifier at a separator we chose would
+ * silently resolve to the wrong record or to nothing.
+ */
+const EXTERNAL_ID_PREFIX = "external:";
+
+async function resolveEntityId(
+  ctx: ApiContext,
+  entityType: externalIdentity.ExternalEntityType,
+  raw: string,
+): Promise<string | null> {
+  if (!raw.startsWith(EXTERNAL_ID_PREFIX)) return raw;
+  const rest = raw.slice(EXTERNAL_ID_PREFIX.length);
+  const separator = rest.indexOf(":");
+  if (separator <= 0 || separator === rest.length - 1) {
+    throw invalidRequest(
+      "An external reference must look like `external:<provider>:<id>`.",
+    );
+  }
+  return externalIdentity.resolveExternalId(ctx.institutionId, {
+    provider: rest.slice(0, separator),
+    entityType,
+    externalId: rest.slice(separator + 1),
+  });
+}
+
 export async function getStudentEndpoint(ctx: ApiContext): Promise<ApiItemResponse<ApiStudent>> {
-  const row = await repo.getStudent(ctx.institutionId, requireParam(ctx, "id"));
+  const id = await resolveEntityId(ctx, "STUDENT", requireParam(ctx, "id"));
+  // An unmapped external id and a nonexistent student are the same answer, so
+  // this cannot be used to discover which ids another provider has mapped.
+  if (!id) throw notFound("Student");
+  const row = await repo.getStudent(ctx.institutionId, id);
   if (!row) throw notFound("Student");
   return { data: serializeStudent(row), requestId: ctx.requestId };
 }
@@ -971,7 +1015,7 @@ export async function correctAttendanceEndpoint(ctx: ApiContext): Promise<ApiIte
     return { data: serializeAttendanceRecord(record), requestId: ctx.requestId };
   }
 
-  const updated = await repo.applyAttendanceCorrection({
+  const outcome = await repo.applyAttendanceCorrection({
     institutionId: ctx.institutionId,
     recordId: id,
     previousResult: record.finalResult,
@@ -979,8 +1023,27 @@ export async function correctAttendanceEndpoint(ctx: ApiContext): Promise<ApiIte
     changedByUserId: actor.id,
     reason: reason || null,
   });
-  if (!updated) throw notFound("Attendance record");
+  if (outcome.status === "not_found") throw notFound("Attendance record");
+  if (outcome.status === "conflict") {
+    // Somebody moved this record between the read above and the write — a
+    // second integration, a teacher on the review board, an offline queue
+    // draining. The correction was *not* applied, and saying so is the whole
+    // point: the previous behaviour overwrote whatever had landed and wrote a
+    // trail entry claiming a transition that never happened.
+    //
+    // A retry of the identical request is not a conflict: the record already
+    // holds the requested result, and the equality check above returns it
+    // unchanged before reaching here. So a 409 here always means a genuinely
+    // different value arrived, and re-reading is the right next step.
+    const current = await repo.getAttendanceRecord(ctx.institutionId, id);
+    throw new ApiError(
+      "conflict",
+      "This attendance record changed while the correction was in flight. Re-read it and retry if the change is still wanted.",
+      { details: current ? { currentResult: serializeAttendanceRecord(current).result } : undefined },
+    );
+  }
 
+  const updated = outcome.record;
   const data = serializeAttendanceRecord(updated);
   await auditApiWrite(ctx, "attendance.corrected", "AttendanceRecord", id, {
     before: { result: record.finalResult },
@@ -1103,4 +1166,101 @@ export async function deleteWebhookEndpointEndpoint(ctx: ApiContext) {
     after: serializeWebhookEndpoint(updated),
   });
   return { data: serializeWebhookEndpoint(updated), requestId: ctx.requestId };
+}
+
+// ---------------------------------------------------------------------------
+// External identity mapping
+// ---------------------------------------------------------------------------
+
+/**
+ * `GET /api/v1/external-ids` — what a provider calls things here.
+ *
+ * The institution is the credential's, never the query string's, which is what
+ * keeps two tenants' identical vendor ids apart. See
+ * `modules/integrations/external-identity.ts`.
+ */
+export async function listExternalIdsEndpoint(ctx: ApiContext) {
+  const request = page(ctx);
+  const rows = await externalIdentity.listExternalIdentities(
+    ctx.institutionId,
+    {
+      provider: ctx.url.searchParams.get("provider") ?? undefined,
+      entityType: ctx.url.searchParams.get("entityType") ?? undefined,
+    },
+    { limit: request.limit, cursorId: request.cursorId },
+  );
+  return buildPage(rows.map(serializeExternalId), request, ctx.requestId);
+}
+
+/**
+ * `POST /api/v1/external-ids` — record that a provider calls this record X.
+ *
+ * Idempotent by construction: replaying the same link returns the same row.
+ * Re-pointing an external id at a different record is an update; giving one
+ * record a *second* id from the same provider is a 409, because nothing here
+ * can tell which of the two the external system now means.
+ */
+export async function createExternalIdEndpoint(ctx: ApiContext) {
+  const body = await readJsonBody(ctx.request);
+  const row = await externalIdentity.linkExternalId(ctx.institutionId, {
+    provider: readString(body, "provider"),
+    entityType: readString(body, "entityType"),
+    externalId: readString(body, "externalId"),
+    internalId: readString(body, "internalId"),
+  });
+
+  await auditApiWrite(ctx, "integration.externalId.linked", "ExternalIdentity", row.id, {
+    after: {
+      provider: row.provider,
+      entityType: row.entityType,
+      externalId: row.externalId,
+      internalId: row.internalId,
+    },
+  });
+  return { data: serializeExternalId(row), requestId: ctx.requestId };
+}
+
+/**
+ * `DELETE /api/v1/external-ids` — forget a mapping.
+ *
+ * Removes the mapping and nothing else. Disconnecting an integration is not a
+ * reason to delete a student, and this endpoint holds no authority to.
+ */
+export async function deleteExternalIdEndpoint(ctx: ApiContext) {
+  const provider = ctx.url.searchParams.get("provider") ?? "";
+  const entityType = ctx.url.searchParams.get("entityType") ?? "";
+  const externalId = ctx.url.searchParams.get("externalId") ?? "";
+
+  const removed = await externalIdentity.unlinkExternalId(ctx.institutionId, {
+    provider,
+    entityType,
+    externalId,
+  });
+  if (!removed) throw notFound("External id mapping");
+
+  await auditApiWrite(ctx, "integration.externalId.unlinked", "ExternalIdentity", externalId, {
+    before: { provider, entityType, externalId },
+  });
+  return { data: { deleted: true }, requestId: ctx.requestId };
+}
+
+function serializeExternalId(row: externalIdentity.ExternalIdentityRecord) {
+  return {
+    id: row.id,
+    provider: row.provider,
+    entityType: row.entityType,
+    externalId: row.externalId,
+    internalId: row.internalId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+/** A required string field, with the module's usual "say which field" error. */
+function readString(body: Record<string, unknown>, field: string): string {
+  const value = body[field];
+  if (typeof value !== "string" || !value.trim()) {
+    throw invalidRequest(`\`${field}\` is required and must be a non-empty string.`);
+  }
+  return value;
 }

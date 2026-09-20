@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/modules/audit/service";
+import { assertOutboundAddressAllowed, BlockedAddressError } from "./outbound-guard";
 import { redact } from "./redaction";
 import {
   ATTEMPT_HEADER,
@@ -110,6 +111,14 @@ async function sendOverHttp(
   headers: Record<string, string>,
 ): Promise<AttemptOutcome> {
   try {
+    // Where the hostname actually points, checked before the payload is sent.
+    // The URL was string-validated when the endpoint was registered; this
+    // catches a name that resolves to loopback or to the instance-metadata
+    // address, which no amount of string checking can see. A signed payload
+    // full of student data is exactly the thing not to send to an address the
+    // administrator did not approve.
+    await assertOutboundAddressAllowed(url);
+
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
@@ -142,7 +151,14 @@ async function sendOverHttp(
     // No status code: DNS failure, refused connection, TLS error, timeout.
     // `isRetryable(null)` is true, which is what we want for all of those.
     const message = error instanceof Error ? error.message : String(error);
-    return { statusCode: null, error: String(redact(message)) };
+    return {
+      statusCode: null,
+      error: String(redact(message)),
+      // …except a blocked address, which resolves the same way every time.
+      // Retrying it would be a scheduled, repeating attempt to post signed
+      // student data at loopback or at the metadata service.
+      permanent: error instanceof BlockedAddressError,
+    };
   }
 }
 
