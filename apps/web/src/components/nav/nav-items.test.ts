@@ -51,10 +51,30 @@ test("the units link is named for the institution it belongs to", () => {
 });
 
 test("sections come back in the declared group order", () => {
+  // `() => true` is an actor holding every permission, so this includes the
+  // platform tier. What a normal institution admin sees is the next test.
   const sections = buildNavSections(() => true, "COLLEGE");
   assert.deepEqual(
     sections.map((section) => section.group),
-    ["Today", "People", "Academic", "Attendance", "Connect", "Administration"],
+    ["Platform", "Today", "People", "Academic", "Attendance", "Connect", "Administration"],
+  );
+});
+
+test("the platform tier is invisible without the platform permission", () => {
+  // The section that crosses tenant boundaries. An institution admin holds
+  // every other permission in the catalogue and must still not see it — and
+  // the pages behind it refuse them anyway, which is what actually protects
+  // them. This asserts they are not even offered.
+  const institutionAdmin = (permission: string) => !permission.startsWith("platform.");
+  const sections = buildNavSections(institutionAdmin, "COLLEGE");
+
+  assert.equal(
+    sections.some((section) => section.group === "Platform"),
+    false,
+  );
+  assert.equal(
+    hrefs(sections).some((href) => href.startsWith("/dashboard/platform")),
+    false,
   );
 });
 

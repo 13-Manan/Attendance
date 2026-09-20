@@ -119,6 +119,18 @@ model Institution {
   //        confidenceThresholds: { presentMin: 0.62, reviewMin: 0.45 },
   //        attendanceMode: "DAILY" | "SUBJECT_WISE" }
   settings     Json            @default("{}")
+  /// When this institution was suspended, or null while it is active.
+  ///
+  /// A timestamp rather than a boolean: "when did this stop" is the question
+  /// asked during an incident, and a boolean cannot answer it. Nullable and
+  /// null for every existing row — an institution created before this column
+  /// existed is active, not in an unknown state.
+  ///
+  /// Suspension is a *platform* action (`platform.institution.suspend`) and is
+  /// deliberately not a delete. Attendance records, audit history and
+  /// enrolments all remain; what a suspension expresses is that the tenant
+  /// should stop being served, which is reversible. Nothing cascades from it.
+  suspendedAt  DateTime?
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 

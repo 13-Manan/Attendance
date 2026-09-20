@@ -4,6 +4,10 @@ export type InstitutionKind = "SCHOOL" | "COLLEGE" | null;
 
 /** The headings the sidebar groups links under, in the order they appear. */
 export const NAV_GROUPS = [
+  // Above everything else, and visible only to the few who hold
+  // `platform.institution.create`. It is the one section that crosses tenant
+  // boundaries, so it reads as a different tier rather than another feature.
+  "Platform",
   "Today",
   "People",
   "Academic",
@@ -52,6 +56,19 @@ export interface NavItem {
  * link to a screen that can only refuse is worse than no link.
  */
 export const NAV_ITEMS: NavItem[] = [
+  {
+    href: "/dashboard/platform",
+    label: "Platform overview",
+    group: "Platform",
+    permission: "platform.institution.create",
+  },
+  {
+    href: "/dashboard/platform/institutions",
+    label: "Institutions",
+    group: "Platform",
+    permission: "platform.institution.create",
+  },
+
   { href: "/dashboard", label: "Overview", group: "Today" },
 
   { href: "/dashboard/students", label: "Students", group: "People", permission: "student.read" },

@@ -18,6 +18,12 @@ export type AuditAction =
   // the same trail as a role change rather than in integration logs only.
   | "integration.externalId.linked"
   | "integration.externalId.unlinked"
+  // Phase 13 platform tier. Creating or suspending a tenant is the highest-
+  // impact action in the product and is the one an incident review starts
+  // from, so it is audited under the institution it concerns.
+  | "platform.institution.created"
+  | "platform.institution.suspended"
+  | "platform.institution.restored"
   | "user.role_changed"
   | "attendance.corrected"
   | "attendance.finalized"
