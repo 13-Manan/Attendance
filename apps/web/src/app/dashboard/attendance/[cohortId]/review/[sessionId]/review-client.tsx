@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
@@ -78,7 +78,13 @@ function reasonText(student: AttendanceReviewStudent): string {
     case "duplicate_in_capture":
       return "Two different faces in the same photo both matched this student, so the match is not trustworthy on its own.";
     case "no_match":
-      return "Compared against every captured face; no match above the review threshold.";
+      return "Compared against every captured face and matched none of them. That is not evidence of absence — they may have been hidden, turned away, or out of frame.";
+    case "no_face_detected":
+      return "No face was detected in any capture, so nobody could be compared. This is about the photograph, not the student.";
+    case "low_quality":
+      return "The captures were too poor to compare against. Retaking may resolve it.";
+    case "recognition_error":
+      return "Recognition failed for this session. Decide each student by calling the roll.";
     case "no_face_template":
       return "No enrolled face data — this student could not be compared at all, so this is not evidence of absence.";
     case "incompatible_face_template":
@@ -142,14 +148,51 @@ function Identity({ student }: { student: AttendanceReviewStudent }) {
   );
 }
 
+/**
+ * A timestamp in the reader's own locale, without a hydration mismatch.
+ *
+ * `toLocaleString()` asks the runtime for its locale and timezone, and the
+ * server's are not the reader's: this banner rendered "20/09/2026, 18:34:49"
+ * on the server and "9/20/2026, 6:34:49 PM" in the browser, so React threw
+ * away the tree and rebuilt it on every finalized register. The bug only
+ * appears once a session is finalized, which is why it survived until
+ * finalization became routine.
+ *
+ * So the server emits the ISO instant — stable, machine-readable, and what
+ * `<time dateTime>` wants anyway — and the locale formatting happens after
+ * mount, where the browser's own locale is the right one to use.
+ */
+function LocalTime({ iso }: { iso: string }) {
+  // `useSyncExternalStore` is the tool for a value that lives outside React and
+  // whose server snapshot is *allowed* to differ from the client one — exactly
+  // this case, and the same pattern the capture wizard uses for
+  // `navigator.onLine`. Subscribing is a no-op because a browser's locale does
+  // not change while the page is open.
+  const onClient = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
+  return <time dateTime={iso}>{onClient ? new Date(iso).toLocaleString() : iso}</time>;
+}
+
+/**
+ * `note` exists because of one specific way these tiles could lie. The Present
+ * tile counts decisions, and a recognition suggestion is not one — so while
+ * suggestions are pending the tile reads 0 above a Present column holding
+ * three people. Both numbers are correct, and together they look like a bug.
+ * The note says which is which.
+ */
 function CountCard({
   label,
   value,
   tone,
+  note,
 }: {
   label: string;
   value: number;
   tone: "neutral" | "present" | "absent" | "review";
+  note?: string;
 }) {
   const toneClass =
     tone === "present"
@@ -163,6 +206,11 @@ function CountCard({
       <dd className={`text-2xl font-semibold tabular-nums ${toneClass}`} aria-live="polite">
         {value}
       </dd>
+      {note ? (
+        <p className="mt-0.5 text-xs font-medium text-amber-700" aria-live="polite">
+          {note}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -317,7 +365,11 @@ export function ReviewBoard({ initialBoard }: Props) {
   const showSection = (key: Exclude<StatusFilter, "all">) =>
     statusFilter === "all" || statusFilter === key;
 
-  const unresolved = board.counts.needsReview + board.counts.notEvaluated;
+  // Carried on the Present tile, which counts decisions rather than rows.
+  const suggestionNote =
+    board.awaitingConfirmation > 0
+      ? `+${board.awaitingConfirmation} suggested, not yet confirmed`
+      : undefined;
   const canPressConfirm =
     board.actorCanFinalize && board.canFinalize && !confirming && !isFinalized;
 
@@ -361,9 +413,12 @@ export function ReviewBoard({ initialBoard }: Props) {
         <div className="rounded-md border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700">
           <strong>Attendance finalized</strong>
           {board.session.finalizedByName ? ` by ${board.session.finalizedByName}` : ""}
-          {board.session.finalizedAt
-            ? ` on ${new Date(board.session.finalizedAt).toLocaleString()}`
-            : ""}
+          {board.session.finalizedAt ? (
+            <>
+              {" on "}
+              <LocalTime iso={board.session.finalizedAt} />
+            </>
+          ) : null}
           . Students can now see their result.
           {board.actorCanOverrideFinalized
             ? " You may still correct a record; every change is recorded as an authorized override."
@@ -373,9 +428,14 @@ export function ReviewBoard({ initialBoard }: Props) {
 
       <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <CountCard label="Total students" value={board.counts.total} tone="neutral" />
-        <CountCard label="Present" value={board.counts.present} tone="present" />
+        <CountCard
+          label="Present"
+          value={board.counts.present}
+          tone="present"
+          note={suggestionNote}
+        />
         <CountCard label="Absent" value={board.counts.absent} tone="absent" />
-        <CountCard label="Needs review" value={unresolved} tone="review" />
+        <CountCard label="Needs review" value={board.awaitingDecision} tone="review" />
       </dl>
 
       {provenance && <p className="text-xs text-neutral-500">{provenance}</p>}
@@ -525,45 +585,73 @@ export function ReviewBoard({ initialBoard }: Props) {
 
       {showSection("present") && (
       <Section
-        title="Present"
+        title={
+          board.awaitingConfirmation > 0
+            ? `Present · ${board.awaitingConfirmation} awaiting confirmation`
+            : "Present"
+        }
         count={board.present.length}
         shown={shownPresent.length}
         filtering={filtering}
         emptyText="Nobody is marked present yet."
         tone="present"
       >
-        {shownPresent.map((student) => (
-          <li
-            key={student.attendanceRecordId}
-            className="flex items-center justify-between gap-3 border-b border-neutral-100 px-4 py-2.5 last:border-b-0"
-          >
-            <div className="flex min-w-0 items-center gap-3">
-              <Identity student={student} />
-            </div>
-            <div className="flex shrink-0 items-center gap-3">
-              <span
-                className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${confidenceToneClasses(student.aiConfidence, presentMin)}`}
-                title={
-                  student.isManuallyCorrected
-                    ? `Set by faculty. The system's own result was ${student.aiResult.toLowerCase().replace("_", " ")}.`
-                    : "Recognized automatically"
-                }
-              >
-                {student.isManuallyCorrected
-                  ? "marked by faculty"
-                  : confidenceLabel(student.aiConfidence)}
-              </span>
-              <Button
-                variant="secondary"
-                onClick={() => decide(student, "ABSENT")}
-                disabled={pending[student.attendanceRecordId]}
-                className="!py-1 !text-xs"
-              >
-                Mark absent
-              </Button>
-            </div>
-          </li>
-        ))}
+        {shownPresent.map((student) => {
+          // A suggestion is not a result. Both live in this column because
+          // that is where a reviewer looks for them, but a row nobody has
+          // confirmed says so plainly and offers the confirm action.
+          const suggested = student.finalResult !== "PRESENT";
+          return (
+            <li
+              key={student.attendanceRecordId}
+              className={`flex flex-col gap-2 border-b border-neutral-100 px-4 py-2.5 last:border-b-0 sm:flex-row sm:items-center sm:justify-between ${
+                suggested ? "bg-amber-50/40" : ""
+              }`}
+            >
+              <div className="flex min-w-0 flex-col gap-1">
+                <Identity student={student} />
+                <p className="pl-12 text-xs text-neutral-500">
+                  {suggested
+                    ? "Suggested by recognition — not yet confirmed."
+                    : student.isManuallyCorrected
+                      ? "Confirmed by faculty."
+                      : "Confirmed."}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${confidenceToneClasses(student.aiConfidence, presentMin)}`}
+                  title={
+                    student.isManuallyCorrected
+                      ? `Set by faculty. The system's own result was ${student.aiResult.toLowerCase().replace("_", " ")}.`
+                      : "Proposed by recognition"
+                  }
+                >
+                  {student.isManuallyCorrected
+                    ? "marked by faculty"
+                    : confidenceLabel(student.aiConfidence)}
+                </span>
+                {suggested && (
+                  <Button
+                    onClick={() => decide(student, "PRESENT")}
+                    disabled={pending[student.attendanceRecordId]}
+                    className="!py-1 !text-xs"
+                  >
+                    Confirm
+                  </Button>
+                )}
+                <Button
+                  variant="secondary"
+                  onClick={() => decide(student, "ABSENT")}
+                  disabled={pending[student.attendanceRecordId]}
+                  className="!py-1 !text-xs"
+                >
+                  Mark absent
+                </Button>
+              </div>
+            </li>
+          );
+        })}
       </Section>
       )}
 
@@ -577,6 +665,18 @@ export function ReviewBoard({ initialBoard }: Props) {
                 Confirming closes this register. Students will be able to see their
                 own result, and further changes become authorized corrections.
               </p>
+              {board.awaitingConfirmation > 0 && (
+                <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  <strong>
+                    {board.awaitingConfirmation} student
+                    {board.awaitingConfirmation === 1 ? " is" : "s are"} marked present by
+                    recognition and not yet confirmed by you.
+                  </strong>{" "}
+                  Confirming accepts {board.awaitingConfirmation === 1 ? "that" : "those"}{" "}
+                  suggestion{board.awaitingConfirmation === 1 ? "" : "s"} as your decision, and
+                  each one is recorded against your name. Check them above first if you have not.
+                </p>
+              )}
               {board.finalizeBlockedReason && (
                 <p className="text-xs text-amber-800">{board.finalizeBlockedReason}</p>
               )}
@@ -596,13 +696,25 @@ export function ReviewBoard({ initialBoard }: Props) {
             <>
               <p className="text-xs text-neutral-600">
                 You are about to finalize attendance for{" "}
-                <strong>{board.counts.total}</strong> students:
+                <strong>{board.counts.total}</strong> students
+                {board.awaitingConfirmation > 0 ? (
+                  <>
+                    , accepting <strong>{board.awaitingConfirmation}</strong> recognition
+                    suggestion{board.awaitingConfirmation === 1 ? "" : "s"} as your own decision
+                  </>
+                ) : null}
+                :
               </p>
               <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
                 <CountCard label="Total students" value={board.counts.total} tone="neutral" />
-                <CountCard label="Present" value={board.counts.present} tone="present" />
+                <CountCard
+                  label="Present"
+                  value={board.counts.present}
+                  tone="present"
+                  note={suggestionNote}
+                />
                 <CountCard label="Absent" value={board.counts.absent} tone="absent" />
-                <CountCard label="Needs review" value={unresolved} tone="review" />
+                <CountCard label="Needs review" value={board.awaitingDecision} tone="review" />
               </dl>
               <div className="flex flex-wrap items-center gap-2">
                 <Button onClick={confirm} disabled={!canPressConfirm}>
@@ -694,11 +806,18 @@ function moveStudent(
   const byName = (a: AttendanceReviewStudent, b: AttendanceReviewStudent) =>
     a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName);
 
-  const present = [...rest.filter((s) => s.finalResult === "PRESENT")];
+  // The same grouping rule the server applies: an unconfirmed suggestion
+  // belongs in Present, not in Needs Review. Splitting on `finalResult` alone
+  // would optimistically fling every *other* suggested row into Needs Review
+  // for the moment between the click and the refresh.
+  const unresolved = (s: AttendanceReviewStudent) =>
+    s.finalResult === "NEEDS_REVIEW" || s.finalResult === "NOT_EVALUATED";
+  const suggestedPresent = (s: AttendanceReviewStudent) =>
+    unresolved(s) && s.aiSuggestion === "PRESENT" && !s.isManuallyCorrected;
+
+  const present = [...rest.filter((s) => s.finalResult === "PRESENT" || suggestedPresent(s))];
   const absent = [...rest.filter((s) => s.finalResult === "ABSENT")];
-  const needsReview = [
-    ...rest.filter((s) => s.finalResult === "NEEDS_REVIEW" || s.finalResult === "NOT_EVALUATED"),
-  ];
+  const needsReview = [...rest.filter((s) => unresolved(s) && !suggestedPresent(s))];
   if (newResult === "PRESENT") present.push(moved);
   else if (newResult === "ABSENT") absent.push(moved);
   else needsReview.push(moved);

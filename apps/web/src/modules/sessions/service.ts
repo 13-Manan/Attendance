@@ -113,9 +113,25 @@ export async function finalizeAttendanceSession(
   }
 
   return prisma.$transaction(async (tx) => {
-    const updated = await tx.attendanceSession.update({
-      where: { id: sessionId },
+    // Compare-and-set on the status the caller validated, not a bare update.
+    //
+    // `canTransitionSessionStatus` above checked a status read in an earlier
+    // statement, so two callers finalizing at once both passed it and both
+    // wrote — producing two FINALIZED updates, two audit rows and two
+    // outbound `attendance.finalized` webhooks for one event. Measured: three
+    // concurrent confirmations, three finalizations. Carrying the expected
+    // status into the UPDATE's own WHERE clause makes exactly one win, which
+    // is the same technique `repository.ts#transitionSessionStatus` already
+    // uses for every other transition.
+    const claimed = await tx.attendanceSession.updateMany({
+      where: { id: sessionId, status: session.status },
       data: { status: "FINALIZED", endedAt: finalizedAt },
+    });
+    if (claimed.count === 0) {
+      throw new Error("session_status_conflict");
+    }
+    const updated = await tx.attendanceSession.findUniqueOrThrow({
+      where: { id: sessionId },
     });
 
     await recordAuditLog(

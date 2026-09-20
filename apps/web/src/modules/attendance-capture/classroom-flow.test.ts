@@ -812,14 +812,17 @@ test("scenario 29 & 30: the decision table never marks an uncomparable student a
   assert.equal(staleTemplate.finalResult, "NEEDS_REVIEW");
   assert.equal(staleTemplate.note.reason, "incompatible_face_template");
 
-  // Only a student who WAS compared and found nowhere is absent.
+  // Even a student who WAS compared and matched nobody is not absent. The
+  // evidence says ABSENT; the register waits for a person. Phase 6 removed
+  // the last path by which the machine could write an attendance result.
   const compared = decideCandidate({
     aggregate: undefined,
     recognitionRan: true,
     hasComparableTemplate: true,
     hasAnyTemplate: true,
   });
-  assert.equal(compared.finalResult, "ABSENT");
+  assert.equal(compared.aiResult, "ABSENT", "the finding is recorded");
+  assert.equal(compared.finalResult, "NEEDS_REVIEW", "the decision is not");
   assert.equal(compared.note.reason, "no_match");
 });
 

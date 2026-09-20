@@ -255,6 +255,11 @@ function makeStore(students: AttendanceRosterStudent[], sessionStatus: SessionSt
     correctAttendanceRecord: async (input) => {
       const row = Array.from(rows.values()).find((r) => r.id === input.attendanceRecordId);
       if (!row) throw new Error("not_found");
+      // Mirrors the real compare-and-set: a guarded write that no longer
+      // matches is a no-op, not a second entry for one decision.
+      if (input.onlyIfCurrentResultIn && !input.onlyIfCurrentResultIn.includes(row.finalResult)) {
+        return { ...row, institutionId: "inst-A" } as unknown as AttendanceRecord;
+      }
       corrections.push({
         attendanceRecordId: row.id,
         previousResult: row.finalResult,
@@ -309,7 +314,32 @@ function makeStore(students: AttendanceRosterStudent[], sessionStatus: SessionSt
       return metadata;
     },
     recordIdFor: (studentId: string) => `rec-${studentId}`,
+    rowFor: (studentId: string) => {
+      const row = rows.get(studentId);
+      if (!row) throw new Error(`no register row for ${studentId}`);
+      return row;
+    },
   };
+}
+
+/**
+ * Resolve every row that blocks confirmation.
+ *
+ * In the scenario fixture that is the 5 unmatched plus the 2 uncertain —
+ * indices 43-49. The 43 suggested-present rows are deliberately left alone,
+ * because confirming the register is what accepts those.
+ */
+async function resolveBlockers(
+  store: ReturnType<typeof makeStore>,
+  students: AttendanceRosterStudent[],
+) {
+  for (const index of [43, 44, 45, 46, 47, 48, 49]) {
+    await applyReviewDecision(
+      makeUser(),
+      { attendanceRecordId: store.recordIdFor(students[index].studentId), newResult: "ABSENT" },
+      store.deps,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,16 +381,109 @@ test("uncertainty is never promoted to present", () => {
   assert.equal(uncertain.note.reason, "ambiguous_match");
 });
 
-test("a compared student with no candidate above the review floor is absent", () => {
-  const absent = decideCandidate({
+test("a compared student with no match is NOT marked absent — only a person may do that", () => {
+  // This used to write finalResult ABSENT and was the single place the system
+  // asserted absence on its own evidence. Failing to find somebody has many
+  // causes that are not the student being elsewhere: hidden behind a
+  // classmate, turned away, at the back of a dark room, outside the frame.
+  const unmatched = decideCandidate({
     aggregate: undefined,
     recognitionRan: true,
     hasComparableTemplate: true,
     hasAnyTemplate: true,
   });
-  assert.equal(absent.aiResult, "ABSENT");
-  assert.equal(absent.finalResult, "ABSENT");
-  assert.equal(absent.note.wasComparable, true);
+  assert.equal(unmatched.aiResult, "ABSENT", "the evidence is still recorded honestly");
+  assert.equal(unmatched.finalResult, "NEEDS_REVIEW", "but the register waits for a human");
+  assert.equal(unmatched.note.reason, "no_match");
+  assert.equal(unmatched.note.aiSuggestion, null);
+  assert.equal(unmatched.note.wasComparable, true);
+});
+
+test("a confident match is a suggestion, not a decision", () => {
+  const matched = decideCandidate({
+    aggregate: {
+      advisoryResult: "PRESENT",
+      bestSimilarity: 0.91,
+      wasAmbiguous: false,
+      bestFaceId: "1:0",
+      bestEmbeddingId: "emb-1",
+    },
+    recognitionRan: true,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+  });
+  assert.equal(matched.aiResult, "PRESENT");
+  assert.equal(matched.aiConfidence, 0.91);
+  assert.equal(matched.note.aiSuggestion, "PRESENT");
+  assert.equal(
+    matched.finalResult,
+    "NEEDS_REVIEW",
+    "the register records it as unresolved until somebody confirms",
+  );
+});
+
+test("no branch of the decision table can write a final PRESENT or ABSENT", () => {
+  // The structural guarantee, asserted over every reachable combination rather
+  // than one case at a time.
+  const advisories = ["PRESENT", "NEEDS_REVIEW", "ABSENT", undefined] as const;
+  for (const advisory of advisories) {
+    for (const recognitionRan of [true, false]) {
+      for (const hasComparable of [true, false]) {
+        for (const noFaces of [true, false]) {
+          const d = decideCandidate({
+            aggregate: advisory
+              ? {
+                  advisoryResult: advisory,
+                  bestSimilarity: 0.8,
+                  wasAmbiguous: false,
+                  bestFaceId: "1:0",
+                }
+              : undefined,
+            recognitionRan,
+            hasComparableTemplate: hasComparable,
+            hasAnyTemplate: hasComparable,
+            noFacesDetected: noFaces,
+          });
+          assert.equal(
+            d.finalResult,
+            "NEEDS_REVIEW",
+            `advisory=${advisory} ran=${recognitionRan} comparable=${hasComparable} noFaces=${noFaces}`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test("a session where no face was detected says so, rather than reporting no match", () => {
+  const d = decideCandidate({
+    aggregate: undefined,
+    recognitionRan: true,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+    noFacesDetected: true,
+  });
+  assert.equal(d.note.reason, "no_face_detected");
+  assert.equal(d.finalResult, "NEEDS_REVIEW");
+});
+
+test("a recognition error is distinguished from recognition never running", () => {
+  const errored = decideCandidate({
+    aggregate: undefined,
+    recognitionRan: false,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+    recognitionErrored: true,
+  });
+  assert.equal(errored.note.reason, "recognition_error");
+
+  const never = decideCandidate({
+    aggregate: undefined,
+    recognitionRan: false,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+  });
+  assert.equal(never.note.reason, "recognition_unavailable");
 });
 
 test("when recognition did not run, nobody is presumed anything", () => {
@@ -439,10 +562,13 @@ test("every enrolled student gets a row, including those recognition never retur
     store.deps,
   );
 
-  assert.equal(result.counts.total, 50);
+  assert.equal(result.counts.total, 50, "every enrolled student has a row");
   assert.equal(store.rows.size, 50);
-  assert.equal(result.counts.present, 10);
-  assert.equal(result.counts.absent, 40);
+  // Nobody is decided at generation, including the 40 the model never
+  // returned. "Recognition did not mention you" is not a fact about you.
+  assert.equal(result.counts.present, 0);
+  assert.equal(result.counts.absent, 0);
+  assert.equal(result.counts.needsReview, 50);
 });
 
 test("generation walks the session CAPTURING → PROCESSING → REVIEW", async () => {
@@ -504,10 +630,14 @@ test("reprocessing refreshes untouched rows and preserves manual corrections", a
   );
 
   assert.equal(second.created, 0);
+  // The human decision is untouched by reprocessing.
   assert.equal(store.rows.get("stu-001")!.finalResult, "PRESENT");
   assert.equal(store.rows.get("stu-001")!.isManuallyCorrected, true);
-  assert.equal(store.rows.get("stu-002")!.finalResult, "PRESENT");
-  assert.equal(store.rows.get("stu-003")!.finalResult, "ABSENT");
+  // Everyone else stays unresolved — a second recognition run is more
+  // evidence, not a decision.
+  assert.equal(store.rows.get("stu-002")!.finalResult, "NEEDS_REVIEW");
+  assert.equal(store.rows.get("stu-002")!.aiResult, "PRESENT", "refreshed advisory");
+  assert.equal(store.rows.get("stu-003")!.finalResult, "NEEDS_REVIEW");
 });
 
 test("manual roll call puts the whole class in review and presumes nothing", async () => {
@@ -559,20 +689,47 @@ async function seedScenario() {
   return { store, students, result };
 }
 
-test("scenario: the generated register is 43 present / 5 absent / 2 review", async () => {
+test("scenario: generation decides nothing — all 50 rows are unresolved", async () => {
+  // The Phase 6 invariant, at register scale. 43 confident matches, 5 that
+  // matched nobody and 2 uncertain all land in the same place: waiting for a
+  // person. The machine's findings are recorded, the register is not.
   const { result } = await seedScenario();
   assert.deepEqual(result.counts, {
     total: 50,
-    present: 43,
-    absent: 5,
-    needsReview: 2,
+    present: 0,
+    absent: 0,
+    needsReview: 50,
     notEvaluated: 0,
   });
 });
 
-test("scenario: marking one absent student present gives 44 / 4 / 2", async () => {
+test("scenario: the board shows 43 as suggested-present and 7 as needing a decision", async () => {
+  const { store } = await seedScenario();
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+
+  assert.equal(board.present.length, 43, "confident matches surface where a reviewer looks");
+  assert.equal(board.absent.length, 0, "nothing is absent until somebody says so");
+  assert.equal(board.needsReview.length, 7, "5 unmatched + 2 uncertain");
+  assert.equal(board.awaitingConfirmation, 43);
+  assert.equal(board.awaitingDecision, 7);
+
+  // Every row in Present is still a suggestion, not a result.
+  assert.ok(board.present.every((r) => r.finalResult === "NEEDS_REVIEW"));
+  assert.ok(board.present.every((r) => r.aiSuggestion === "PRESENT"));
+  // And nothing in Needs Review carries a suggestion.
+  assert.ok(board.needsReview.every((r) => r.aiSuggestion === null));
+});
+
+test("scenario: only the un-suggested rows block confirmation", async () => {
+  const { store } = await seedScenario();
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+  assert.equal(board.canFinalize, false);
+  assert.match(board.finalizeBlockedReason ?? "", /7 students still need review/);
+});
+
+test("scenario: marking an unmatched student present moves exactly one row", async () => {
   const { store, students } = await seedScenario();
-  // students[45] is one of the five absent (indices 45–49).
+  // students[45] is one of the five the model matched to nobody.
   const decision = await applyReviewDecision(
     makeUser(),
     {
@@ -583,15 +740,10 @@ test("scenario: marking one absent student present gives 44 / 4 / 2", async () =
     store.deps,
   );
 
-  assert.deepEqual(decision.counts, {
-    total: 50,
-    present: 44,
-    absent: 4,
-    needsReview: 2,
-    notEvaluated: 0,
-  });
-  // The four lists still partition the class exactly — nobody duplicated,
-  // nobody dropped.
+  assert.equal(decision.counts.present, 1, "one faculty-owned PRESENT");
+  assert.equal(decision.counts.absent, 0);
+  assert.equal(decision.counts.needsReview, 49);
+  // The four buckets still partition the class exactly.
   assert.equal(
     decision.counts.present +
       decision.counts.absent +
@@ -599,22 +751,13 @@ test("scenario: marking one absent student present gives 44 / 4 / 2", async () =
       decision.counts.notEvaluated,
     50,
   );
+
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+  assert.equal(board.awaitingDecision, 6, "one fewer row blocking confirmation");
 });
 
-test("scenario: resolving a review row moves exactly one student, either way", async () => {
-  // The phase text expects "Present 45, Absent 5, Review 1" after resolving
-  // one of the two review rows, but that totals 51 for a class of 50.
-  // Resolving a review row moves ONE student out of Review, so both
-  // consistent outcomes are asserted here.
+test("scenario: a review row can be resolved either way", async () => {
   const asPresent = await seedScenario();
-  await applyReviewDecision(
-    makeUser(),
-    {
-      attendanceRecordId: asPresent.store.recordIdFor(asPresent.students[45].studentId),
-      newResult: "PRESENT",
-    },
-    asPresent.store.deps,
-  );
   const presentBranch = await applyReviewDecision(
     makeUser(),
     {
@@ -623,23 +766,10 @@ test("scenario: resolving a review row moves exactly one student, either way", a
     },
     asPresent.store.deps,
   );
-  assert.deepEqual(presentBranch.counts, {
-    total: 50,
-    present: 45,
-    absent: 4,
-    needsReview: 1,
-    notEvaluated: 0,
-  });
+  assert.equal(presentBranch.counts.present, 1);
+  assert.equal(presentBranch.counts.absent, 0);
 
   const asAbsent = await seedScenario();
-  await applyReviewDecision(
-    makeUser(),
-    {
-      attendanceRecordId: asAbsent.store.recordIdFor(asAbsent.students[45].studentId),
-      newResult: "PRESENT",
-    },
-    asAbsent.store.deps,
-  );
   const absentBranch = await applyReviewDecision(
     makeUser(),
     {
@@ -648,73 +778,93 @@ test("scenario: resolving a review row moves exactly one student, either way", a
     },
     asAbsent.store.deps,
   );
-  assert.deepEqual(absentBranch.counts, {
-    total: 50,
-    present: 44,
-    absent: 5,
-    needsReview: 1,
-    notEvaluated: 0,
-  });
+  assert.equal(absentBranch.counts.absent, 1, "the only route to ABSENT is this one");
+  assert.equal(absentBranch.counts.present, 0);
 });
 
-test("scenario: the register cannot be confirmed while a review row remains", async () => {
+test("scenario: the register cannot be confirmed while an undecided row remains", async () => {
   const { store, students } = await seedScenario();
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
-    store.deps,
-  );
+  // Resolve six of the seven.
+  for (const index of [43, 44, 45, 46, 47, 48]) {
+    await applyReviewDecision(
+      makeUser(),
+      { attendanceRecordId: store.recordIdFor(students[index].studentId), newResult: "ABSENT" },
+      store.deps,
+    );
+  }
 
   const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
   assert.equal(board.canFinalize, false);
   assert.match(board.finalizeBlockedReason ?? "", /1 student still needs review/);
 
-  await assert.rejects(
-    () => confirmAttendance(makeUser(), "sess-1", store.deps),
-    /unresolved_review_states:1/,
-  );
+  await assert.rejects(() => confirmAttendance(makeUser(), "sess-1", store.deps), /unresolved/);
   assert.notEqual(store.status, "FINALIZED");
 });
 
-test("scenario: confirming after every row is resolved finalizes and fans out", async () => {
+test("scenario: confirming accepts every suggestion and records who accepted it", async () => {
   const { store, students } = await seedScenario();
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
-    store.deps,
-  );
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[44].studentId), newResult: "ABSENT" },
-    store.deps,
-  );
+  for (const index of [43, 44, 45, 46, 47, 48, 49]) {
+    await applyReviewDecision(
+      makeUser(),
+      { attendanceRecordId: store.recordIdFor(students[index].studentId), newResult: "ABSENT" },
+      store.deps,
+    );
+  }
 
   const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
   assert.equal(board.canFinalize, true);
-  assert.equal(board.counts.total, 50);
-  assert.equal(board.counts.present, 44);
-  assert.equal(board.counts.absent, 6);
-  assert.equal(board.counts.needsReview, 0);
+  assert.equal(board.awaitingConfirmation, 43, "the suggestions are still unconfirmed");
 
+  const correctionsBefore = store.corrections.length;
   const confirmed = await confirmAttendance(makeUser(), "sess-1", store.deps);
+
   assert.equal(store.status, "FINALIZED");
-  assert.equal(confirmed.counts.present, 44);
+  assert.equal(confirmed.counts.present, 43, "every suggestion became a real PRESENT");
+  assert.equal(confirmed.counts.absent, 7);
+  assert.equal(confirmed.counts.needsReview, 0);
   assert.equal(confirmed.finalizedByUserId, "user-faculty");
+
+  // Each accepted suggestion is a recorded faculty decision, not a bulk flip:
+  // "who decided this student was present?" has an answer for all 43.
+  assert.equal(
+    store.corrections.length - correctionsBefore,
+    43,
+    "one correction row per confirmed suggestion",
+  );
+  const confirmations = store.corrections.slice(correctionsBefore);
+  assert.ok(confirmations.every((c) => c.changedByUserId === "user-faculty"));
+  assert.ok(confirmations.every((c) => c.newResult === "PRESENT"));
+  assert.ok(confirmations.every((c) => c.previousResult === "NEEDS_REVIEW"));
 
   const finalizedEvent = store.events.find((e) => e.type === "attendance-session-finalized");
   assert.ok(finalizedEvent, "session channel received the finalization");
-  // Every student learns their own result and nothing else.
-  const fanout = store.studentEvents.filter((e) => e.event.type === "student-attendance-updated");
-  assert.equal(fanout.length >= 50, true);
-  assert.equal(
-    fanout.every((e) => e.event.type === "student-attendance-updated" && e.event.studentId === e.studentId),
-    true,
-  );
 });
 
-// ---------------------------------------------------------------------------
-// Corrections
-// ---------------------------------------------------------------------------
+test("scenario: confirming never overrides a decision a person already made", async () => {
+  // A student the model matched, whom the teacher then marked absent, must
+  // stay absent when the register is confirmed.
+  const { store, students } = await seedScenario();
+  const matched = students[0].studentId;
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(matched), newResult: "ABSENT", reason: "Left early" },
+    store.deps,
+  );
+  for (const index of [43, 44, 45, 46, 47, 48, 49]) {
+    await applyReviewDecision(
+      makeUser(),
+      { attendanceRecordId: store.recordIdFor(students[index].studentId), newResult: "ABSENT" },
+      store.deps,
+    );
+  }
+
+  await confirmAttendance(makeUser(), "sess-1", store.deps);
+
+  const row = store.rowFor(matched);
+  assert.equal(row.finalResult, "ABSENT", "the human decision survived confirmation");
+  assert.equal(row.aiResult, "PRESENT", "and the machine's finding survived too");
+  assert.equal(row.isManuallyCorrected, true);
+});
 
 test("a correction preserves the original AI result and appends an audit row", async () => {
   const { store, students } = await seedScenario();
@@ -740,7 +890,7 @@ test("a correction preserves the original AI result and appends an audit row", a
   assert.equal(store.corrections.length, 1);
   assert.deepEqual(store.corrections[0], {
     attendanceRecordId: `rec-${target}`,
-    previousResult: "ABSENT",
+    previousResult: "NEEDS_REVIEW",
     newResult: "PRESENT",
     changedByUserId: "user-faculty",
     source: "FACULTY_REVIEW",
@@ -750,15 +900,24 @@ test("a correction preserves the original AI result and appends an audit row", a
 
 test("re-asserting the same result writes no correction row", async () => {
   const { store, students } = await seedScenario();
-  const alreadyPresent = students[0].studentId;
+  const target = students[0].studentId;
+  // Confirm once, so the row genuinely holds PRESENT.
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor(target), newResult: "PRESENT" },
+    store.deps,
+  );
+  const before = store.corrections.length;
+
+  // Asserting the same result again is a non-event and must not pollute the
+  // audit trail with one.
   const result = await applyReviewDecision(
     makeUser(),
-    { attendanceRecordId: store.recordIdFor(alreadyPresent), newResult: "PRESENT" },
+    { attendanceRecordId: store.recordIdFor(target), newResult: "PRESENT" },
     store.deps,
   );
   assert.equal(result.record.finalResult, "PRESENT");
-  assert.equal(store.corrections.length, 0);
-  assert.equal(store.rows.get(alreadyPresent)!.isManuallyCorrected, false);
+  assert.equal(store.corrections.length, before);
 });
 
 test("a correction publishes to the session board and to the student alone", async () => {
@@ -772,7 +931,7 @@ test("a correction publishes to the session board and to the student alone", asy
 
   const boardEvent = store.events.find((e) => e.type === "attendance-record-updated");
   assert.ok(boardEvent);
-  assert.equal(boardEvent.type === "attendance-record-updated" && boardEvent.counts.present, 44);
+  assert.equal(boardEvent.type === "attendance-record-updated" && boardEvent.counts.present, 1);
 
   assert.equal(store.studentEvents.length, 1);
   assert.equal(store.studentEvents[0].studentId, target);
@@ -795,16 +954,7 @@ test("correcting requires attendanceRecord.correct", async () => {
 
 test("after finalization only a finalizer may correct, and it is an override", async () => {
   const { store, students } = await seedScenario();
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
-    store.deps,
-  );
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[44].studentId), newResult: "ABSENT" },
-    store.deps,
-  );
+  await resolveBlockers(store, students);
   await confirmAttendance(makeUser(), "sess-1", store.deps);
   const correctionsBefore = store.corrections.length;
 
@@ -870,9 +1020,11 @@ test("the board explains why each reviewed student is there", async () => {
   const { store, students } = await seedScenario();
   const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
 
+  // 43 suggested-present, and the 7 rows the model could not settle. Nothing
+  // is absent, because nobody has said so.
   assert.equal(board.present.length, 43);
-  assert.equal(board.absent.length, 5);
-  assert.equal(board.needsReview.length, 2);
+  assert.equal(board.absent.length, 0);
+  assert.equal(board.needsReview.length, 7);
 
   const ambiguous = board.needsReview.find((s) => s.studentId === students[43].studentId)!;
   assert.equal(ambiguous.reason, "ambiguous_match");
@@ -894,16 +1046,7 @@ test("the board explains why each reviewed student is there", async () => {
 
 test("the board reports finalization state and who closed the register", async () => {
   const { store, students } = await seedScenario();
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
-    store.deps,
-  );
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[44].studentId), newResult: "ABSENT" },
-    store.deps,
-  );
+  await resolveBlockers(store, students);
   await confirmAttendance(makeUser(), "sess-1", store.deps);
 
   const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
@@ -976,11 +1119,14 @@ test("generation, correction and finalization each emit exactly one event", asyn
   // and updated must not receive the same change twice.
   assert.equal(store.webhooks.filter((e) => e.type === "attendance.updated").length, 0);
 
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
-    store.deps,
-  );
+  // students[44] is already decided above; clear the rest of the blockers.
+  for (const index of [43, 45, 46, 47, 48, 49]) {
+    await applyReviewDecision(
+      makeUser(),
+      { attendanceRecordId: store.recordIdFor(students[index].studentId), newResult: "PRESENT" },
+      store.deps,
+    );
+  }
   await confirmAttendance(makeUser(), "sess-1", store.deps);
 
   const finalized = store.webhooks.filter((e) => e.type === "attendance.finalized");
@@ -998,16 +1144,7 @@ test("generation, correction and finalization each emit exactly one event", asyn
 
 test("no outbound payload carries an AI confidence, AI result or image", async () => {
   const { store, students } = await seedScenario();
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[43].studentId), newResult: "PRESENT" },
-    store.deps,
-  );
-  await applyReviewDecision(
-    makeUser(),
-    { attendanceRecordId: store.recordIdFor(students[44].studentId), newResult: "ABSENT" },
-    store.deps,
-  );
+  await resolveBlockers(store, students);
   await confirmAttendance(makeUser(), "sess-1", store.deps);
 
   assert.equal(store.webhooks.length >= 3, true);

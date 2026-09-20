@@ -27,12 +27,41 @@ export type AttendanceReviewReason =
    * is not in one still image twice, so this is the recogniser confusing
    * people — never a confident presence. */
   | "duplicate_in_capture"
+  /** Compared against every detected face, and none of them was this student.
+   * NOT absence: the student may have been behind somebody, facing away, or
+   * outside the frame. Only a person may call that absence. */
   | "no_match"
+  /** The captures contained no detectable face at all. Distinct from
+   * `no_match`, which means faces were found and none was this student —
+   * "we looked and saw nobody" is a different fact from "we saw people and
+   * none was you", and a reviewer needs to be told which happened. */
+  | "no_face_detected"
+  /** Faces were detected but the captures were too poor to compare against.
+   * A property of the photograph, not of the student. */
+  | "low_quality"
   | "no_face_template"
   | "incompatible_face_template"
   | "recognition_unavailable"
+  /** Recognition was attempted and failed outright. Distinct from
+   * `recognition_unavailable`, which means it was never attempted. */
+  | "recognition_error"
   | "manually_corrected"
   | null;
+
+/**
+ * What the machine proposes, separate from what has been decided.
+ *
+ * This is the whole point of the Phase 6 state split. A recognition result is
+ * *evidence*, and evidence that nobody has acted on is not an attendance
+ * result. `PRESENT` here means "the model believes this student is in the
+ * room"; the register still records the student as unresolved until a person
+ * confirms it, and `finalResult` is what carries that decision.
+ *
+ * There is deliberately no `ABSENT` suggestion. The model cannot produce
+ * evidence of absence — it can only fail to find somebody, which has many
+ * causes that are not the student being elsewhere.
+ */
+export type AttendanceSuggestion = "PRESENT" | null;
 
 export interface AttendanceRosterStudent {
   studentId: string;
@@ -64,6 +93,9 @@ export interface AttendanceReviewStudent extends AttendanceRosterStudent {
   isManuallyCorrected: boolean;
   /** Human-facing explanation of how this student got here. */
   reason: AttendanceReviewReason;
+  /** What the model proposed. `"PRESENT"` with a non-PRESENT `finalResult`
+   * means an unconfirmed suggestion. */
+  aiSuggestion: AttendanceSuggestion;
   /** True when recognition could not compare this student at all (no active
    * face template, or one enrolled under a different model build). Absence
    * for this student is "we never looked", not "we looked and they weren't
@@ -146,6 +178,11 @@ export interface AttendanceReviewBoard {
    * into a result. `finalizeBlockedReason` says why. */
   canFinalize: boolean;
   finalizeBlockedReason: string | null;
+  /** Suggested-present rows that confirming the register will convert into a
+   * faculty-owned PRESENT. */
+  awaitingConfirmation: number;
+  /** Rows nobody and nothing has resolved. These block confirmation. */
+  awaitingDecision: number;
   /** True when the caller may actually press Confirm Attendance (permission
    * + state). Distinct from `canFinalize`, which is about the data. */
   actorCanFinalize: boolean;

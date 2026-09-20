@@ -26,12 +26,31 @@ export async function correctAttendanceRecord(
       where: { id: input.attendanceRecordId },
     });
 
-    const updated = await tx.attendanceRecord.update({
+    // Compare-and-set when the caller supplied a guard. `updateMany` carries
+    // the condition into the UPDATE's own WHERE clause, so Postgres evaluates
+    // it against the committed row: a second transaction racing this one
+    // blocks, re-checks, matches nothing, and writes no duplicate correction.
+    // A plain `update` cannot express that — it matches on the id alone, and
+    // the state it was deciding against was read in a separate statement.
+    const guarded = input.onlyIfCurrentResultIn;
+    if (guarded) {
+      const claimed = await tx.attendanceRecord.updateMany({
+        where: { id: input.attendanceRecordId, finalResult: { in: guarded } },
+        data: { finalResult: input.newResult, isManuallyCorrected: true },
+      });
+      if (claimed.count === 0) {
+        // Somebody else decided this row first. Their correction stands and
+        // this call is a no-op rather than a second entry for one decision.
+        return existing;
+      }
+    } else {
+      await tx.attendanceRecord.update({
+        where: { id: input.attendanceRecordId },
+        data: { finalResult: input.newResult, isManuallyCorrected: true },
+      });
+    }
+    const updated = await tx.attendanceRecord.findUniqueOrThrow({
       where: { id: input.attendanceRecordId },
-      data: {
-        finalResult: input.newResult,
-        isManuallyCorrected: true,
-      },
     });
 
     await tx.attendanceCorrection.create({

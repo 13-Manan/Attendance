@@ -53,6 +53,7 @@ import {
 import type { AttendanceRecordRow, SessionDetailRow } from "./repository";
 import type {
   AttendanceCounts,
+  AttendanceSuggestion,
   AttendanceGenerationSource,
   AttendanceReviewBoard,
   AttendanceReviewReason,
@@ -126,6 +127,12 @@ export interface StoredObservation {
 
 export interface StoredStudentNote {
   reason: AttendanceReviewReason;
+  /**
+   * What the model proposed, if anything. Separate from `reason`, which says
+   * why a row needs a human. A row can have a suggestion AND still be
+   * unresolved — that is the normal case for a confident match.
+   */
+  aiSuggestion?: AttendanceSuggestion;
   wasAmbiguous: boolean;
   wasComparable: boolean;
   bestFaceId: string | null;
@@ -226,17 +233,41 @@ export function initialsFor(firstName: string, lastName: string): string {
  * (roster student, recognition aggregate, template availability) so the
  * "do not lose them" behaviour is testable without any I/O.
  *
- * | situation                          | aiResult      | finalResult  |
- * | ---------------------------------- | ------------- | ------------ |
- * | recognition did not run            | NOT_EVALUATED | NEEDS_REVIEW |
- * | no usable face template            | NOT_EVALUATED | NEEDS_REVIEW |
- * | matched above presentMin           | PRESENT       | PRESENT      |
- * | uncertain / ambiguous              | NEEDS_REVIEW  | NEEDS_REVIEW |
- * | compared, nothing above reviewMin  | ABSENT        | ABSENT       |
+ * | situation                          | aiResult      | suggestion | finalResult  |
+ * | ---------------------------------- | ------------- | ---------- | ------------ |
+ * | recognition did not run            | NOT_EVALUATED | -          | NEEDS_REVIEW |
+ * | recognition failed outright        | NOT_EVALUATED | -          | NEEDS_REVIEW |
+ * | no usable face template            | NOT_EVALUATED | -          | NEEDS_REVIEW |
+ * | no face detected in any capture    | NOT_EVALUATED | -          | NEEDS_REVIEW |
+ * | matched above presentMin           | PRESENT       | PRESENT    | NEEDS_REVIEW |
+ * | uncertain / ambiguous / duplicate  | NEEDS_REVIEW  | -          | NEEDS_REVIEW |
+ * | compared, nothing above reviewMin  | ABSENT        | -          | NEEDS_REVIEW |
  *
- * Note the third row from the bottom: a student we could not compare is NOT
- * marked absent. "We never looked" and "we looked and you weren't there" are
- * different claims, and only the second one is evidence of absence.
+ * ## Every row ends in NEEDS_REVIEW, and that is the point
+ *
+ * `finalResult` is what the register records. Nothing the model produces
+ * writes it, because the model produces *evidence* and evidence is not a
+ * decision. Two rows changed in Phase 6 to make that true:
+ *
+ *  - **"compared, nothing above reviewMin" used to write ABSENT.** It was the
+ *    one place the system asserted absence on its own. Failing to find
+ *    somebody has many causes that are not the student being elsewhere: they
+ *    were behind another student, facing away, at the back of a dark room, or
+ *    outside the frame. The `aiResult` still records ABSENT — that is the
+ *    honest summary of what the comparison found — but the register waits for
+ *    a person.
+ *  - **"matched above presentMin" used to write PRESENT.** A confident match
+ *    is now a *suggestion*: it shows in the Present column marked as the
+ *    model's proposal, and becomes a real PRESENT when a faculty member
+ *    confirms it, individually or by confirming the register.
+ *
+ * So the only paths to a final PRESENT or ABSENT run through
+ * `applyReviewDecision` or `confirmAttendance`, both of which require a
+ * permission, record an actor, and append an `AttendanceCorrection` row.
+ *
+ * `aiResult` keeps the machine's finding for every row regardless, so a
+ * reviewer can always see what the model thought and a later investigation
+ * can tell a human's decision from a machine's.
  */
 export function decideCandidate(args: {
   aggregate:
@@ -258,6 +289,12 @@ export function decideCandidate(args: {
   recognitionRan: boolean;
   hasComparableTemplate: boolean;
   hasAnyTemplate: boolean;
+  /** True when recognition ran but found no face in any capture. Separates
+   * "we saw nobody" from "we saw people, none of them you". */
+  noFacesDetected?: boolean;
+  /** True when recognition was attempted and errored. Distinct from never
+   * having been attempted. */
+  recognitionErrored?: boolean;
 }): {
   aiResult: AttendanceRecordRow["aiResult"];
   aiConfidence: number | null;
@@ -283,9 +320,28 @@ export function decideCandidate(args: {
       matchedEmbeddingId: null,
       finalResult: "NEEDS_REVIEW",
       note: {
-        reason: "recognition_unavailable",
+        reason: args.recognitionErrored ? "recognition_error" : "recognition_unavailable",
+        aiSuggestion: null,
         wasAmbiguous: false,
         wasComparable: false,
+        bestFaceId: null,
+      },
+    };
+  }
+
+  // Recognition ran but the room yielded no detectable face. Every student is
+  // unresolved for the same reason, and that reason is about the photograph.
+  if (args.noFacesDetected) {
+    return {
+      aiResult: "NOT_EVALUATED",
+      aiConfidence: null,
+      matchedEmbeddingId: null,
+      finalResult: "NEEDS_REVIEW",
+      note: {
+        reason: "no_face_detected",
+        aiSuggestion: null,
+        wasAmbiguous: false,
+        wasComparable: args.hasComparableTemplate,
         bestFaceId: null,
       },
     };
@@ -300,29 +356,50 @@ export function decideCandidate(args: {
       aiConfidence: null,
       matchedEmbeddingId: null,
       finalResult: "NEEDS_REVIEW",
-      note: { reason, wasAmbiguous: false, wasComparable: false, bestFaceId: null },
+      note: {
+        reason,
+        aiSuggestion: null,
+        wasAmbiguous: false,
+        wasComparable: false,
+        bestFaceId: null,
+      },
     };
   }
 
   const agg = args.aggregate;
   if (!agg) {
+    // Compared against every detected face and matched none of them. The
+    // evidence is recorded as ABSENT; the register is NOT. Failing to find
+    // somebody is not the same as their not being there, and only a person
+    // may make that call.
     return {
       aiResult: "ABSENT",
       aiConfidence: null,
       matchedEmbeddingId: null,
-      finalResult: "ABSENT",
-      note: { reason: "no_match", wasAmbiguous: false, wasComparable: true, bestFaceId: null },
+      finalResult: "NEEDS_REVIEW",
+      note: {
+        reason: "no_match",
+        aiSuggestion: null,
+        wasAmbiguous: false,
+        wasComparable: true,
+        bestFaceId: null,
+      },
     };
   }
 
   if (agg.advisoryResult === "PRESENT") {
+    // A confident match is a proposal. It shows in the Present column marked
+    // as the model's suggestion and becomes a real PRESENT only when a
+    // faculty member confirms it — individually, or by confirming the
+    // register, which records them as the actor either way.
     return {
       aiResult: "PRESENT",
       aiConfidence: agg.bestSimilarity,
       matchedEmbeddingId: agg.bestEmbeddingId ?? null,
-      finalResult: "PRESENT",
+      finalResult: "NEEDS_REVIEW",
       note: {
         reason: null,
+        aiSuggestion: "PRESENT",
         wasAmbiguous: false,
         wasComparable: true,
         bestFaceId: agg.bestFaceId,
@@ -343,6 +420,7 @@ export function decideCandidate(args: {
           : agg.wasAmbiguous
             ? "ambiguous_match"
             : "low_confidence",
+        aiSuggestion: null,
         wasAmbiguous: agg.wasAmbiguous,
         wasComparable: true,
         bestFaceId: agg.bestFaceId,
@@ -351,13 +429,16 @@ export function decideCandidate(args: {
     };
   }
 
+  // Same rule as the no-aggregate branch: evidence of ABSENT, decision
+  // withheld. This was the one place the system used to assert absence.
   return {
     aiResult: "ABSENT",
     aiConfidence: agg.bestSimilarity,
     matchedEmbeddingId: null,
-    finalResult: "ABSENT",
+    finalResult: "NEEDS_REVIEW",
     note: {
       reason: "no_match",
+      aiSuggestion: null,
       wasAmbiguous: false,
       wasComparable: true,
       bestFaceId: agg.bestFaceId,
@@ -608,6 +689,9 @@ export async function generateAttendanceCandidates(
       recognitionRan,
       hasComparableTemplate: comparable.has(student.studentId),
       hasAnyTemplate: anyTemplate.has(student.studentId),
+      // "We looked and saw nobody" reads very differently from "we saw people
+      // and none was you", so the reviewer is told which happened.
+      noFacesDetected: recognitionRan && recognition!.detectedFacesTotal === 0,
     });
     notes[student.studentId] = decision.note;
     return {
@@ -767,6 +851,7 @@ export async function getAttendanceReviewBoard(
       finalResult: record.finalResult,
       isManuallyCorrected: record.isManuallyCorrected,
       reason: reasonForStoredRow(record, note),
+      aiSuggestion: note?.aiSuggestion ?? null,
       wasComparable: note?.wasComparable ?? false,
       wasAmbiguous: note?.wasAmbiguous ?? false,
       bestFaceId: note?.bestFaceId ?? null,
@@ -776,21 +861,42 @@ export async function getAttendanceReviewBoard(
   const byName = (a: AttendanceReviewStudent, b: AttendanceReviewStudent) =>
     a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName);
 
-  const present = rows.filter((r) => r.finalResult === "PRESENT").sort(byName);
-  const absent = rows.filter((r) => r.finalResult === "ABSENT").sort(byName);
-  const needsReview = rows
-    .filter((r) => r.finalResult === "NEEDS_REVIEW" || r.finalResult === "NOT_EVALUATED")
+  /**
+   * Three columns, and the Present one has two kinds of row in it.
+   *
+   *   Present   = confirmed by a person, plus the model's unconfirmed
+   *               suggestions, which are shown here because that is where a
+   *               reviewer looks for them — but labelled as proposals and
+   *               still carrying `finalResult: NEEDS_REVIEW`.
+   *   Needs review = unresolved with no suggestion. These are the rows that
+   *               genuinely need somebody to decide, and the ones that block
+   *               finalization.
+   *   Absent    = only ever set by a person.
+   */
+  const isUnresolved = (r: AttendanceReviewStudent) =>
+    r.finalResult === "NEEDS_REVIEW" || r.finalResult === "NOT_EVALUATED";
+  const isSuggestedPresent = (r: AttendanceReviewStudent) =>
+    isUnresolved(r) && r.aiSuggestion === "PRESENT" && !r.isManuallyCorrected;
+
+  const present = rows
+    .filter((r) => r.finalResult === "PRESENT" || isSuggestedPresent(r))
     .sort(byName);
+  const absent = rows.filter((r) => r.finalResult === "ABSENT").sort(byName);
+  const needsReview = rows.filter((r) => isUnresolved(r) && !isSuggestedPresent(r)).sort(byName);
 
   const counts = countAttendance(records);
-  const unresolved = counts.needsReview + counts.notEvaluated;
+  // What actually blocks confirmation: unresolved rows the model made no
+  // proposal about. A suggested-present row is resolved BY confirming the
+  // register — that act is the faculty decision, and it is recorded as one.
+  const awaitingDecision = needsReview.length;
+  const awaitingConfirmation = present.filter((r) => r.finalResult !== "PRESENT").length;
 
   let finalizeBlockedReason: string | null = null;
   if (counts.total === 0) {
     finalizeBlockedReason = "No attendance candidates have been generated for this session yet.";
-  } else if (unresolved > 0) {
-    finalizeBlockedReason = `${unresolved} student${unresolved === 1 ? "" : "s"} still need${
-      unresolved === 1 ? "s" : ""
+  } else if (awaitingDecision > 0) {
+    finalizeBlockedReason = `${awaitingDecision} student${awaitingDecision === 1 ? "" : "s"} still need${
+      awaitingDecision === 1 ? "s" : ""
     } review. Resolve each one as present or absent before confirming.`;
   } else if (session.status !== "REVIEW") {
     finalizeBlockedReason =
@@ -844,6 +950,11 @@ export async function getAttendanceReviewBoard(
     needsReview,
     canFinalize: finalizeBlockedReason === null,
     finalizeBlockedReason,
+    /** Rows the model proposed as present that confirming will turn into a
+     * real PRESENT. Shown on the confirm dialog so nobody accepts a batch of
+     * machine output without being told how much of it there is. */
+    awaitingConfirmation,
+    awaitingDecision,
     actorCanFinalize: hasPermission(actor, "attendanceSession.finalize"),
     actorCanOverrideFinalized: hasPermission(actor, "attendanceSession.finalize"),
   };
@@ -941,6 +1052,10 @@ export async function applyReviewDecision(
     changedByUserId: actor.userId,
     source: isPostFinalization ? "ADMIN_OVERRIDE" : "FACULTY_REVIEW",
     reason: input.reason,
+    // The no-op check above read `existing.finalResult`; this makes the write
+    // conditional on it still being true. A double-clicked button or two
+    // devices on the same row then produce one correction, not two.
+    onlyIfCurrentResultIn: [existing.finalResult],
   });
 
   const rows = await listRecords(existing.sessionId);
@@ -1004,21 +1119,90 @@ export interface ConfirmAttendanceResult {
 }
 
 /**
+ * The unresolved rows the model proposed as present.
+ *
+ * Read from the session's stored notes rather than inferred from
+ * `aiResult`, because `aiResult` survives a manual correction: a student the
+ * model matched and a teacher then marked absent still has `aiResult:
+ * PRESENT`, and must not be swept back to present by confirming.
+ */
+async function resolveSuggestedRows(
+  sessionId: string,
+  rows: AttendanceRecordRow[],
+  deps: AttendanceReviewDeps,
+): Promise<AttendanceRecordRow[]> {
+  const getDetail = deps.getSessionDetailRow ?? getSessionDetailRow;
+  const detail = await getDetail(sessionId);
+  const notes = readStoredMetadata(detail?.metadata).studentNotes ?? {};
+  return rows.filter(
+    (row) =>
+      !row.isManuallyCorrected &&
+      (row.finalResult === "NEEDS_REVIEW" || row.finalResult === "NOT_EVALUATED") &&
+      notes[row.studentId]?.aiSuggestion === "PRESENT",
+  );
+}
+
+/**
  * "Confirm Attendance". Closes the register.
+ *
+ * Two things happen, in this order: every outstanding recognition suggestion
+ * is accepted as this actor's decision, and then the session is finalized.
  *
  * The unresolved-state guard lives in `modules/sessions/service.ts` so that
  * every finalization path — this one and any future API/admin path — is
  * blocked by the same check: an unresolved NEEDS_REVIEW must never become
- * PRESENT (or anything else) by omission.
+ * PRESENT (or anything else) by omission. Accepting the suggestions first is
+ * what clears the only rows allowed to reach that guard unresolved.
+ *
+ * The permission is checked here as well as inside `finalizeAttendanceSession`
+ * because the suggestion-acceptance loop writes before finalization is
+ * reached; without it, a caller who may not close a register could still have
+ * caused those writes before being refused.
  */
 export async function confirmAttendance(
   actor: SessionUser,
   sessionId: string,
   deps: AttendanceReviewDeps = {},
 ): Promise<ConfirmAttendanceResult> {
+  requirePermission(actor, "attendanceSession.finalize");
   const session = await loadAuthorizedSession(actor, sessionId, deps, "write");
 
   const listRecords = deps.listAttendanceRecords ?? listAttendanceRecordRowsForSession;
+  const correct = deps.correctAttendanceRecord ?? correctAttendanceRecordDefault;
+
+  /**
+   * Confirming the register IS the faculty decision on every suggestion in it.
+   *
+   * The model proposed these students as present and the register recorded
+   * them as unresolved. Pressing Confirm accepts those proposals — so each one
+   * is written through the same correction path a per-student Mark Present
+   * uses, which means each gets an `AttendanceCorrection` row naming this
+   * actor, this timestamp and the previous state.
+   *
+   * Doing it this way rather than flipping the rows in bulk matters for one
+   * reason: months later, "who decided this student was present?" has the same
+   * answer whether the teacher clicked the row or clicked Confirm. A bulk
+   * update would have left the machine's suggestion looking like a fact
+   * nobody signed.
+   *
+   * Rows a person already touched are skipped — an explicit decision outranks
+   * a suggestion, and re-confirming would overwrite it.
+   */
+  const beforeConfirm = await listRecords(sessionId);
+  const suggestionsToConfirm = await resolveSuggestedRows(sessionId, beforeConfirm, deps);
+  for (const row of suggestionsToConfirm) {
+    await correct({
+      attendanceRecordId: row.id,
+      newResult: "PRESENT",
+      changedByUserId: actor.userId,
+      source: "FACULTY_REVIEW",
+      reason: "Confirmed with the register",
+      // Two teachers pressing Confirm at the same moment must not both record
+      // a decision on the same student.
+      onlyIfCurrentResultIn: ["NEEDS_REVIEW", "NOT_EVALUATED"],
+    });
+  }
+
   const records = await listRecords(sessionId);
   const counts = countAttendance(records);
 
