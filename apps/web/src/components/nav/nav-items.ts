@@ -8,6 +8,7 @@ export const NAV_GROUPS = [
   // `platform.institution.create`. It is the one section that crosses tenant
   // boundaries, so it reads as a different tier rather than another feature.
   "Platform",
+  "Platform administration",
   "Today",
   "People",
   "Academic",
@@ -15,6 +16,13 @@ export const NAV_GROUPS = [
   "Connect",
   "Administration",
 ] as const;
+
+/**
+ * The groups that belong to the platform tier rather than to an institution.
+ *
+ * A platform account sees these and nothing else — see `buildNavSections`.
+ */
+const PLATFORM_GROUPS = new Set<NavGroup>(["Platform", "Platform administration"]);
 
 export type NavGroup = (typeof NAV_GROUPS)[number];
 
@@ -66,6 +74,27 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/dashboard/platform/institutions",
     label: "Institutions",
     group: "Platform",
+    permission: "platform.institution.create",
+  },
+  {
+    // Where release readiness and the recognition-service detail live. Both
+    // used to sit on the platform landing page, where "2 release blockers
+    // outstanding, this deployment is not cleared for production" was the
+    // first thing an administrator read every morning — accurate, and the
+    // wrong thing to lead with on an operations screen.
+    href: "/dashboard/platform/system",
+    label: "System health",
+    group: "Platform administration",
+    permission: "platform.institution.create",
+  },
+  {
+    // The platform-wide audit trail. Listed here as well as under the
+    // institution's own Administration group because the page narrows itself
+    // by actor: a platform user sees every institution's events, an
+    // institution admin only their own.
+    href: "/dashboard/audit-logs",
+    label: "Audit logs",
+    group: "Platform administration",
     permission: "platform.institution.create",
   },
 
@@ -179,25 +208,51 @@ export interface NavSection {
 /**
  * The sections a given viewer should see, already filtered and labelled.
  *
- * Pure — it takes a predicate rather than a session, so the permission check
+ * Pure — it takes predicates rather than a session, so the permission check
  * stays wherever the caller keeps it and this stays testable without one. A
  * group with no visible items is dropped rather than rendered empty: a heading
  * over nothing reads as a section that failed to load.
+ *
+ * ## Why a platform account is filtered by role and not by permission
+ *
+ * `isPlatform` is not a convenience flag; permissions cannot answer this
+ * question at all. PLATFORM_SUPER_ADMIN is granted every key in the catalogue,
+ * so `can(...)` returns true for all seventeen institution links and the
+ * sidebar filled up with Students, Faculty, Classes, Attendance, Reports and
+ * Settings — modules that need an institution the account does not have. Two
+ * of those pages did not merely look wrong, they threw: the services behind
+ * them refuse an actor with no institution (`institution_scope_required`), and
+ * `/dashboard` — the landing page — answered with "Something went wrong".
+ *
+ * So the rule is about scope rather than power: a platform account administers
+ * the platform, and reaches an institution by opening it from Institutions.
+ *
+ * ## This is still not a security boundary
+ *
+ * Hiding a link has never been what makes a page safe here, and that has not
+ * changed. Every route continues to gate itself with `requireUser` /
+ * `requirePermissionOrRedirect`, and the institution-scoped services continue
+ * to refuse an institution-less actor outright. A platform user who types one
+ * of these URLs is redirected to their own tier by the page, not by this list.
  */
 export function buildNavSections(
   can: (permission: PermissionKey) => boolean,
   kind: InstitutionKind,
+  isPlatform = false,
 ): NavSection[] {
   const sections: NavSection[] = [];
   for (const group of NAV_GROUPS) {
+    // A platform account gets the platform groups only; everyone else gets
+    // everything except them (their permission check would fail anyway, but
+    // being explicit keeps the two tiers from leaking into each other).
+    if (isPlatform !== PLATFORM_GROUPS.has(group)) continue;
+
     const items = NAV_ITEMS.filter(
       (item) =>
         item.group === group &&
         (!item.permission || can(item.permission)) &&
-        // An unknown institution kind (a platform-level account) sees
-        // everything: it is not this function's job to decide what a
-        // cross-institution operator may look at, and each page still gates
-        // itself.
+        // An unknown institution kind only reaches here for a non-platform
+        // account with no institution, which the routes themselves handle.
         (!item.only || kind === null || item.only === kind),
     ).map((item) => ({
       href: item.href,

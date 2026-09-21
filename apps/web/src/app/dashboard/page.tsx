@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { getFacultyDashboard } from "@/modules/attendance-analytics/service";
-import { hasPermission } from "@/modules/authorization/service";
+import { hasPermission, isPlatformUser } from "@/modules/authorization/service";
 import { getFaceServiceStatus, getInstitutionCounts } from "@/modules/institutions/overview";
 import { getInstitutionType } from "@/modules/institutions/repository";
 import { SessionRow } from "@/components/attendance/session-list";
@@ -28,6 +28,22 @@ import { EmptyState, Panel } from "@/components/ui/panel";
  */
 export default async function DashboardHomePage() {
   const user = await requireUser();
+
+  /**
+   * A platform account belongs to no institution, so every panel below —
+   * today's sessions, my classes, institution counts — has no referent for
+   * them. `getFacultyDashboard` says so itself and refuses with
+   * `institution_scope_required`, which reached the browser as a bare
+   * "Something went wrong" on the landing page a platform admin hits first.
+   *
+   * The refusal is correct and stays; what was wrong is asking at all. This
+   * check is keyed on the *role*, not on permissions, and that distinction is
+   * the whole bug: a platform super admin holds every permission in the
+   * catalogue, so `hasPermission(user, "attendanceRecord.read")` below is true
+   * for them and the page went on to treat them as institution staff. Only
+   * `isPlatformUser` can tell the two apart.
+   */
+  if (isPlatformUser(user)) redirect("/dashboard/platform");
 
   if (!hasPermission(user, "attendanceRecord.read")) {
     // A student account: /dashboard has nothing for them, and an empty staff

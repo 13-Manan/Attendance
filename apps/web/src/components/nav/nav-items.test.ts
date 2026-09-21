@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PermissionKey } from "@/modules/authorization/permissions";
-import { NAV_ITEMS, buildNavSections } from "./nav-items.ts";
+import { NAV_GROUPS, NAV_ITEMS, buildNavSections } from "./nav-items.ts";
 
 /**
  * The navigation is not a security boundary — every page gates itself — but it
@@ -51,12 +51,49 @@ test("the units link is named for the institution it belongs to", () => {
 });
 
 test("sections come back in the declared group order", () => {
-  // `() => true` is an actor holding every permission, so this includes the
-  // platform tier. What a normal institution admin sees is the next test.
+  // An institution actor holding every institution permission. The platform
+  // groups are absent no matter what they hold — see the next two tests.
   const sections = buildNavSections(() => true, "COLLEGE");
   assert.deepEqual(
     sections.map((section) => section.group),
-    ["Platform", "Today", "People", "Academic", "Attendance", "Connect", "Administration"],
+    ["Today", "People", "Academic", "Attendance", "Connect", "Administration"],
+  );
+});
+
+test("a platform account gets the platform groups and nothing else", () => {
+  // The regression this encodes: PLATFORM_SUPER_ADMIN is granted every
+  // permission in the catalogue, so a permission-only filter offered them
+  // Students, Faculty, Classes, Attendance, Reports and Settings — modules
+  // that need an institution they do not have. Two of those pages threw
+  // rather than merely looking empty.
+  const sections = buildNavSections(() => true, null, true);
+
+  assert.deepEqual(
+    sections.map((section) => section.group),
+    ["Platform", "Platform administration"],
+  );
+  assert.deepEqual(hrefs(sections), [
+    "/dashboard/platform",
+    "/dashboard/platform/institutions",
+    "/dashboard/platform/system",
+    "/dashboard/audit-logs",
+  ]);
+  // The landing page that used to break for them is not offered as a
+  // destination at all; they are redirected off it to their own tier.
+  assert.equal(hrefs(sections).includes("/dashboard"), false);
+});
+
+test("an institution actor never receives the platform groups", () => {
+  // Even asked for explicitly with every permission granted — the flag is the
+  // only thing that opens them, and only the session's role sets it.
+  const sections = buildNavSections(() => true, "SCHOOL", false);
+  assert.equal(
+    sections.some((section) => section.group.startsWith("Platform")),
+    false,
+  );
+  assert.equal(
+    hrefs(sections).some((href) => href.startsWith("/dashboard/platform")),
+    false,
   );
 });
 
@@ -78,9 +115,40 @@ test("the platform tier is invisible without the platform permission", () => {
   );
 });
 
-test("every destination is listed exactly once", () => {
-  const seen = new Set(NAV_ITEMS.map((item) => item.href));
-  assert.equal(seen.size, NAV_ITEMS.length);
+test("no viewer is ever offered the same destination twice", () => {
+  /**
+   * Stated per viewer rather than per list, because one destination now
+   * legitimately appears in two groups: `/dashboard/audit-logs` is listed
+   * under "Platform administration" for a platform account and under
+   * "Administration" for an institution admin. It is the same page, narrowed
+   * by actor — a platform user sees every institution's events, an
+   * institution admin only their own — and the two groups are mutually
+   * exclusive, so no one is shown it twice.
+   *
+   * The per-viewer form is the stronger property anyway: a duplicate inside a
+   * single tier is the mistake worth catching, and a global set could not tell
+   * that apart from a deliberate cross-tier reuse.
+   */
+  const viewers: Array<[string, ReturnType<typeof buildNavSections>]> = [
+    ["platform", buildNavSections(() => true, null, true)],
+    ["school admin", buildNavSections(() => true, "SCHOOL", false)],
+    ["college admin", buildNavSections(() => true, "COLLEGE", false)],
+    ["faculty", buildNavSections(allowing("attendanceRecord.read"), "SCHOOL", false)],
+    ["no permissions", buildNavSections(() => false, "SCHOOL", false)],
+  ];
+
+  for (const [who, sections] of viewers) {
+    const seen = hrefs(sections);
+    assert.equal(new Set(seen).size, seen.length, `${who} was offered a duplicate link`);
+  }
+});
+
+test("each nav group is declared in NAV_GROUPS", () => {
+  // Catches an item added under a heading that was never declared, which
+  // would silently never render.
+  for (const item of NAV_ITEMS) {
+    assert.ok(NAV_GROUPS.includes(item.group), `${item.href} uses an undeclared group`);
+  }
 });
 
 test("offline attendance survived the regrouping", () => {

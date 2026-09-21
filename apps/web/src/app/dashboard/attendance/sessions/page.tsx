@@ -1,5 +1,7 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
+import { isPlatformUser } from "@/modules/authorization/service";
 import {
   listFacultySessions,
   normalizeSessionFilters,
@@ -57,6 +59,14 @@ function one(
  */
 export default async function FacultySessionsPage({ searchParams }: PageProps) {
   const user = await requirePermissionOrRedirect("attendanceRecord.read");
+
+  // Same reason as /dashboard: a register belongs to an institution, and a
+  // platform account belongs to none, so `listFacultySessions` refuses with
+  // `institution_scope_required`. The permission gate above cannot catch it —
+  // a platform super admin holds `attendanceRecord.read` like every other
+  // permission — so the scope has to be checked by role.
+  if (isPlatformUser(user)) redirect("/dashboard/platform");
+
   const params = await searchParams;
 
   const filters = normalizeSessionFilters({

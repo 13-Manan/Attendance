@@ -1,4 +1,4 @@
-import { hasPermission } from "@/modules/authorization/service";
+import { hasPermission, isPlatformUser } from "@/modules/authorization/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { buildNavSections, type InstitutionKind } from "./nav-items";
 import { NavLink } from "./nav-link";
@@ -35,6 +35,11 @@ export function Sidebar({
   const sections = buildNavSections(
     (permission) => hasPermission(user, permission),
     institutionKind,
+    // Keyed on the role. A platform super admin holds every permission, so
+    // the predicate above cannot distinguish them from an institution admin —
+    // which is how the rail came to offer them seventeen links into
+    // institutions they do not belong to.
+    isPlatformUser(user),
   );
 
   // `print:hidden` for the same reason as the topbar: navigation links are not

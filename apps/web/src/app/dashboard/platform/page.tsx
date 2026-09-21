@@ -4,7 +4,7 @@ import { getPlatformOverview, getReadiness } from "@/modules/platform/service";
 import { getFaceServiceStatus } from "@/modules/institutions/overview";
 import { StatCard, StatGrid } from "@/components/ui/attendance-stat";
 import { EmptyState, Panel } from "@/components/ui/panel";
-import { ReadinessList } from "@/components/platform/readiness-list";
+
 
 /**
  * The platform tier's landing page.
@@ -14,14 +14,18 @@ import { ReadinessList } from "@/components/platform/readiness-list";
  * version: a platform view of one institution is that institution's own
  * dashboard, which already exists at `/dashboard`.
  *
- * ## Why readiness is on the landing page
+ * ## Where readiness went, and why it is still visible
  *
- * Because the alternative is a page of green numbers. Every figure here comes
- * from a real `COUNT`, and a platform administrator reading "12 institutions,
- * 4,100 students, 38 sessions today" would reasonably conclude the product is
- * running well — which it is, and which says nothing about whether it may be
- * *released*. The blockers are the other half of that sentence, so they sit in
- * the same view rather than behind a tab somebody has to think to open.
+ * The release blockers used to lead this page: "2 release blockers
+ * outstanding. This deployment is not cleared for production use." True, and
+ * the wrong thing to open with. Its audience is whoever decides to ship, its
+ * answer changes roughly never, and above the institution counts it made a
+ * working deployment read as a broken one.
+ *
+ * It moved to `/dashboard/platform/system`, not out of sight: the status strip
+ * below still carries the blocker count, still calls it a blocker, and links
+ * straight there. The honesty was never in the size of the banner — it is in
+ * the count being real and the evidence being named, and both survive.
  */
 export default async function PlatformOverviewPage() {
   const user = await requirePermissionOrRedirect("platform.institution.create");
@@ -53,16 +57,64 @@ export default async function PlatformOverviewPage() {
         </Link>
       </header>
 
-      {blocking.length > 0 ? (
-        <p
-          role="alert"
-          className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+      {/*
+        Operational status, in the product's own terms. Not an alert: nothing
+        here is a thing to act on this morning, and styling it as one is what
+        made the old banner read as an outage. The recognition line says
+        exactly what the deployment is running, and the blocker count keeps the
+        release position one click away rather than absent.
+      */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-sm">
+        <span className="flex items-center gap-2">
+          <span aria-hidden className="size-1.5 rounded-full bg-emerald-500" />
+          <span className="text-neutral-600">Application</span>
+          <span className="font-medium text-neutral-900">Operational</span>
+        </span>
+        <span className="flex items-center gap-2">
+          <span aria-hidden className="size-1.5 rounded-full bg-emerald-500" />
+          <span className="text-neutral-600">Database</span>
+          <span className="font-medium text-neutral-900">Operational</span>
+        </span>
+        <span className="flex items-center gap-2">
+          <span
+            aria-hidden
+            className={`size-1.5 rounded-full ${faceService ? "bg-amber-500" : "bg-neutral-400"}`}
+          />
+          <span className="text-neutral-600">Recognition</span>
+          <span className="font-medium text-neutral-900">
+            {!faceService
+              ? "Unreachable"
+              : faceService.productionEligible
+                ? "Enabled"
+                : "Not enabled for production"}
+          </span>
+        </span>
+        <Link
+          href="/dashboard/platform/system"
+          className="ml-auto text-xs text-neutral-600 underline-offset-2 hover:underline"
         >
-          <span className="font-medium">
-            {blocking.length} release blocker{blocking.length === 1 ? "" : "s"} outstanding.
-          </span>{" "}
-          This deployment is not cleared for production use. See below.
-        </p>
+          {blocking.length > 0
+            ? `${blocking.length} release blocker${blocking.length === 1 ? "" : "s"} · System health`
+            : "System health"}
+        </Link>
+      </div>
+
+      {overview.institutions.total === 0 ? (
+        <Panel title="No institutions yet">
+          <EmptyState>
+            Create your first school or college to begin. Once it exists you can
+            add its administrator, and they will set up their own staff,
+            students and classes from inside it.
+          </EmptyState>
+          <div>
+            <Link
+              href="/dashboard/platform/institutions/new"
+              className="inline-flex items-center rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white hover:bg-neutral-800"
+            >
+              Create institution
+            </Link>
+          </div>
+        </Panel>
       ) : null}
 
       <StatGrid>
@@ -127,41 +179,6 @@ export default async function PlatformOverviewPage() {
         </p>
       </Panel>
 
-      <Panel
-        title="Recognition service"
-        description="The face service this deployment is configured to call."
-      >
-        {!faceService ? (
-          <EmptyState>
-            The face service could not be reached. Enrollment and recognition
-            are unavailable; attendance can still be taken by hand.
-          </EmptyState>
-        ) : (
-          <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[max-content_1fr]">
-            <dt className="text-neutral-500">Health</dt>
-            <dd className="text-neutral-900">{faceService.health}</dd>
-            <dt className="text-neutral-500">Model</dt>
-            <dd className="text-neutral-900">
-              {faceService.modelName ?? "unknown"} {faceService.modelVersion ?? ""}
-            </dd>
-            <dt className="text-neutral-500">Production eligible</dt>
-            <dd className="font-medium text-amber-800">
-              {faceService.productionEligible === null
-                ? "Unknown — the service did not answer"
-                : faceService.productionEligible
-                  ? "Yes"
-                  : "No — training-data provenance unresolved"}
-            </dd>
-          </dl>
-        )}
-      </Panel>
-
-      <Panel
-        title="Release readiness"
-        description="What stands between this build and a production release. Each item names the evidence."
-      >
-        <ReadinessList items={readiness} />
-      </Panel>
     </div>
   );
 }
