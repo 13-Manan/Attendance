@@ -243,21 +243,34 @@ server rather than in this repository.
 
 ## 4. Bootstrap and seeding
 
-Four different things write rows that did not arrive as application traffic.
+Five different things write rows that did not arrive as application traffic.
 They are routinely confused with each other, so they are named separately here.
-Three of them are required in production; the fourth must never reach it.
+Four of them may reach production; the fifth must never.
 
 | | What it writes | Runs where | How often |
 | --- | --- | --- | --- |
 | 1. Migrations | Schema only — tables, indexes, extensions | Every database | Every deployment that carries a new migration |
 | 2. System bootstrap | 8 `Role` + 116 `RolePermission` | Every database | Idempotent; safe to repeat |
 | 3. First-tenant bootstrap | 1 `Institution`, 1 admin `User`, 1 `UserRoleAssignment` | Every database | Exactly once, on an empty database |
+| 3b. Platform-admin bootstrap | 1 platform `User`, 1 `UserRoleAssignment` — both institution-less | Every database | Idempotent; re-runs report and write nothing |
 | 4. Development fixture | Demo institutions, staff, cohorts, students | localhost only | Any time |
 
-A database that has had 1 and 2 but not 3 is reachable and correct but has
-nobody who can sign in. A database that has had 1 but not 2 cannot resolve a
-single permission check, so even a user row would not get anyone in. The order
-is fixed: migrations, then system, then tenant.
+A database that has had 1 and 2 but neither 3 nor 3b is reachable and correct but
+has nobody who can sign in. A database that has had 1 but not 2 cannot resolve a
+single permission check, so even a user row would not get anyone in. Migrations
+come first, then the system stage; after that, 3 and 3b are alternatives.
+
+**3 and 3b are alternatives, not a sequence.** Numbered 3b rather than 4 because
+it answers the same question — who can sign in first — at a different tier:
+
+- **3b then 3**: refused. Stage 3 requires a database with no users at all, and
+  a platform account is a user. This is existing, deliberate behaviour, asserted
+  by the "partially initialised database (a user with no institution)" test.
+- **3 then 3b**: works. Stage 3b does not care whether institutions exist.
+
+Closing 3 by running 3b first costs nothing. A platform administrator creates
+institutions and their administrators inside the application, which 3 can only
+ever do once. Stage 3 is for a single-tenant install that wants no platform tier.
 
 ### 4.1 Migrations
 
@@ -323,6 +336,59 @@ Nothing about it is automatic. No lifecycle hook calls it, no startup path calls
 it, no CI step calls it, and no deployment stage calls it. It writes when a
 person runs it and says which database they meant.
 
+### 4.3b Platform-admin bootstrap — the first PLATFORM_SUPER_ADMIN
+
+The same chicken-and-egg case one tier up. §4.3 creates an administrator *of* an
+institution; this creates the account that creates institutions.
+
+```bash
+BOOTSTRAP_TARGET=local \
+BOOTSTRAP_PLATFORM_ADMIN_EMAIL="..." \
+  npm run bootstrap:platform --workspace=web
+```
+
+`BOOTSTRAP_PLATFORM_ADMIN_NAME` is optional and defaults to
+`Platform Super Admin`. The password comes from the same mechanism as §4.3 —
+prompted and hidden when there is a terminal, `BOOTSTRAP_ADMIN_PASSWORD` when
+there is not. There is deliberately no second password variable to provision and
+rotate; which account it belongs to is decided by the stage argument, which is
+explicit on every execution.
+
+Both rows it writes have `institutionId = NULL` — on the `User` and on the
+`UserRoleAssignment`. That is what the schema documents as a platform account and
+what `isPlatformUser` and `requireSameInstitution` already understand. It creates
+no `Institution` and grants no institution-scoped role.
+
+Idempotent, and fails closed on anything it did not write itself:
+
+| Found | Result |
+| --- | --- |
+| Nothing | Creates the account |
+| The same address, correctly scoped | Reports already-configured, writes nothing |
+| A different address already holding the role | Refuses — never a second platform account |
+| The address held by somebody inside an institution | Refuses — never promotes an existing account |
+| The role held by a user who has an institution | Refuses |
+| An assignment scoped to an institution or campus | Refuses |
+| An institution-less user with no assignment | Refuses — an earlier run stopped part-way |
+
+Nothing is repaired automatically. Every one of those has more than one
+plausible fix, and choosing between them for the one role that can reach every
+institution is an operator's decision.
+
+Re-running with a different password does **not** rotate it: the account is left
+exactly as found and the supplied password is discarded. Use the application to
+change a password.
+
+Concurrency is handled by the same transaction-scoped advisory lock as §4.3, and
+here it is load-bearing rather than belt-and-braces. The unique index on
+`UserRoleAssignment(userId, roleId, institutionId, campusId)` is NULL-distinct,
+and a platform assignment is NULL in both scope columns, so Postgres would
+accept two identical rows. The lock, not the constraint, is what makes a
+concurrent second run observe the first and report instead of writing.
+
+As with every other stage: no lifecycle hook, no startup path, no CI step and no
+deployment stage calls it.
+
 ### 4.4 Development fixture
 
 ```bash
@@ -338,7 +404,7 @@ the application by the people it belongs to.
 
 ### 4.5 Running a bootstrap against production
 
-Both bootstrap stages refuse to do anything until the operator has said, in two
+Every bootstrap stage refuses to do anything until the operator has said, in two
 independent ways, that production is what they meant:
 
 ```

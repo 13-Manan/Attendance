@@ -431,6 +431,324 @@ export async function bootstrapFirstInstitutionAdmin(
 }
 
 // ---------------------------------------------------------------------------
+// Stage C — the platform super administrator
+// ---------------------------------------------------------------------------
+
+/**
+ * The role the platform administrator is granted. Distinct from
+ * FIRST_ADMIN_ROLE_KEY above, and deliberately so: that one names the most
+ * powerful role *inside* one institution, this one names the role that is
+ * outside all of them.
+ *
+ * ## How stage C coexists with stage B
+ *
+ * They are alternative first writes, not sequential ones, and the asymmetry is
+ * inherited rather than invented here:
+ *
+ *   tenant → platform    works. Stage C does not care whether institutions
+ *                        exist; it only cares about the platform tier.
+ *   platform → tenant    refuses. Stage B requires `tenantSlateClean`, and a
+ *                        platform account is a User and a UserRoleAssignment,
+ *                        so the slate is no longer clean. That refusal is the
+ *                        behaviour already asserted by the "partially
+ *                        initialised database (a user with no institution)"
+ *                        test, and it is left exactly as it was.
+ *
+ * Closing stage B by running stage C first costs nothing now: a platform
+ * administrator creates institutions and their administrators through the
+ * application (modules/platform/administrators.ts), which stage B cannot do
+ * more than once anyway. Stage B remains for a single-tenant install that
+ * wants no platform tier at all.
+ *
+ * ## Why idempotency is checked rather than constrained
+ *
+ * `@@unique([userId, roleId, institutionId, campusId])` cannot help here.
+ * Postgres treats NULLs as distinct in a unique index, and a platform
+ * assignment is NULL in both scope columns, so two identical rows would both
+ * insert. The advisory lock the entry point takes is what actually makes a
+ * concurrent second run wait, observe the first, and report rather than write.
+ */
+export const PLATFORM_ADMIN_ROLE_KEY = "PLATFORM_SUPER_ADMIN";
+
+export interface PlatformAdminInput {
+  name: string;
+  email: string;
+  /** Already hashed by modules/auth-tenancy/password.ts. Never a plaintext. */
+  passwordHash: string;
+}
+
+export interface PlatformAdminResult {
+  userId: string;
+  email: string;
+  status: string;
+  roleKey: string;
+  roleAssignmentId: string;
+  /** false when the account was already present and correct — nothing was written. */
+  created: boolean;
+}
+
+/** One PLATFORM_SUPER_ADMIN assignment, with everything needed to judge it. */
+export interface PlatformAdminHolder {
+  userId: string;
+  email: string;
+  status: string;
+  /** Null is the only correct value — an institution makes this a tenant account. */
+  userInstitutionId: string | null;
+  assignmentId: string;
+  assignmentInstitutionId: string | null;
+  assignmentCampusId: string | null;
+}
+
+export interface PlatformAdminState {
+  rolePresent: boolean;
+  holders: PlatformAdminHolder[];
+  /** Users belonging to no institution. A correct deployment has exactly the holders. */
+  institutionless: Array<{ id: string; email: string }>;
+  /** Non-empty when the shape is one no bootstrap should act on. */
+  problems: string[];
+}
+
+/**
+ * Everything wrong with the platform tier, described rather than repaired.
+ *
+ * Each entry names an account and what is inconsistent about it. None of them
+ * is fixed automatically: every one has more than one plausible repair — delete
+ * the account, re-scope the assignment, move the user into an institution — and
+ * picking between them on an operator's behalf, for the one role that can reach
+ * every institution, is not a decision a script should make.
+ */
+function describePlatformProblems(
+  holders: PlatformAdminHolder[],
+  institutionless: Array<{ id: string; email: string }>,
+): string[] {
+  const problems: string[] = [];
+  const holderUserIds = new Set(holders.map((holder) => holder.userId));
+
+  if (holderUserIds.size > 1) {
+    const names = [...new Set(holders.map((holder) => holder.email))].sort().join(", ");
+    problems.push(
+      `${holderUserIds.size} accounts already hold ${PLATFORM_ADMIN_ROLE_KEY} (${names}). ` +
+        `A deployment is expected to have one.`,
+    );
+  }
+
+  for (const userId of holderUserIds) {
+    const rows = holders.filter((holder) => holder.userId === userId);
+    if (rows.length > 1) {
+      problems.push(
+        `${rows[0].email} holds ${rows.length} separate ${PLATFORM_ADMIN_ROLE_KEY} assignments. ` +
+          `The unique index does not catch this because its scope columns are NULL.`,
+      );
+    }
+  }
+
+  for (const holder of holders) {
+    if (holder.userInstitutionId !== null) {
+      problems.push(
+        `${holder.email} holds ${PLATFORM_ADMIN_ROLE_KEY} but belongs to institution ` +
+          `${holder.userInstitutionId}. A platform account must belong to none.`,
+      );
+    }
+    if (holder.assignmentInstitutionId !== null) {
+      problems.push(
+        `${holder.email}'s ${PLATFORM_ADMIN_ROLE_KEY} assignment is scoped to institution ` +
+          `${holder.assignmentInstitutionId}. A platform assignment must be institution-less.`,
+      );
+    }
+    if (holder.assignmentCampusId !== null) {
+      problems.push(
+        `${holder.email}'s ${PLATFORM_ADMIN_ROLE_KEY} assignment is narrowed to a campus. ` +
+          `A platform assignment must not be.`,
+      );
+    }
+  }
+
+  for (const user of institutionless) {
+    if (!holderUserIds.has(user.id)) {
+      problems.push(
+        `${user.email} belongs to no institution but holds no ${PLATFORM_ADMIN_ROLE_KEY} ` +
+          `assignment. An earlier run may have stopped between the two writes.`,
+      );
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * Read-only. Reports the platform tier without judging whether a particular
+ * email should be bootstrapped into it.
+ *
+ * Deliberately separate from inspectBootstrapState rather than a field on it:
+ * that function's shape is depended on by callers and its existing tests, and
+ * widening it would make every one of them query tables they do not care about.
+ */
+export async function inspectPlatformAdminState(db: Client): Promise<PlatformAdminState> {
+  const role = await db.role.findFirst({
+    where: { institutionId: null, key: PLATFORM_ADMIN_ROLE_KEY },
+    select: { id: true },
+  });
+
+  const rows = role
+    ? await db.userRoleAssignment.findMany({
+        where: { roleId: role.id },
+        select: {
+          id: true,
+          institutionId: true,
+          campusId: true,
+          user: { select: { id: true, email: true, status: true, institutionId: true } },
+        },
+      })
+    : [];
+
+  const holders: PlatformAdminHolder[] = rows.map((row) => ({
+    userId: row.user.id,
+    email: row.user.email,
+    status: String(row.user.status),
+    userInstitutionId: row.user.institutionId,
+    assignmentId: row.id,
+    assignmentInstitutionId: row.institutionId,
+    assignmentCampusId: row.campusId,
+  }));
+
+  // The other half of the definition. A user with no institution but no
+  // platform assignment is invisible to the query above, and is exactly the
+  // half-finished state worth refusing on.
+  const institutionless = await db.user.findMany({
+    where: { institutionId: null },
+    select: { id: true, email: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  return {
+    rolePresent: role !== null,
+    holders,
+    institutionless,
+    problems: describePlatformProblems(holders, institutionless),
+  };
+}
+
+/**
+ * Creates the platform super administrator, or reports that it already exists.
+ *
+ * Creates no institution and assigns no institution-scoped role: both the User
+ * and the UserRoleAssignment are written with a null institutionId, which is
+ * what the schema documents as the shape of a platform account and what
+ * isPlatformUser/requireSameInstitution already understand.
+ *
+ * Fails closed on anything it did not write itself. An address that already
+ * belongs to somebody, a second platform account under a different address, a
+ * platform role granted to a tenant user — each is refused with what was found,
+ * and no row is modified. This never changes an existing account's password,
+ * role, institution or status.
+ *
+ * Caller must run this inside a transaction that already holds the bootstrap
+ * advisory lock (see runPlatformAdminBootstrap).
+ */
+export async function bootstrapPlatformAdmin(
+  db: Client,
+  input: PlatformAdminInput,
+): Promise<PlatformAdminResult> {
+  // Before any query, so malformed input cannot reach the database at all.
+  const name = requireName(input.name, "Platform administrator name");
+  const email = requireEmail(input.email);
+  const passwordHash = requirePasswordHash(input.passwordHash);
+
+  const state = await inspectBootstrapState(db);
+  if (!state.systemRolesComplete) {
+    const broken = state.systemRoles
+      .filter((s) => !s.present || s.missingPermissions.length > 0 || s.extraPermissions.length > 0)
+      .map((s) => (s.present ? `${s.key} (grants out of date)` : `${s.key} (missing)`));
+    throw new BootstrapError(
+      `The platform roles are not in the state this expects: ${broken.join(", ")}. ` +
+        `Run the system bootstrap (stage A) first, then retry.`,
+    );
+  }
+
+  const platform = await inspectPlatformAdminState(db);
+
+  if (platform.problems.length > 0) {
+    throw new BootstrapError(
+      `The platform tier is not in a state this can act on:\n  - ` +
+        `${platform.problems.join("\n  - ")}\n` +
+        `Nothing was written. Resolve it deliberately — this never repairs an account.`,
+    );
+  }
+
+  // Past the problem check, a single holder is necessarily well-formed: one
+  // assignment, no institution on either row, no campus.
+  const [holder] = platform.holders;
+  if (holder) {
+    if (holder.email !== email) {
+      throw new BootstrapError(
+        `${holder.email} is already the platform administrator. Refusing to add a second ` +
+          `one for ${email} — a platform account can reach every institution, so a typo ` +
+          `here is not something to converge on. Nothing was written.`,
+      );
+    }
+    return {
+      userId: holder.userId,
+      email: holder.email,
+      status: holder.status,
+      roleKey: PLATFORM_ADMIN_ROLE_KEY,
+      roleAssignmentId: holder.assignmentId,
+      created: false,
+    };
+  }
+
+  // No platform account exists. The address may still belong to somebody
+  // inside a tenant, and promoting that account is not what this is for.
+  const clash = await db.user.findUnique({
+    where: { email },
+    select: { id: true, institutionId: true },
+  });
+  if (clash) {
+    throw new BootstrapError(
+      `${email} already belongs to an account in institution ${clash.institutionId ?? "none"}. ` +
+        `This never changes an existing account's role or institution. Nothing was written.`,
+    );
+  }
+
+  const role = await db.role.findFirst({
+    where: { institutionId: null, key: PLATFORM_ADMIN_ROLE_KEY },
+    select: { id: true, key: true },
+  });
+  if (!role) {
+    // Unreachable while systemRolesComplete holds; kept so a future catalog
+    // edit that drops the key fails loudly instead of creating a roleless user.
+    throw new BootstrapError(`The ${PLATFORM_ADMIN_ROLE_KEY} role does not exist. Run stage A first.`);
+  }
+
+  const user = await db.user.create({
+    data: {
+      // Both null, and that is the whole point: this is the one account the
+      // product intends to sit outside every institution.
+      institutionId: null,
+      campusId: null,
+      name,
+      email,
+      passwordHash,
+      status: "ACTIVE",
+    },
+    select: { id: true, status: true },
+  });
+
+  const assignment = await db.userRoleAssignment.create({
+    data: { userId: user.id, roleId: role.id, institutionId: null, campusId: null },
+    select: { id: true },
+  });
+
+  return {
+    userId: user.id,
+    email,
+    status: String(user.status),
+    roleKey: role.key,
+    roleAssignmentId: assignment.id,
+    created: true,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Entry points — transaction + lock, so callers cannot forget either
 // ---------------------------------------------------------------------------
 
@@ -448,5 +766,22 @@ export async function runFirstTenantBootstrap(
   return client.$transaction(async (tx) => {
     await acquireBootstrapLock(tx);
     return bootstrapFirstInstitutionAdmin(tx, input);
+  });
+}
+
+/**
+ * The lock matters more here than anywhere else in this file. Two concurrent
+ * runs would both find no platform account, and the unique index cannot stop
+ * the second insert because a platform assignment is NULL in both of its scope
+ * columns and Postgres treats NULLs as distinct. Serialised, the second run
+ * sees the first's committed rows and reports `created: false`.
+ */
+export async function runPlatformAdminBootstrap(
+  client: PrismaClient,
+  input: PlatformAdminInput,
+): Promise<PlatformAdminResult> {
+  return client.$transaction(async (tx) => {
+    await acquireBootstrapLock(tx);
+    return bootstrapPlatformAdmin(tx, input);
   });
 }

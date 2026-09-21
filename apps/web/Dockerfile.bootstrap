@@ -65,7 +65,7 @@ RUN DATABASE_URL="postgresql://generate:generate@127.0.0.1:5432/generate" \
 #   scripts/bootstrap-production.ts     the operator CLI and its guards
 #   scripts/register-test-loader.mjs    resolves the `@/` alias at runtime
 #   src/lib/prisma.ts                   the client instance
-#   src/modules/authorization/bootstrap.ts    both bootstrap stages
+#   src/modules/authorization/bootstrap.ts    all three bootstrap stages
 #   src/modules/authorization/permissions.ts  the permission catalog
 #   src/modules/auth-tenancy/password.ts      the scrypt hasher
 COPY --chown=node:node apps/web/scripts/bootstrap-production.ts ./scripts/

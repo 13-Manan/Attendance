@@ -209,11 +209,20 @@ throughout: the pipeline halts before `deploy`, so nothing has changed yet.
 > zero institutions and zero users. Do not run any of this without explicit
 > approval.
 
-A freshly migrated database has a complete schema and no rows. Two stages fill
-that gap, both from `apps/web/scripts/bootstrap-production.ts`, both explicit:
-`system` (roles and permission grants, idempotent) and `tenant` (the first
-institution, its administrator, and the assignment joining them, once).
+A freshly migrated database has a complete schema and no rows. Three stages fill
+that gap, all from `apps/web/scripts/bootstrap-production.ts`, all explicit:
+`system` (roles and permission grants, idempotent), `tenant` (the first
+institution, its administrator, and the assignment joining them, once) and
+`platform` (the first PLATFORM_SUPER_ADMIN — one user and one assignment, both
+institution-less, idempotent).
 docs/DATABASE_OPERATIONS.md §4 covers what each writes and why they are separate.
+
+`tenant` and `platform` are alternatives, not a sequence. Running `platform`
+first closes `tenant` permanently — `tenant` requires a database with no users
+at all, and a platform account is a user — which is existing, tested behaviour
+and is left alone. It costs nothing: a platform administrator creates
+institutions and their administrators in the application, which `tenant` can
+only ever do once. **For this deployment, `platform` is the intended path.**
 
 ### Why a separate job rather than the migration job
 
@@ -317,9 +326,42 @@ ordered above. If it proves awkward, `az containerapp job secret set` holds the
 value on the job instead of in Key Vault — same lifetime, one less resource,
 and it is removed the same way afterwards.
 
+Stage C takes one required input of its own and reuses the same password secret.
+There is deliberately no second password variable to provision and rotate; which
+account the password belongs to is decided by `--args`, which is explicit on
+every execution:
+
+```sh
+az keyvault secret set --vault-name <vault> -n BOOTSTRAP-ADMIN-PASSWORD \
+  --file <path>        # from a file, not an inline --value
+
+az containerapp job start -n attendance-prod-bootstrap -g attendance-production-rg \
+  --args platform \
+  --env-vars DATABASE_URL=secretref:database-url \
+             BOOTSTRAP_TARGET=production BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION \
+             BOOTSTRAP_PLATFORM_ADMIN_EMAIL="..." \
+             BOOTSTRAP_ADMIN_PASSWORD=secretref:bootstrap-admin-password
+
+az keyvault secret delete --vault-name <vault> -n BOOTSTRAP-ADMIN-PASSWORD
+```
+
+`BOOTSTRAP_PLATFORM_ADMIN_NAME` is optional and defaults to
+`Platform Super Admin`. Both rows the stage writes have `institutionId = NULL`;
+it creates no institution and grants no institution-scoped role.
+
+Re-running it is safe and does nothing. It reports the existing account and
+exits zero, and — worth stating because the opposite is the natural assumption —
+it does **not** rotate the password. Anything it did not write itself is refused
+rather than repaired: a different address already holding the role, the address
+already belonging to somebody inside an institution, a mis-scoped assignment, or
+a user left institution-less by a run that stopped between its two writes. Each
+refusal names what was found and writes nothing. See
+docs/DATABASE_OPERATIONS.md §4.3b for the full table.
+
 Run `inspect` first. It reads and reports — how many institutions, users and
-role assignments exist, which system roles are present, and whether the tenant
-stage would be allowed to proceed — and writes nothing:
+role assignments exist, which system roles are present, whether the tenant
+stage would be allowed to proceed, and who currently holds
+PLATFORM_SUPER_ADMIN — and writes nothing:
 
 ```sh
 az containerapp job start -n attendance-prod-bootstrap -g attendance-production-rg \
@@ -342,6 +384,14 @@ After the first sign-in, the administrator should issue themselves a fresh
 password from the faculty directory (Dashboard → Faculty → Reset password),
 which replaces the bootstrap password and ends every existing session. Until
 that happens, the value that was briefly in Key Vault is a live credential.
+
+A platform administrator bootstrapped by stage C has no faculty directory to do
+that in — they belong to no institution. Their next step is Dashboard → Platform
+→ Institutions → Add institution, then Administrators → Add administrator on the
+institution they just created, which issues that administrator a one-time
+password. The bootstrap password stays live for the platform account until it is
+changed, so treat the Key Vault value as a credential until then and delete it
+as shown above.
 
 ### Creating the job
 

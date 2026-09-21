@@ -15,6 +15,7 @@
     "bootstrap:inspect": "node --import ./scripts/register-test-loader.mjs scripts/bootstrap-production.ts inspect",
     "bootstrap:system": "node --import ./scripts/register-test-loader.mjs scripts/bootstrap-production.ts system",
     "bootstrap:tenant": "node --import ./scripts/register-test-loader.mjs scripts/bootstrap-production.ts tenant",
+    "bootstrap:platform": "node --import ./scripts/register-test-loader.mjs scripts/bootstrap-production.ts platform",
     "test": "node --import ./scripts/register-test-loader.mjs --test \"src/**/*.test.ts\""
   },
   "prisma": {

@@ -10,6 +10,15 @@
  *   system    Stage A — platform roles and permission grants. Idempotent.
  *   tenant    Stage B — the first Institution, its administrator, and the role
  *             assignment linking them. Runs once, against an empty database.
+ *   platform  Stage C — the platform super administrator: one User and one
+ *             UserRoleAssignment, both with no institution. Idempotent, and
+ *             creates no institution.
+ *
+ * Stage B and stage C are alternative first writes. Running C first closes B
+ * (B requires a database with no users at all), which costs nothing: a platform
+ * administrator creates institutions and their administrators in the
+ * application, which B can only ever do once. Running B first leaves C
+ * available. See the stage C note in modules/authorization/bootstrap.ts.
  *
  * Run:
  *   BOOTSTRAP_TARGET=local \
@@ -17,6 +26,10 @@
  *
  *   BOOTSTRAP_TARGET=production BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION \
  *     npm run bootstrap:system --workspace=web
+ *
+ *   BOOTSTRAP_TARGET=production BOOTSTRAP_CONFIRM=WRITE-TO-PRODUCTION \
+ *   BOOTSTRAP_PLATFORM_ADMIN_EMAIL=... \
+ *     npm run bootstrap:platform --workspace=web
  *
  * Nothing here runs automatically: no lifecycle hook, no startup call, no CI
  * step, no deployment stage. It runs when a person runs it, and it refuses
@@ -27,7 +40,7 @@
 
 export {}; // top-level await needs this file to be a module
 
-const STAGES = ["inspect", "system", "tenant"] as const;
+const STAGES = ["inspect", "system", "tenant", "platform"] as const;
 type Stage = (typeof STAGES)[number];
 
 const PRODUCTION_CONFIRMATION = "WRITE-TO-PRODUCTION";
@@ -95,12 +108,12 @@ if (target === "production") {
 console.log(`Stage: ${stage}. Target: ${target}.`);
 
 // ---------------------------------------------------------------------------
-// Input — only for the tenant stage, only from the operator
+// Input — only for the writing stages, only from the operator
 // ---------------------------------------------------------------------------
 
 function requireEnv(name: string): string {
   const value = (process.env[name] ?? "").trim();
-  if (value === "") fail(`${name} is required for the tenant stage.`);
+  if (value === "") fail(`${name} is required for the ${stage} stage.`);
   return value;
 }
 
@@ -167,9 +180,12 @@ const { prisma } = await import("@/lib/prisma");
 const {
   BootstrapError,
   inspectBootstrapState,
+  inspectPlatformAdminState,
   runFirstTenantBootstrap,
+  runPlatformAdminBootstrap,
   runSystemBootstrap,
   FIRST_ADMIN_ROLE_KEY,
+  PLATFORM_ADMIN_ROLE_KEY,
 } = await import("@/modules/authorization/bootstrap");
 
 try {
@@ -192,6 +208,28 @@ try {
         ? "\nNo institution, user or role assignment exists — the tenant stage may run."
         : "\nThis database already holds tenant rows — the tenant stage will refuse.",
     );
+
+    const platform = await inspectPlatformAdminState(prisma);
+    console.log(`\nPlatform administrator (${PLATFORM_ADMIN_ROLE_KEY}):`);
+    if (platform.holders.length === 0 && platform.institutionless.length === 0) {
+      console.log("  none — the platform stage may run.");
+    }
+    for (const holder of platform.holders) {
+      console.log(
+        `  - ${holder.email} (user ${holder.userId}, ${holder.status}, ` +
+          `institution ${holder.userInstitutionId ?? "none"}, ` +
+          `assignment scope ${holder.assignmentInstitutionId ?? "platform-wide"})`,
+      );
+    }
+    for (const problem of platform.problems) {
+      console.log(`  ! ${problem}`);
+    }
+    if (platform.holders.length > 0 && platform.problems.length === 0) {
+      console.log(
+        "  The platform stage will report this as already configured and write nothing.\n" +
+          "  It is also why the tenant stage refuses: a platform account is a user.",
+      );
+    }
   }
 
   if (stage === "system") {
@@ -239,6 +277,51 @@ try {
     console.log(`  Administrator id: ${result.adminUserId}`);
     console.log(`  Role granted:     ${result.roleKey} (${FIRST_ADMIN_ROLE_KEY})`);
     console.log("\nSign in with that address and the password you supplied.");
+  }
+
+  if (stage === "platform") {
+    const adminEmail = requireEnv("BOOTSTRAP_PLATFORM_ADMIN_EMAIL");
+    // Optional: the address is what identifies the account, the name is only
+    // what the application shows beside it.
+    const adminName = process.env.BOOTSTRAP_PLATFORM_ADMIN_NAME?.trim() || "Platform Super Admin";
+
+    // Deliberately the same secret as the tenant stage, rather than a second
+    // one to provision and rotate. Which account it belongs to is decided by
+    // the stage argument, which is explicit on every execution.
+    const password = await readAdminPassword();
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      fail(`the administrator password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+    }
+
+    const { hashPassword } = await import("@/modules/auth-tenancy/password");
+    const passwordHash = await hashPassword(password);
+
+    const result = await runPlatformAdminBootstrap(prisma, {
+      name: adminName,
+      email: adminEmail,
+      passwordHash,
+    });
+
+    if (result.created) {
+      console.log("Platform administrator created.");
+      console.log(`  Administrator:    ${result.email}`);
+      console.log(`  Administrator id: ${result.userId}`);
+      console.log(`  Role granted:     ${result.roleKey}`);
+      console.log(`  Institution:      none — this account sits outside every institution.`);
+      console.log("\nSign in with that address and the password you supplied.");
+      console.log("Then create the first institution and its administrator in the application.");
+    } else {
+      console.log("Platform administrator already configured. Nothing was written.");
+      console.log(`  Administrator:    ${result.email}`);
+      console.log(`  Administrator id: ${result.userId}`);
+      console.log(`  Status:           ${result.status}`);
+      // Stated plainly because the obvious wrong assumption is that re-running
+      // this rotates the password. It does not: the account is left untouched.
+      console.log("\nThe password supplied for this run was not used and nothing was changed.");
+      if (result.status !== "ACTIVE") {
+        console.log(`This account is ${result.status} and cannot sign in until it is reactivated.`);
+      }
+    }
   }
 } catch (error) {
   if (error instanceof BootstrapError) {
