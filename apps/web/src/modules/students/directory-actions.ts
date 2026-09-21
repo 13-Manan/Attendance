@@ -22,6 +22,7 @@ import {
   updateStudentForRequest,
 } from "./directory-service";
 import { STUDENT_STATUS_LABEL, StudentError, type StudentStatus } from "./directory-types";
+import { provisionStudentLogin, resetStudentLoginPassword } from "./login-provisioning";
 import { studentDisplayName } from "./types";
 
 /** Every field of the student form, as strings, for redisplay after a refusal. */
@@ -177,5 +178,64 @@ export async function removeStudentClassAction(
     };
   } catch (error) {
     return { error: describe(error, "That change could not be made.") };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Student portal logins
+// ---------------------------------------------------------------------------
+
+/**
+ * The temporary password is carried back in the return value and nowhere else:
+ * not in the URL, not in a redirect, not in the audit row. It survives exactly
+ * one render.
+ */
+export interface StudentLoginFormState {
+  error: string | null;
+  issued: { email: string; password: string; notice: string } | null;
+}
+
+export async function provisionStudentLoginAction(
+  _previous: StudentLoginFormState,
+  formData: FormData,
+): Promise<StudentLoginFormState> {
+  const user = await requireUser();
+  const studentId = String(formData.get("studentId") ?? "");
+  const email = String(formData.get("email") ?? "");
+
+  try {
+    const result = await provisionStudentLogin(user, studentId, { email });
+    refresh();
+    return {
+      error: null,
+      issued: { email: result.account.email, password: result.password, notice: result.notice },
+    };
+  } catch (error) {
+    if (error instanceof StudentError) return { error: error.message, issued: null };
+    if (error instanceof ForbiddenError) {
+      return { error: "You do not have permission to provision a student login.", issued: null };
+    }
+    throw error;
+  }
+}
+
+export async function resetStudentLoginAction(
+  _previous: StudentLoginFormState,
+  formData: FormData,
+): Promise<StudentLoginFormState> {
+  const user = await requireUser();
+  const studentId = String(formData.get("studentId") ?? "");
+  const email = String(formData.get("email") ?? "");
+
+  try {
+    const result = await resetStudentLoginPassword(user, studentId);
+    refresh();
+    return { error: null, issued: { email, password: result.password, notice: result.notice } };
+  } catch (error) {
+    if (error instanceof StudentError) return { error: error.message, issued: null };
+    if (error instanceof ForbiddenError) {
+      return { error: "You do not have permission to do that.", issued: null };
+    }
+    throw error;
   }
 }

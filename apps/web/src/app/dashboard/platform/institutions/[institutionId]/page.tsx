@@ -6,6 +6,11 @@ import { Badge } from "@/components/ui/badge";
 import { StatCard, StatGrid, formatSessionDate } from "@/components/ui/attendance-stat";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { SuspensionControl } from "./suspension-control";
+import { Administrators } from "./administrators";
+import {
+  defaultAdminRoleFor,
+  listInstitutionAdministrators,
+} from "@/modules/platform/administrators";
 
 interface PageProps {
   params: Promise<{ institutionId: string }>;
@@ -37,6 +42,8 @@ export default async function PlatformInstitutionDetailPage({ params }: PageProp
 
   const institution = await getInstitutionDetail(user, institutionId);
   if (!institution) notFound();
+
+  const administrators = await listInstitutionAdministrators(user, institution.id);
 
   const suspended = institution.suspendedAt !== null;
 
@@ -119,6 +126,43 @@ export default async function PlatformInstitutionDetailPage({ params }: PageProp
           Face enrollment is reported as a count of active templates. No
           biometric value is readable from this page or from the query behind
           it.
+        </p>
+      </Panel>
+
+      <Administrators
+        institutionId={institution.id}
+        institutionName={institution.name}
+        institutionType={institution.type === "COLLEGE" ? "COLLEGE" : "SCHOOL"}
+        defaultRoleKey={defaultAdminRoleFor(institution.type === "COLLEGE" ? "COLLEGE" : "SCHOOL")}
+        administrators={administrators}
+      />
+
+      {/*
+        Where the rest of the hierarchy lives. Everything below an
+        administrator is created by that administrator inside their own
+        institution, so this points at those screens rather than duplicating
+        them — a second implementation of staff or student creation is a second
+        place for the authorization to be wrong.
+      */}
+      <Panel
+        title="Inside this institution"
+        description="Created and managed by this institution's own administrator, not from the platform tier."
+      >
+        <ul className="flex flex-col gap-1 text-sm text-neutral-700">
+          <li>Teachers and faculty — staff directory</li>
+          <li>Students, and their portal logins — student directory</li>
+          <li>
+            {institution.type === "COLLEGE"
+              ? "Programmes, semesters, subjects and faculty assignments"
+              : "Classes and sections"}{" "}
+            — academic structure
+          </li>
+          <li>Face enrollment, attendance sessions, review and reports</li>
+        </ul>
+        <p className="text-xs text-neutral-500">
+          A platform account is not scoped to one institution, so those screens
+          are not available from here. An administrator added above signs in and
+          reaches all of them.
         </p>
       </Panel>
 

@@ -5,6 +5,12 @@ import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { ForbiddenError } from "@/modules/authorization/types";
 import { createInstitution, setInstitutionSuspended } from "./service";
+import {
+  AdministratorError,
+  createInstitutionAdministrator,
+  resetAdministratorPassword,
+  setAdministratorStatus,
+} from "./administrators";
 
 /**
  * Server Actions for the platform tier.
@@ -93,4 +99,101 @@ export async function setSuspendedAction(
   revalidatePath(`/dashboard/platform/institutions/${institutionId}`);
   revalidatePath("/dashboard/platform/institutions");
   return { error: null };
+}
+
+// ---------------------------------------------------------------------------
+// Institution administrators
+// ---------------------------------------------------------------------------
+
+/**
+ * The temporary password is returned to the caller and never stored, logged or
+ * audited. It reaches the browser once, in the Server Action's return value —
+ * not in a URL, not in a redirect, and not on a page that can be reloaded into
+ * existence again.
+ */
+export interface AdministratorFormState {
+  error: string | null;
+  /** Present exactly once, on the render that follows a successful create. */
+  issued: { email: string; password: string; notice: string } | null;
+}
+
+export async function createInstitutionAdministratorAction(
+  _previous: AdministratorFormState,
+  formData: FormData,
+): Promise<AdministratorFormState> {
+  const user = await requireUser();
+
+  const institutionId = String(formData.get("institutionId") ?? "");
+  const name = String(formData.get("name") ?? "");
+  const email = String(formData.get("email") ?? "");
+  const roleKey = String(formData.get("roleKey") ?? "");
+
+  try {
+    const result = await createInstitutionAdministrator(user, institutionId, {
+      name,
+      email,
+      roleKey,
+    });
+    revalidatePath(`/dashboard/platform/institutions/${institutionId}`);
+    return {
+      error: null,
+      issued: {
+        email: result.administrator.email,
+        password: result.password,
+        notice: result.notice,
+      },
+    };
+  } catch (error) {
+    if (error instanceof AdministratorError) return { error: error.message, issued: null };
+    if (error instanceof ForbiddenError) {
+      // One message whichever rule refused, so a caller cannot learn which
+      // permission they are missing by reading the form.
+      return { error: "You do not have permission to add an administrator.", issued: null };
+    }
+    throw error;
+  }
+}
+
+export async function resetAdministratorPasswordAction(
+  _previous: AdministratorFormState,
+  formData: FormData,
+): Promise<AdministratorFormState> {
+  const user = await requireUser();
+  const institutionId = String(formData.get("institutionId") ?? "");
+  const userId = String(formData.get("userId") ?? "");
+  const email = String(formData.get("email") ?? "");
+
+  try {
+    const result = await resetAdministratorPassword(user, institutionId, userId);
+    revalidatePath(`/dashboard/platform/institutions/${institutionId}`);
+    return { error: null, issued: { email, password: result.password, notice: result.notice } };
+  } catch (error) {
+    if (error instanceof AdministratorError) return { error: error.message, issued: null };
+    if (error instanceof ForbiddenError) {
+      return { error: "You do not have permission to do that.", issued: null };
+    }
+    throw error;
+  }
+}
+
+export async function setAdministratorStatusAction(
+  _previous: AdministratorFormState,
+  formData: FormData,
+): Promise<AdministratorFormState> {
+  const user = await requireUser();
+  const institutionId = String(formData.get("institutionId") ?? "");
+  const userId = String(formData.get("userId") ?? "");
+  const active = String(formData.get("active") ?? "") === "true";
+
+  try {
+    await setAdministratorStatus(user, institutionId, userId, active);
+    revalidatePath(`/dashboard/platform/institutions/${institutionId}`);
+    return { error: null, issued: null };
+  } catch (error) {
+    if (error instanceof AdministratorError) return { error: error.message, issued: null };
+    if (error instanceof ForbiddenError) {
+      return { error: "You do not have permission to do that.", issued: null };
+    }
+    throw error;
+  }
 }

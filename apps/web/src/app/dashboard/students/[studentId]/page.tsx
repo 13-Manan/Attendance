@@ -17,6 +17,8 @@ import {
 import { studentDisplayName } from "@/modules/students/types";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { EmptyState, Panel } from "@/components/ui/panel";
+import { StudentLogin } from "./student-login";
+import { getStudentLogin } from "@/modules/students/login-provisioning";
 import {
   AssignStudentClassControl,
   RemoveStudentClassControl,
@@ -109,6 +111,12 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
 
   // Only fetched when there is a control that needs it.
   const options = canPlace ? await getStudentFormOptionsForRequest(user) : null;
+
+  // `user.invite` is the same permission the faculty directory uses to mean
+  // "may create an account in this institution"; the panel is read-only
+  // without it.
+  const canManageLogin = hasPermission(user, "user.invite");
+  const login = await getStudentLogin(user, studentId);
 
   const currentIds = new Set(student.classes.map((link) => link.enrollmentId));
   const pastClasses = student.allClasses.filter((link) => !currentIds.has(link.enrollmentId));
@@ -273,6 +281,13 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
           </p>
         )}
       </Panel>
+
+      <StudentLogin
+        studentId={student.id}
+        studentName={`${student.firstName} ${student.lastName}`.trim()}
+        login={login}
+        canManage={canManageLogin}
+      />
 
       {canUpdate ? (
         <Panel
