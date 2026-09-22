@@ -144,7 +144,12 @@ export default async function FaceEnrollmentPage() {
   return (
     <div className="flex flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">Face enrollment</h1>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Attendance
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Face enrollment
+        </h1>
         <p className="max-w-3xl text-sm text-neutral-500">
           Which students the recognition pipeline can actually recognise. A student with no sample
           is never matched, and their register is taken by hand — which is correct, but only if

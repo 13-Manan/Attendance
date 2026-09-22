@@ -8,6 +8,9 @@ import { getInstitutionById } from "@/modules/institutions/repository";
 import { resolveAttendanceMode } from "@/modules/institutions/service";
 import { listCohortSubjectsForCapture } from "@/modules/attendance-capture/service";
 import { listRecentSessionsForCohort } from "@/modules/attendance-review/repository";
+import { Badge, type BadgeTone } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { EmptyState, Panel } from "@/components/ui/panel";
 
 interface PageProps {
   params: Promise<{ cohortId: string }>;
@@ -21,6 +24,14 @@ const STATUS_LABEL: Record<string, string> = {
   FINALIZED: "Finalized",
 };
 
+const STATUS_TONE: Record<string, BadgeTone> = {
+  OPEN: "neutral",
+  CAPTURING: "info",
+  PROCESSING: "info",
+  REVIEW: "warning",
+  FINALIZED: "positive",
+};
+
 /**
  * Recent registers for this class. The way back to a review board a faculty
  * member has left — and, for a FINALIZED session, the entry point to the
@@ -31,13 +42,15 @@ async function RecentSessions({ cohortId }: { cohortId: string }) {
   if (sessions.length === 0) return null;
 
   return (
-    <section className="flex flex-col gap-2">
-      <h2 className="text-sm font-semibold text-neutral-900">Recent registers</h2>
-      <ul className="flex flex-col divide-y divide-neutral-100 rounded-md border border-neutral-200">
+    <Panel title="Recent registers">
+      <ul className="flex flex-col divide-y divide-neutral-100">
         {sessions.map((s) => (
-          <li key={s.id} className="flex items-center justify-between gap-3 px-4 py-3">
-            <div className="flex min-w-0 flex-col">
-              <span className="truncate text-sm text-neutral-900">
+          <li
+            key={s.id}
+            className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
+          >
+            <div className="flex min-w-0 flex-col gap-1">
+              <span className="truncate text-sm font-medium text-neutral-900">
                 {s.sessionDate.toLocaleDateString(undefined, {
                   year: "numeric",
                   month: "short",
@@ -45,19 +58,25 @@ async function RecentSessions({ cohortId }: { cohortId: string }) {
                 })}
                 {s.cohortSubject?.subject ? ` · ${s.cohortSubject.subject.name}` : ""}
               </span>
-              <span className="text-xs text-neutral-500">
-                {STATUS_LABEL[s.status] ?? s.status}
-                {s._count.attendanceRecords > 0
-                  ? ` · ${s._count.attendanceRecords} students`
-                  : " · no register yet"}
+              <span className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
+                <Badge tone={STATUS_TONE[s.status] ?? "neutral"}>
+                  {STATUS_LABEL[s.status] ?? s.status}
+                </Badge>
+                <span>
+                  {s._count.attendanceRecords > 0
+                    ? `${s._count.attendanceRecords} student${s._count.attendanceRecords === 1 ? "" : "s"}`
+                    : "no register yet"}
+                </span>
               </span>
             </div>
             {s._count.attendanceRecords > 0 ? (
               <Link
                 href={`/dashboard/attendance/${cohortId}/review/${s.id}`}
-                className="shrink-0 rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
+                className="shrink-0"
               >
-                {s.status === "FINALIZED" ? "View register" : "Review"}
+                <Button type="button" variant="secondary">
+                  {s.status === "FINALIZED" ? "View register" : "Review →"}
+                </Button>
               </Link>
             ) : (
               <span className="shrink-0 text-xs text-neutral-400">—</span>
@@ -65,7 +84,7 @@ async function RecentSessions({ cohortId }: { cohortId: string }) {
           </li>
         ))}
       </ul>
-    </section>
+    </Panel>
   );
 }
 
@@ -94,40 +113,41 @@ export default async function AttendanceCohortLandingPage({ params }: PageProps)
   if (mode === "DAILY") {
     return (
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
-        <header className="flex flex-wrap items-start justify-between gap-3">
+        <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
           <div className="flex flex-col gap-1">
-            <Link href="/dashboard/attendance" className="text-xs text-neutral-500 hover:underline">
+            <Link
+              href="/dashboard/attendance"
+              className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
+            >
               ← All classes
             </Link>
-            <h1 className="text-xl font-semibold text-neutral-900">{cohort.name}</h1>
+            <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+              {cohort.name}
+            </h1>
             <p className="text-sm text-neutral-500">
               Daily attendance{cohort.termLabel ? ` · ${cohort.termLabel}` : ""}
             </p>
           </div>
-          <Link
-            href={`/dashboard/attendance/${cohort.id}/history`}
-            className="shrink-0 rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
-          >
-            Attendance history
+          <Link href={`/dashboard/attendance/${cohort.id}/history`} className="shrink-0">
+            <Button type="button" variant="secondary" className="w-full sm:w-auto">
+              Attendance history →
+            </Button>
           </Link>
         </header>
 
-        <section className="rounded-md border border-neutral-200 p-6">
+        <Panel
+          title="Today's register"
+          description="Only one attendance session per class per day is allowed. If a session was already opened today, resuming will continue it in place."
+        >
           <p className="text-sm text-neutral-700">
             Ready to capture today&apos;s attendance for this class.
           </p>
-          <p className="mt-2 text-xs text-neutral-500">
-            Only one attendance session per class per day is allowed. If a
-            session was already opened today, resuming will continue it in
-            place.
-          </p>
-          <Link
-            href={`/dashboard/attendance/${cohort.id}/capture`}
-            className="mt-4 inline-flex rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
-          >
-            Start attendance
-          </Link>
-        </section>
+          <div>
+            <Link href={`/dashboard/attendance/${cohort.id}/capture`}>
+              <Button type="button">+ Start attendance</Button>
+            </Link>
+          </div>
+        </Panel>
 
         <RecentSessions cohortId={cohort.id} />
       </div>
@@ -157,26 +177,35 @@ export default async function AttendanceCohortLandingPage({ params }: PageProps)
       </header>
 
       {subjects.length === 0 ? (
-        <div className="rounded-md border border-dashed border-neutral-300 p-6 text-sm text-neutral-500">
-          No subjects have been attached to this cohort yet.
-        </div>
+        <Panel title="No subjects">
+          <EmptyState>No subjects have been attached to this cohort yet.</EmptyState>
+        </Panel>
       ) : (
-        <ul className="flex flex-col divide-y divide-neutral-100 rounded-md border border-neutral-200">
-          {subjects.map((s) => (
-            <li key={s.id} className="flex items-center justify-between px-4 py-3">
-              <div className="flex flex-col">
-                <span className="text-sm font-medium text-neutral-900">{s.subjectName}</span>
-                <span className="text-xs text-neutral-500">{s.subjectCode}</span>
-              </div>
-              <Link
-                href={`/dashboard/attendance/${cohort.id}/capture?subject=${encodeURIComponent(s.id)}`}
-                className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
+        <Panel title="Subjects" description="Pick a subject to open its register.">
+          <ul className="flex flex-col divide-y divide-neutral-100">
+            {subjects.map((s) => (
+              <li
+                key={s.id}
+                className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
               >
-                Start attendance
-              </Link>
-            </li>
-          ))}
-        </ul>
+                <div className="flex min-w-0 flex-col">
+                  <span className="truncate text-sm font-medium text-neutral-900">
+                    {s.subjectName}
+                  </span>
+                  <span className="font-mono text-xs text-neutral-500">{s.subjectCode}</span>
+                </div>
+                <Link
+                  href={`/dashboard/attendance/${cohort.id}/capture?subject=${encodeURIComponent(s.id)}`}
+                  className="shrink-0"
+                >
+                  <Button type="button" className="w-full sm:w-auto">
+                    Start attendance →
+                  </Button>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </Panel>
       )}
 
       <RecentSessions cohortId={cohort.id} />

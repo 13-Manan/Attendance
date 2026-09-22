@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { listCapturableCohortsForActor } from "@/modules/attendance-capture/service";
+import { Button } from "@/components/ui/button";
+import { EmptyState, Panel } from "@/components/ui/panel";
 
 /**
  * Phase 4 entry point — "Faculty opens Attendance → Select class/section".
@@ -17,23 +19,35 @@ export default async function AttendanceLandingPage() {
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">Attendance</h1>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Take attendance
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Attendance
+        </h1>
         <p className="text-sm text-neutral-500">
           Pick a class to start today&apos;s attendance capture.
         </p>
       </header>
 
       {cohorts.length === 0 ? (
-        <div className="rounded-md border border-dashed border-neutral-300 p-6 text-sm text-neutral-500">
-          You do not currently teach any classes. Ask an administrator to link
-          you as faculty for a cohort.
-        </div>
+        <Panel title="No classes assigned">
+          <EmptyState>
+            You do not currently teach any classes. Ask an administrator to
+            link you as faculty for a cohort.
+          </EmptyState>
+        </Panel>
       ) : (
-        <ul className="flex flex-col divide-y divide-neutral-100 rounded-md border border-neutral-200">
+        <ul className="flex flex-col divide-y divide-neutral-100 rounded-lg border border-neutral-200 bg-white">
           {cohorts.map((c) => (
-            <li key={c.id} className="flex items-center justify-between px-4 py-3">
-              <div className="flex flex-col">
-                <span className="text-sm font-medium text-neutral-900">{c.name}</span>
+            <li
+              key={c.id}
+              className="flex flex-col gap-3 px-4 py-3 transition-colors hover:bg-neutral-50 sm:flex-row sm:items-center sm:justify-between"
+            >
+              <div className="flex min-w-0 flex-col">
+                <span className="truncate text-sm font-medium text-neutral-900">
+                  {c.name}
+                </span>
                 <span className="text-xs text-neutral-500">
                   {c.termLabel ? `${c.termLabel} · ` : ""}
                   {c.attendanceMode === "DAILY"
@@ -41,11 +55,10 @@ export default async function AttendanceLandingPage() {
                     : "Subject-wise attendance"}
                 </span>
               </div>
-              <Link
-                href={`/dashboard/attendance/${c.id}`}
-                className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
-              >
-                Open
+              <Link href={`/dashboard/attendance/${c.id}`} className="shrink-0">
+                <Button type="button" className="w-full sm:w-auto">
+                  Open →
+                </Button>
               </Link>
             </li>
           ))}

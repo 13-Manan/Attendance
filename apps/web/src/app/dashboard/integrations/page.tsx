@@ -37,7 +37,12 @@ export default async function IntegrationsPage() {
   return (
     <div className="flex flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">Integrations</h1>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Connect
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Integrations
+        </h1>
         <p className="max-w-3xl text-sm text-neutral-500">
           Connect this platform to the systems the institution already runs — an ERP, a student
           information system, or a folder of spreadsheets. Records flow in; attendance flows out

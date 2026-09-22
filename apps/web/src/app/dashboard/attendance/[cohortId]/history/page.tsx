@@ -56,12 +56,17 @@ export default async function CohortAttendanceHistoryPage({ params }: PageProps)
       <header className="flex flex-col gap-1">
         <Link
           href={`/dashboard/attendance/${cohortId}`}
-          className="text-xs text-neutral-500 hover:underline"
+          className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
         >
           ← Back to class
         </Link>
-        <h1 className="text-xl font-semibold text-neutral-900">{history.cohortName}</h1>
-        <p className="text-xs text-neutral-500">
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Attendance history
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          {history.cohortName}
+        </h1>
+        <p className="text-sm text-neutral-500">
           {history.termLabel ? `${history.termLabel} · ` : ""}
           {isCollege ? "Subject-wise attendance" : "Daily attendance"} · last{" "}
           {history.sessions.length} session{history.sessions.length === 1 ? "" : "s"}

@@ -53,7 +53,12 @@ export default async function OfflinePage() {
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">Offline attendance</h1>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Attendance
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Offline attendance
+        </h1>
         <p className="text-sm text-neutral-500">
           Take a register with no internet. Everything is saved on this device and syncs by
           itself when the connection returns.

@@ -90,7 +90,12 @@ export default async function ApiKeysPage() {
   return (
     <div className="flex flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">API keys</h1>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Connect
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          API keys
+        </h1>
         <p className="max-w-3xl text-sm text-neutral-500">
           Credentials other systems use to call this platform&apos;s versioned API. Each key
           carries only the scopes it was given, and each one&apos;s use is recorded against it in

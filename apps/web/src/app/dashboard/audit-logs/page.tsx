@@ -9,7 +9,10 @@ import {
   hasActiveAuditFilters,
   type AuditFilters,
 } from "@/modules/audit/query";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { EmptyState, Panel } from "@/components/ui/panel";
+import { Select } from "@/components/ui/select";
 import { TableScroll } from "@/components/ui/table-scroll";
 
 interface PageProps {
@@ -127,24 +130,25 @@ export default async function AuditLogsPage({ searchParams }: PageProps) {
   const firstRow = result.total === 0 ? 0 : (result.page - 1) * result.pageSize + 1;
   const lastRow = Math.min(result.page * result.pageSize, result.total);
 
-  const selectClass =
-    "w-full rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-sm outline-none focus:border-neutral-500 focus:ring-1 focus:ring-neutral-500";
-  const inputClass =
-    "w-full rounded-md border border-neutral-300 px-2.5 py-1.5 text-sm outline-none focus:border-neutral-500 focus:ring-1 focus:ring-neutral-500";
-  const labelClass = "flex flex-col gap-1 text-xs font-medium text-neutral-600";
+  const labelClass = "flex flex-col gap-1.5 text-xs font-medium text-neutral-600";
   const linkClass =
-    "rounded-md border border-neutral-300 px-2.5 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50";
+    "inline-flex min-h-9 items-center rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-xs font-medium text-neutral-700 transition-colors hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2";
   const disabledClass =
-    "rounded-md border border-neutral-200 px-2.5 py-1.5 text-xs font-medium text-neutral-300";
+    "inline-flex min-h-9 cursor-not-allowed items-center rounded-md border border-neutral-200 px-3 py-1.5 text-xs font-medium text-neutral-300";
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <Link href="/dashboard" className="text-xs text-neutral-500 hover:underline">
+        <Link
+          href="/dashboard"
+          className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
+        >
           ← Overview
         </Link>
-        <h1 className="text-xl font-semibold text-neutral-900">Audit log</h1>
-        <p className="text-xs text-neutral-500">
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Audit log
+        </h1>
+        <p className="text-sm text-neutral-500">
           Every security-sensitive action taken in this institution, by whom, and what changed.
           Records are written once and are never edited or deleted.
         </p>
@@ -158,31 +162,31 @@ export default async function AuditLogsPage({ searchParams }: PageProps) {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <label className={labelClass}>
               User
-              <select name="actorUserId" defaultValue={filters.actorUserId} className={selectClass}>
+              <Select name="actorUserId" defaultValue={filters.actorUserId}>
                 <option value="">Anyone, including API keys</option>
                 {result.actors.map((actor) => (
                   <option key={actor.id} value={actor.id}>
                     {actor.name} ({actor.email})
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
 
             <label className={labelClass}>
               Module
-              <select name="module" defaultValue={filters.module} className={selectClass}>
+              <Select name="module" defaultValue={filters.module}>
                 <option value="">Every module</option>
                 {AUDIT_MODULES.map((module) => (
                   <option key={module.key} value={module.key}>
                     {module.label}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
 
             <label className={labelClass}>
               Action
-              <select name="action" defaultValue={filters.action} className={selectClass}>
+              <Select name="action" defaultValue={filters.action}>
                 <option value="">Every action</option>
                 {AUDIT_MODULES.map((module) => (
                   <optgroup key={module.key} label={module.label}>
@@ -193,64 +197,61 @@ export default async function AuditLogsPage({ searchParams }: PageProps) {
                     ))}
                   </optgroup>
                 ))}
-              </select>
+              </Select>
             </label>
 
             <label className={labelClass}>
               From
-              <input type="date" name="from" defaultValue={filters.from} className={inputClass} />
+              <Input type="date" name="from" defaultValue={filters.from} />
             </label>
 
             <label className={labelClass}>
               To
-              <input type="date" name="to" defaultValue={filters.to} className={inputClass} />
+              <Input type="date" name="to" defaultValue={filters.to} />
             </label>
 
             <label className={labelClass}>
               Resource type
-              <select name="entityType" defaultValue={filters.entityType} className={selectClass}>
+              <Select name="entityType" defaultValue={filters.entityType}>
                 <option value="">Every resource</option>
                 {result.entityTypes.map((entry) => (
                   <option key={entry.entityType} value={entry.entityType}>
                     {entry.entityType} ({entry.count.toLocaleString()})
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
 
             <label className={labelClass}>
               Resource id
-              <input
+              <Input
                 type="text"
                 name="entityId"
                 defaultValue={filters.entityId}
                 placeholder="e.g. the student or session id"
-                className={inputClass}
+                autoComplete="off"
               />
             </label>
 
             <label className={labelClass}>
               Rows per page
-              <select name="pageSize" defaultValue={String(filters.pageSize)} className={selectClass}>
+              <Select name="pageSize" defaultValue={String(filters.pageSize)}>
                 {AUDIT_PAGE_SIZES.map((size) => (
                   <option key={size} value={size}>
                     {size}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="submit"
-              className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
-            >
-              Search
-            </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="submit">Search</Button>
             {filtered ? (
-              <Link href={BASE} className={linkClass}>
-                Clear filters
+              <Link href={BASE}>
+                <Button type="button" variant="secondary">
+                  Clear filters
+                </Button>
               </Link>
             ) : null}
             <p className="text-xs tabular-nums text-neutral-500">
@@ -274,19 +275,19 @@ export default async function AuditLogsPage({ searchParams }: PageProps) {
         ) : (
           <TableScroll minWidth="min-w-[54rem]">
             <table className="w-full text-left text-sm">
-              <thead className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
+              <thead className="border-b border-neutral-200 bg-neutral-50 text-xs uppercase tracking-wide text-neutral-500">
                 <tr>
-                  <th className="py-2 pr-3 font-medium">When</th>
-                  <th className="py-2 pr-3 font-medium">Who</th>
-                  <th className="py-2 pr-3 font-medium">Action</th>
-                  <th className="py-2 pr-3 font-medium">Resource</th>
-                  <th className="py-2 font-medium">Change</th>
+                  <th className="py-2.5 pr-3 pl-3 font-medium">When</th>
+                  <th className="py-2.5 pr-3 font-medium">Who</th>
+                  <th className="py-2.5 pr-3 font-medium">Action</th>
+                  <th className="py-2.5 pr-3 font-medium">Resource</th>
+                  <th className="py-2.5 pr-3 font-medium">Change</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100">
                 {result.entries.map((entry) => (
-                  <tr key={entry.id} className="align-top">
-                    <td className="py-2 pr-3 whitespace-nowrap text-xs tabular-nums text-neutral-600">
+                  <tr key={entry.id} className="align-top transition-colors hover:bg-neutral-50/60">
+                    <td className="py-2.5 pr-3 pl-3 whitespace-nowrap text-xs tabular-nums text-neutral-600">
                       {formatTimestamp(entry.createdAt)}
                     </td>
                     <td className="py-2 pr-3 text-xs text-neutral-800">

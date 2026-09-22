@@ -2,7 +2,10 @@ import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { listInstitutions } from "@/modules/platform/service";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { EmptyState, Panel } from "@/components/ui/panel";
+import { Select } from "@/components/ui/select";
 import { TableScroll } from "@/components/ui/table-scroll";
 
 interface PageProps {
@@ -58,75 +61,68 @@ export default async function PlatformInstitutionsPage({ searchParams }: PagePro
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
-      <header className="flex flex-wrap items-start justify-between gap-3">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="flex flex-col gap-1">
-          <Link href="/dashboard/platform" className="text-xs text-neutral-500 hover:underline">
+          <Link
+            href="/dashboard/platform"
+            className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
+          >
             ← Platform
           </Link>
-          <h1 className="text-xl font-semibold text-neutral-900">Institutions</h1>
+          <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+            Institutions
+          </h1>
           <p className="text-sm text-neutral-500">
             {page.total} institution{page.total === 1 ? "" : "s"} on this deployment.
           </p>
         </div>
-        <Link
-          href="/dashboard/platform/institutions/new"
-          className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
-        >
-          Add institution
+        <Link href="/dashboard/platform/institutions/new" className="shrink-0">
+          <Button type="button" className="w-full sm:w-auto">
+            + Add institution
+          </Button>
         </Link>
       </header>
 
-      <Panel title="Filter">
-        <form method="get" className="flex flex-col gap-3">
+      <Panel
+        title="Filter"
+        description="Search, type and status compose into the URL — a filtered view is a shareable link."
+      >
+        <form method="get" className="flex flex-col gap-4">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <label className="flex flex-col gap-1">
+            <label className="flex flex-col gap-1.5">
               <span className="text-xs font-medium text-neutral-600">Name contains</span>
-              <input
+              <Input
                 type="search"
                 name="q"
                 defaultValue={search}
                 placeholder="Greenwood"
-                className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
+                autoComplete="off"
               />
             </label>
-            <label className="flex flex-col gap-1">
+            <label className="flex flex-col gap-1.5">
               <span className="text-xs font-medium text-neutral-600">Type</span>
-              <select
-                name="type"
-                defaultValue={typeParam}
-                className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
-              >
+              <Select name="type" defaultValue={typeParam}>
                 <option value="">All types</option>
                 <option value="SCHOOL">School</option>
                 <option value="COLLEGE">College</option>
-              </select>
+              </Select>
             </label>
-            <label className="flex flex-col gap-1">
+            <label className="flex flex-col gap-1.5">
               <span className="text-xs font-medium text-neutral-600">Status</span>
-              <select
-                name="status"
-                defaultValue={statusParam}
-                className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
-              >
+              <Select name="status" defaultValue={statusParam}>
                 <option value="">Any status</option>
                 <option value="active">Active</option>
                 <option value="suspended">Suspended</option>
-              </select>
+              </Select>
             </label>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="submit"
-              className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
-            >
-              Apply
-            </button>
+            <Button type="submit">Apply filters</Button>
             {search || typeParam || statusParam ? (
-              <Link
-                href="/dashboard/platform/institutions"
-                className="rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
-              >
-                Clear
+              <Link href="/dashboard/platform/institutions">
+                <Button type="button" variant="secondary">
+                  Clear
+                </Button>
               </Link>
             ) : null}
           </div>
@@ -151,20 +147,20 @@ export default async function PlatformInstitutionsPage({ searchParams }: PagePro
           <TableScroll minWidth="min-w-[44rem]">
             <table className="w-full border-collapse text-left">
               <caption className="sr-only">Institutions on this deployment</caption>
-              <thead>
+              <thead className="bg-neutral-50">
                 <tr className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
-                  <th scope="col" className="py-2 pr-4 font-medium">Institution</th>
-                  <th scope="col" className="py-2 pr-4 font-medium">Type</th>
-                  <th scope="col" className="py-2 pr-4 font-medium">Status</th>
-                  <th scope="col" className="py-2 pr-4 font-medium">Users</th>
-                  <th scope="col" className="py-2 pr-4 font-medium">Students</th>
-                  <th scope="col" className="py-2 font-medium">Classes</th>
+                  <th scope="col" className="py-2.5 pr-4 pl-3 font-medium">Institution</th>
+                  <th scope="col" className="py-2.5 pr-4 font-medium">Type</th>
+                  <th scope="col" className="py-2.5 pr-4 font-medium">Status</th>
+                  <th scope="col" className="py-2.5 pr-4 text-right font-medium">Users</th>
+                  <th scope="col" className="py-2.5 pr-4 text-right font-medium">Students</th>
+                  <th scope="col" className="py-2.5 pr-3 text-right font-medium">Classes</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-neutral-100">
                 {page.rows.map((row) => (
-                  <tr key={row.id} className="border-b border-neutral-100">
-                    <td className="py-3 pr-4 text-sm">
+                  <tr key={row.id} className="transition-colors hover:bg-neutral-50">
+                    <td className="py-3 pr-4 pl-3 text-sm">
                       <Link
                         href={`/dashboard/platform/institutions/${row.id}`}
                         className="font-medium text-neutral-900 hover:underline"
@@ -180,18 +176,18 @@ export default async function PlatformInstitutionsPage({ searchParams }: PagePro
                     </td>
                     <td className="py-3 pr-4 text-sm">
                       {row.suspendedAt ? (
-                        <Badge tone="neutral">Suspended</Badge>
+                        <Badge tone="warning">Suspended</Badge>
                       ) : (
                         <Badge tone="positive">Active</Badge>
                       )}
                     </td>
-                    <td className="py-3 pr-4 text-sm tabular-nums text-neutral-600">
+                    <td className="py-3 pr-4 text-right text-sm tabular-nums text-neutral-700">
                       {row.counts.users}
                     </td>
-                    <td className="py-3 pr-4 text-sm tabular-nums text-neutral-600">
+                    <td className="py-3 pr-4 text-right text-sm tabular-nums text-neutral-700">
                       {row.counts.students}
                     </td>
-                    <td className="py-3 text-sm tabular-nums text-neutral-600">
+                    <td className="py-3 pr-3 text-right text-sm tabular-nums text-neutral-700">
                       {row.counts.cohorts}
                     </td>
                   </tr>
@@ -202,23 +198,26 @@ export default async function PlatformInstitutionsPage({ searchParams }: PagePro
         )}
 
         {(page.offset > 0 || page.hasMore) && (
-          <div className="flex items-center gap-2">
-            {page.offset > 0 ? (
-              <Link
-                href={pageHref(Math.max(0, page.offset - page.limit))}
-                className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-50"
-              >
-                Previous
-              </Link>
-            ) : null}
-            {page.hasMore ? (
-              <Link
-                href={pageHref(page.offset + page.limit)}
-                className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-50"
-              >
-                Next
-              </Link>
-            ) : null}
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+            <span className="text-xs tabular-nums text-neutral-500">
+              Page {Math.floor(page.offset / page.limit) + 1}
+            </span>
+            <div className="flex items-center gap-2">
+              {page.offset > 0 ? (
+                <Link href={pageHref(Math.max(0, page.offset - page.limit))}>
+                  <Button type="button" variant="secondary">
+                    ← Previous
+                  </Button>
+                </Link>
+              ) : null}
+              {page.hasMore ? (
+                <Link href={pageHref(page.offset + page.limit)}>
+                  <Button type="button" variant="secondary">
+                    Next →
+                  </Button>
+                </Link>
+              ) : null}
+            </div>
           </div>
         )}
       </Panel>

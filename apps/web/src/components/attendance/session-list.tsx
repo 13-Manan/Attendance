@@ -68,7 +68,7 @@ export function SessionRow({
     <li>
       <Link
         href={sessionHref(session)}
-        className="flex flex-col gap-1.5 py-3 hover:bg-neutral-50 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+        className="-mx-2 flex min-h-11 flex-col gap-1.5 rounded-md px-2 py-3 transition-colors hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
       >
         <span className="flex min-w-0 flex-col gap-0.5">
           <span className="truncate text-sm font-medium text-neutral-900">

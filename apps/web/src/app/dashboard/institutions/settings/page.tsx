@@ -46,7 +46,14 @@ export default async function InstitutionSettingsPage() {
 
   return (
     <div className="flex max-w-2xl flex-col gap-6">
-      <h1 className="text-xl font-semibold text-neutral-900">Institution Settings</h1>
+      <header className="flex flex-col gap-1">
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Administration
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Institution settings
+        </h1>
+      </header>
 
       {mayEditPolicy ? (
         <InstitutionProfileForm

@@ -29,8 +29,13 @@ export default async function StudentAttendancePage() {
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-6">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">My attendance</h1>
-        <p className="text-xs text-neutral-500">
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Student portal
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          My attendance
+        </h1>
+        <p className="text-sm text-neutral-500">
           {view.fullName} · {view.studentCode}
         </p>
       </header>

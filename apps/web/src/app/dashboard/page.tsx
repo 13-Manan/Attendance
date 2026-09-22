@@ -9,6 +9,7 @@ import { SessionRow } from "@/components/attendance/session-list";
 import { QuickActionsPanel } from "@/components/dashboard/quick-actions-panel";
 import { SystemStatusPanel } from "@/components/dashboard/system-status-panel";
 import { StatCard, StatGrid, formatSessionDate } from "@/components/ui/attendance-stat";
+import { Button } from "@/components/ui/button";
 import { EmptyState, Panel } from "@/components/ui/panel";
 
 /**
@@ -91,10 +92,15 @@ export default async function DashboardHomePage() {
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-xl font-semibold text-neutral-900">Welcome, {user.name}</h1>
-          <p className="text-xs text-neutral-500">
+          <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+            {isAdmin ? "Institution overview" : "Today"}
+          </span>
+          <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+            Welcome, {user.name}
+          </h1>
+          <p className="text-sm text-neutral-500">
             {formatSessionDate(new Date().toISOString(), {
               weekday: "long",
               day: "numeric",
@@ -104,11 +110,10 @@ export default async function DashboardHomePage() {
           </p>
         </div>
         {isAdmin ? (
-          <Link
-            href="/dashboard/reports"
-            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
-          >
-            Institution reports
+          <Link href="/dashboard/reports" className="shrink-0">
+            <Button type="button" variant="secondary" className="w-full sm:w-auto">
+              Institution reports →
+            </Button>
           </Link>
         ) : null}
       </header>

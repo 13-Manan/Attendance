@@ -79,7 +79,12 @@ export default async function WebhooksPage() {
   return (
     <div className="flex flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">Webhooks</h1>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Connect
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Webhooks
+        </h1>
         <p className="max-w-3xl text-sm text-neutral-500">
           Events this platform sends out as they happen — a register finalized, a correction
           recorded, a student added — so another system does not have to poll for them. Every

@@ -70,7 +70,12 @@ export default async function CampusesPage({ searchParams }: PageProps) {
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">Campuses</h1>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Academic
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Campuses
+        </h1>
         <p className="max-w-3xl text-sm text-neutral-500">
           The branches this institution operates from. Students, staff and classes can each belong
           to one, which is what lets a single institution run more than one site without its

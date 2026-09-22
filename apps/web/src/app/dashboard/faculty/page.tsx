@@ -12,6 +12,8 @@ import {
   parseFacultyFilters,
 } from "@/modules/faculty/directory-filters";
 import { STAFF_ROLE_KEYS, type FacultyMember } from "@/modules/faculty/directory-types";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Panel, EmptyState } from "@/components/ui/panel";
 import { Select } from "@/components/ui/select";
 import { TableScroll } from "@/components/ui/table-scroll";
@@ -118,16 +120,17 @@ export default async function FacultyPage({ searchParams }: PageProps) {
   const firstOnPage = directory.total === 0 ? 0 : (directory.page - 1) * directory.pageSize + 1;
   const lastOnPage = Math.min(directory.page * directory.pageSize, directory.total);
 
-  const labelClass = "flex flex-col gap-1 text-xs font-medium text-neutral-600";
-  const inputClass =
-    "w-full rounded-md border border-neutral-300 px-2.5 py-1.5 text-sm outline-none focus:border-neutral-500 focus:ring-1 focus:ring-neutral-500";
-  const pagerClass =
-    "rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm font-medium text-neutral-900 hover:bg-neutral-50";
+  const labelClass = "flex flex-col gap-1.5 text-xs font-medium text-neutral-600";
 
   return (
     <div className="flex w-full max-w-6xl flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">Faculty</h1>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          People
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Faculty
+        </h1>
         <p className="max-w-3xl text-sm text-neutral-500">
           Everyone at this institution who takes attendance or administers it — who they are,
           whether they can sign in, and which classes and subjects are theirs.
@@ -151,12 +154,12 @@ export default async function FacultyPage({ searchParams }: PageProps) {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <label className={labelClass}>
               Search
-              <input
+              <Input
                 type="search"
                 name="q"
                 defaultValue={filters.q}
                 placeholder="Name, email, employee code"
-                className={inputClass}
+                autoComplete="off"
               />
             </label>
             <label className={labelClass}>
@@ -195,8 +198,7 @@ export default async function FacultyPage({ searchParams }: PageProps) {
                 <Select
                   name="departmentId"
                   defaultValue={filters.departmentId}
-                  className="px-2.5 py-1.5"
-                >
+                                 >
                   <option value="">Any department</option>
                   <option value={NO_DEPARTMENT}>No department</option>
                   {directory.departments.map((department) => (
@@ -216,19 +218,13 @@ export default async function FacultyPage({ searchParams }: PageProps) {
               </Select>
             </label>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="submit"
-              className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
-            >
-              Search
-            </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="submit">Search</Button>
             {filtered ? (
-              <Link
-                href={BASE}
-                className="rounded-md border border-neutral-300 px-2.5 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-              >
-                Clear filters
+              <Link href={BASE}>
+                <Button type="button" variant="secondary">
+                  Clear filters
+                </Button>
               </Link>
             ) : null}
             <p className="text-xs tabular-nums text-neutral-500">
@@ -268,22 +264,22 @@ export default async function FacultyPage({ searchParams }: PageProps) {
           <>
             <TableScroll minWidth="min-w-[56rem]">
               <table className="w-full border-collapse text-left">
-                <thead>
+                <thead className="bg-neutral-50">
                   <tr className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
-                    <th className="py-2 pr-4 font-medium">Name</th>
-                    <th className="py-2 pr-4 font-medium">Role</th>
+                    <th className="py-2.5 pr-4 pl-3 font-medium">Name</th>
+                    <th className="py-2.5 pr-4 font-medium">Role</th>
                     {showDepartments ? (
-                      <th className="py-2 pr-4 font-medium">Department</th>
+                      <th className="py-2.5 pr-4 font-medium">Department</th>
                     ) : null}
-                    <th className="py-2 pr-4 font-medium">Access</th>
-                    <th className="py-2 pr-4 font-medium">Teaches</th>
-                    {canManageAccounts ? <th className="py-2 font-medium">Actions</th> : null}
+                    <th className="py-2.5 pr-4 font-medium">Access</th>
+                    <th className="py-2.5 pr-4 font-medium">Teaches</th>
+                    {canManageAccounts ? <th className="py-2.5 pr-3 font-medium">Actions</th> : null}
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-neutral-100">
                   {directory.members.map((member) => (
-                    <tr key={member.id} className="border-b border-neutral-100 align-top">
-                      <td className="py-3 pr-4">
+                    <tr key={member.id} className="align-top transition-colors hover:bg-neutral-50/60">
+                      <td className="py-3 pr-4 first:pl-3">
                         <p className="text-sm font-medium text-neutral-900">{member.name}</p>
                         <p className="text-xs break-all text-neutral-500">{member.email}</p>
                         {member.employeeCode ? (
@@ -307,7 +303,7 @@ export default async function FacultyPage({ searchParams }: PageProps) {
                           )}
                         </td>
                       ) : null}
-                      <td className="py-3 pr-4">
+                      <td className="py-3 pr-4 first:pl-3">
                         <AccessCell member={member} />
                       </td>
                       <td className="py-3 pr-4 text-sm text-neutral-600">
@@ -352,11 +348,10 @@ export default async function FacultyPage({ searchParams }: PageProps) {
                     reader should be able to open page 3 in a new tab or come
                     back to it from history. */}
                 {directory.page > 1 ? (
-                  <Link
-                    href={`${BASE}${facultyFilterQuery(filters, { page: directory.page - 1 })}`}
-                    className={pagerClass}
-                  >
-                    ← Previous
+                  <Link href={`${BASE}${facultyFilterQuery(filters, { page: directory.page - 1 })}`}>
+                    <Button type="button" variant="secondary">
+                      ← Previous
+                    </Button>
                   </Link>
                 ) : (
                   <span className="px-3 py-2 text-sm text-neutral-400">← Previous</span>
@@ -365,11 +360,10 @@ export default async function FacultyPage({ searchParams }: PageProps) {
                   Page {directory.page} of {directory.pageCount}
                 </p>
                 {directory.page < directory.pageCount ? (
-                  <Link
-                    href={`${BASE}${facultyFilterQuery(filters, { page: directory.page + 1 })}`}
-                    className={pagerClass}
-                  >
-                    Next →
+                  <Link href={`${BASE}${facultyFilterQuery(filters, { page: directory.page + 1 })}`}>
+                    <Button type="button" variant="secondary">
+                      Next →
+                    </Button>
                   </Link>
                 ) : (
                   <span className="px-3 py-2 text-sm text-neutral-400">Next →</span>

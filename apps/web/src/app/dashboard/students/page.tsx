@@ -21,6 +21,8 @@ import {
 } from "@/modules/students/directory-types";
 import { studentDisplayName } from "@/modules/students/types";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { Select } from "@/components/ui/select";
 import { TableScroll } from "@/components/ui/table-scroll";
@@ -119,16 +121,17 @@ export default async function StudentsPage({ searchParams }: PageProps) {
   const firstOnPage = page.total === 0 ? 0 : (page.page - 1) * page.pageSize + 1;
   const lastOnPage = Math.min(page.page * page.pageSize, page.total);
 
-  const labelClass = "flex flex-col gap-1 text-xs font-medium text-neutral-600";
-  const inputClass =
-    "w-full rounded-md border border-neutral-300 px-2.5 py-1.5 text-sm outline-none focus:border-neutral-500 focus:ring-1 focus:ring-neutral-500";
-  const pagerClass =
-    "rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm font-medium text-neutral-900 hover:bg-neutral-50";
+  const labelClass = "flex flex-col gap-1.5 text-xs font-medium text-neutral-600";
 
   return (
     <div className="flex w-full max-w-6xl flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">Students</h1>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          People
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+          Students
+        </h1>
         <p className="max-w-3xl text-sm text-neutral-500">
           Everyone enrolled at this institution. A student is never deleted — one who leaves is
           taken off roll, which keeps every register they appear in and stops them being listed
@@ -147,30 +150,27 @@ export default async function StudentsPage({ searchParams }: PageProps) {
         description="Search by name, student code, email or admission number. Terms are matched separately, so “priya sharma” finds Priya Sharma."
         action={
           canCreate ? (
-            <Link
-              href={`${BASE}/new`}
-              className="inline-flex items-center justify-center rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
-            >
-              Add student
+            <Link href={`${BASE}/new`}>
+              <Button type="button">+ Add student</Button>
             </Link>
           ) : null
         }
       >
-        <form method="get" action={BASE} className="flex flex-col gap-3">
+        <form method="get" action={BASE} className="flex flex-col gap-4">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <label className={labelClass}>
               Search
-              <input
+              <Input
                 type="search"
                 name="q"
                 defaultValue={filters.q}
                 placeholder="Name, code, email, admission no."
-                className={inputClass}
+                autoComplete="off"
               />
             </label>
             <label className={labelClass}>
               Status
-              <Select name="status" defaultValue={filters.status} className="px-2.5 py-1.5">
+              <Select name="status" defaultValue={filters.status}>
                 <option value="">Every status</option>
                 {STUDENT_STATUSES.map((status) => (
                   <option key={status} value={status}>
@@ -181,7 +181,7 @@ export default async function StudentsPage({ searchParams }: PageProps) {
             </label>
             <label className={labelClass}>
               Class
-              <Select name="cohortId" defaultValue={filters.cohortId} className="px-2.5 py-1.5">
+              <Select name="cohortId" defaultValue={filters.cohortId}>
                 <option value="">Any class</option>
                 <option value={NO_COHORT}>Not placed in any class</option>
                 {options.cohorts.map((cohort) => (
@@ -195,7 +195,7 @@ export default async function StudentsPage({ searchParams }: PageProps) {
             </label>
             <label className={labelClass}>
               Sort by
-              <Select name="sort" defaultValue={filters.sort} className="px-2.5 py-1.5">
+              <Select name="sort" defaultValue={filters.sort}>
                 {STUDENT_SORTS.map((option) => (
                   <option key={option.key} value={option.key}>
                     {option.label}
@@ -206,7 +206,7 @@ export default async function StudentsPage({ searchParams }: PageProps) {
             {options.campuses.length > 0 ? (
               <label className={labelClass}>
                 Campus
-                <Select name="campusId" defaultValue={filters.campusId} className="px-2.5 py-1.5">
+                <Select name="campusId" defaultValue={filters.campusId}>
                   <option value="">Any campus</option>
                   <option value={NO_CAMPUS}>No campus</option>
                   {options.campuses.map((campus) => (
@@ -218,19 +218,13 @@ export default async function StudentsPage({ searchParams }: PageProps) {
               </label>
             ) : null}
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="submit"
-              className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
-            >
-              Search
-            </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="submit">Search</Button>
             {filtered ? (
-              <Link
-                href={BASE}
-                className="rounded-md border border-neutral-300 px-2.5 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-              >
-                Clear filters
+              <Link href={BASE}>
+                <Button type="button" variant="secondary">
+                  Clear filters
+                </Button>
               </Link>
             ) : null}
             <p className="text-xs tabular-nums text-neutral-500">
@@ -275,19 +269,19 @@ export default async function StudentsPage({ searchParams }: PageProps) {
           <>
             <TableScroll minWidth="min-w-[52rem]">
               <table className="w-full border-collapse text-left">
-                <thead>
+                <thead className="bg-neutral-50">
                   <tr className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
-                    <th className="py-2 pr-4 font-medium">Student</th>
-                    <th className="py-2 pr-4 font-medium">Class</th>
-                    <th className="py-2 pr-4 font-medium">Admission</th>
-                    <th className="py-2 pr-4 font-medium">Status</th>
-                    <th className="py-2 font-medium">Actions</th>
+                    <th className="py-2.5 pr-4 pl-3 font-medium">Student</th>
+                    <th className="py-2.5 pr-4 font-medium">Class</th>
+                    <th className="py-2.5 pr-4 font-medium">Admission</th>
+                    <th className="py-2.5 pr-4 font-medium">Status</th>
+                    <th className="py-2.5 pr-3 font-medium">Actions</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-neutral-100">
                   {page.rows.map((student) => (
-                    <tr key={student.id} className="border-b border-neutral-100 align-top">
-                      <td className="py-3 pr-4">
+                    <tr key={student.id} className="align-top transition-colors hover:bg-neutral-50/60">
+                      <td className="py-3 pr-4 first:pl-3">
                         <Link
                           href={`${BASE}/${student.id}`}
                           className="text-sm font-medium text-neutral-900 hover:underline"
@@ -299,7 +293,7 @@ export default async function StudentsPage({ searchParams }: PageProps) {
                           <p className="text-xs text-neutral-400">{student.campusName}</p>
                         ) : null}
                       </td>
-                      <td className="py-3 pr-4">
+                      <td className="py-3 pr-4 first:pl-3">
                         <ClassCell student={student} />
                       </td>
                       <td className="py-3 pr-4 text-sm text-neutral-600">
@@ -312,23 +306,22 @@ export default async function StudentsPage({ searchParams }: PageProps) {
                           </span>
                         ) : null}
                       </td>
-                      <td className="py-3 pr-4">
+                      <td className="py-3 pr-4 first:pl-3">
                         <Badge tone={STATUS_TONE[student.status]}>
                           {STUDENT_STATUS_LABEL[student.status]}
                         </Badge>
                       </td>
-                      <td className="py-3">
+                      <td className="py-3 pr-3">
                         <div className="flex flex-col items-start gap-2">
-                          <Link
-                            href={`${BASE}/${student.id}`}
-                            className="inline-flex items-center justify-center rounded-md border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-neutral-50"
-                          >
-                            View
+                          <Link href={`${BASE}/${student.id}`}>
+                            <Button type="button" variant="secondary">
+                              View
+                            </Button>
                           </Link>
                           {canEnrollFace ? (
                             <Link
                               href={`${BASE}/${student.id}/enroll-face`}
-                              className="text-xs text-neutral-600 underline hover:text-neutral-900"
+                              className="text-xs text-neutral-600 underline underline-offset-2 hover:text-neutral-900"
                             >
                               Enroll face
                             </Link>
@@ -350,11 +343,10 @@ export default async function StudentsPage({ searchParams }: PageProps) {
                     a reader should be able to open page 3 in a new tab or come
                     back to it from history. */}
                 {page.page > 1 ? (
-                  <Link
-                    href={`${BASE}${studentFilterQuery(filters, { page: page.page - 1 })}`}
-                    className={pagerClass}
-                  >
-                    ← Previous
+                  <Link href={`${BASE}${studentFilterQuery(filters, { page: page.page - 1 })}`}>
+                    <Button type="button" variant="secondary">
+                      ← Previous
+                    </Button>
                   </Link>
                 ) : (
                   <span className="px-3 py-2 text-sm text-neutral-400">← Previous</span>
@@ -363,11 +355,10 @@ export default async function StudentsPage({ searchParams }: PageProps) {
                   Page {page.page} of {page.pageCount}
                 </p>
                 {page.page < page.pageCount ? (
-                  <Link
-                    href={`${BASE}${studentFilterQuery(filters, { page: page.page + 1 })}`}
-                    className={pagerClass}
-                  >
-                    Next →
+                  <Link href={`${BASE}${studentFilterQuery(filters, { page: page.page + 1 })}`}>
+                    <Button type="button" variant="secondary">
+                      Next →
+                    </Button>
                   </Link>
                 ) : (
                   <span className="px-3 py-2 text-sm text-neutral-400">Next →</span>

@@ -134,11 +134,19 @@ export default async function InstitutionReportsPage({ searchParams }: PageProps
     <div className="flex w-full max-w-5xl flex-col gap-5">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
-          <Link href="/dashboard" className="text-xs text-neutral-500 hover:underline">
+          <Link
+            href="/dashboard"
+            className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
+          >
             ← Overview
           </Link>
-          <h1 className="text-xl font-semibold text-neutral-900">Attendance reports</h1>
-          <p className="text-xs text-neutral-500">
+          <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+            Reports
+          </span>
+          <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+            Attendance reports
+          </h1>
+          <p className="text-sm text-neutral-500">
             {overview.institutionName} · {windowLabel(overview)}
           </p>
           {overview.scope === "assigned" ? (

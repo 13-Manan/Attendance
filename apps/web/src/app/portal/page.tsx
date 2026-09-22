@@ -52,11 +52,14 @@ export default async function StudentPortalHome() {
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-5">
-      <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-neutral-900">
+      <header className="flex flex-col gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Student portal
+        </span>
+        <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
           Welcome, {dashboard.fullName.split(" ")[0]}
         </h1>
-        <p className="text-xs text-neutral-500">
+        <p className="text-sm text-neutral-500">
           {dashboard.studentCode} ·{" "}
           {isCollege ? "Subject-wise attendance" : "Daily attendance"}
         </p>

@@ -44,16 +44,22 @@ export default async function StudentAttendanceDetailPage({ params }: PageProps)
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-5">
       <div className="flex flex-col gap-2">
-        <Link href="/portal" className="text-xs text-neutral-500 hover:underline">
+        <Link
+          href="/portal"
+          className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
+        >
           ← Back to my attendance
         </Link>
+        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+          Attendance record
+        </span>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-xl font-semibold text-neutral-900">
+          <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
             {detail.subjectName ?? detail.cohortName}
           </h1>
           <ResultBadge result={detail.result} />
         </div>
-        <p className="text-xs text-neutral-500">
+        <p className="text-sm text-neutral-500">
           {formatSessionDate(detail.sessionDate, {
             weekday: "long",
             day: "numeric",

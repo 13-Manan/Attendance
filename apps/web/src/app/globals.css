@@ -1,28 +1,245 @@
 @import "tailwindcss";
 
+/*
+ * Attendance — responsive & design-system foundation (Phase 3).
+ *
+ * Tokens are documented in `docs/ui-ux/MASTER-DESIGN-SYSTEM.md`. Naming is
+ * semantic (`--color-bg-surface`, not `--color-white`); consumers never see raw
+ * hex. Existing `--background` / `--foreground` are preserved as aliases so
+ * older components keep working while future phases migrate.
+ */
+
 :root {
+  /* -- Legacy aliases (kept for backwards compatibility) ---------------- */
   --background: #ffffff;
   --foreground: #171717;
+
+  /* -- Neutral surface & text ----------------------------------------- */
+  --color-bg-canvas: #fafafa;
+  --color-bg-surface: #ffffff;
+  --color-bg-elevated: #ffffff;
+  --color-bg-sunken: #f5f5f5;
+  --color-border-subtle: #e5e5e5;
+  --color-border-strong: #d4d4d4;
+  --color-text-primary: #171717;
+  --color-text-secondary: #525252;
+  --color-text-muted: #737373;
+  --color-text-disabled: #a3a3a3;
+
+  /* -- Brand & action --------------------------------------------------- */
+  --color-brand: #1e293b;
+  --color-brand-accent: #4f46e5;
+  --color-brand-accent-hover: #4338ca;
+  --color-action-primary: #171717;
+  --color-action-primary-fg: #ffffff;
+
+  /* -- Semantic status ------------------------------------------------- */
+  --color-success: #059669;
+  --color-success-bg: #ecfdf5;
+  --color-warning: #d97706;
+  --color-warning-bg: #fffbeb;
+  --color-danger: #dc2626;
+  --color-danger-bg: #fef2f2;
+  --color-info: #2563eb;
+  --color-info-bg: #eff6ff;
+  --color-neutral-state: #525252;
+  --color-neutral-state-bg: #f5f5f5;
+
+  /* -- Spacing (4px base) --------------------------------------------- */
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* -- Radius ---------------------------------------------------------- */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-full: 9999px;
+
+  /* -- Elevation ------------------------------------------------------- */
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 1px rgba(0, 0, 0, 0.03);
+  --elev-2: 0 4px 8px -2px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+  --elev-3: 0 12px 24px -8px rgba(0, 0, 0, 0.12), 0 4px 8px -4px rgba(0, 0, 0, 0.06);
+  --elev-4: 0 24px 48px -12px rgba(0, 0, 0, 0.18);
+
+  /* -- Z-index --------------------------------------------------------- */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-dropdown: 20;
+  --z-overlay: 30;
+  --z-modal: 40;
+  --z-popover: 50;
+  --z-toast: 60;
+
+  /* -- Motion ---------------------------------------------------------- */
+  --motion-duration-fast: 100ms;
+  --motion-duration-base: 150ms;
+  --motion-duration-slow: 250ms;
+  --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* -- Responsive page rhythm ----------------------------------------- */
+  --page-padding-x: var(--space-4); /* base (mobile) */
+  --page-padding-y: var(--space-4);
+  --page-max-width: 1440px;
 }
 
+@media (min-width: 640px) {
+  :root {
+    --page-padding-x: var(--space-5);
+    --page-padding-y: var(--space-5);
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --page-padding-x: var(--space-6);
+    --page-padding-y: var(--space-6);
+  }
+}
+
+@media (min-width: 1440px) {
+  :root {
+    --page-padding-x: var(--space-8);
+    --page-padding-y: var(--space-8);
+  }
+}
+
+/*
+ * Tailwind v4: expose selected tokens so utilities (`bg-surface`,
+ * `text-primary`, etc.) resolve without hand-written `bg-[color:var(...)]`.
+ * The `@theme inline` block is additive — Tailwind's own defaults still apply.
+ */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  --color-canvas: var(--color-bg-canvas);
+  --color-surface: var(--color-bg-surface);
+  --color-elevated: var(--color-bg-elevated);
+  --color-sunken: var(--color-bg-sunken);
+  --color-border-subtle: var(--color-border-subtle);
+  --color-border-strong: var(--color-border-strong);
+  --color-text-primary: var(--color-text-primary);
+  --color-text-secondary: var(--color-text-secondary);
+  --color-text-muted: var(--color-text-muted);
+
+  --color-brand: var(--color-brand);
+  --color-brand-accent: var(--color-brand-accent);
+
+  --color-success: var(--color-success);
+  --color-warning: var(--color-warning);
+  --color-danger: var(--color-danger);
+  --color-info: var(--color-info);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
+    /* Legacy aliases */
     --background: #0a0a0a;
     --foreground: #ededed;
+
+    /* Dark-mode overrides. Backgrounds move down the neutral scale rather
+       than to pure black; status hues shift lighter for on-dark contrast. */
+    --color-bg-canvas: #0a0a0a;
+    --color-bg-surface: #171717;
+    --color-bg-elevated: #1f1f1f;
+    --color-bg-sunken: #0a0a0a;
+    --color-border-subtle: #262626;
+    --color-border-strong: #404040;
+    --color-text-primary: #fafafa;
+    --color-text-secondary: #a3a3a3;
+    --color-text-muted: #737373;
+    --color-text-disabled: #525252;
+
+    --color-brand: #e2e8f0;
+    --color-brand-accent: #818cf8;
+    --color-brand-accent-hover: #a5b4fc;
+    --color-action-primary: #fafafa;
+    --color-action-primary-fg: #0a0a0a;
+
+    --color-success: #34d399;
+    --color-success-bg: #064e3b;
+    --color-warning: #fbbf24;
+    --color-warning-bg: #78350f;
+    --color-danger: #f87171;
+    --color-danger-bg: #7f1d1d;
+    --color-info: #60a5fa;
+    --color-info-bg: #1e3a8a;
+    --color-neutral-state: #a3a3a3;
+    --color-neutral-state-bg: #262626;
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /*
+   * Use the Geist family loaded in `layout.tsx` (`--font-geist-sans`) with a
+   * conservative system-font fallback. The former hard-coded `Arial` prevented
+   * the loaded font from ever being seen — a Phase 3 typography-foundation fix
+   * called out in `docs/ui-ux/MASTER-DESIGN-SYSTEM.md` §5.1.
+   */
+  font-family:
+    var(--font-geist-sans),
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+/*
+ * Global responsive-foundation rules.
+ *
+ * These are intentionally minimal — presentation only, no layout injection.
+ * They keep the app usable on the exact viewports the design system targets
+ * (390, 768, 1024, 1440, 1800) without changing what any page renders.
+ */
+
+/* Prevent iOS from bumping text up when the device rotates; without it a
+   phone in landscape shows body copy a size larger than portrait. */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Safe-area padding utility for anything docked to the viewport edge on a
+   notched device (future bottom sheets, sticky action bars). Applied via
+   class, never globally, so ordinary in-flow content is untouched. */
+.safe-area-inset {
+  padding-left: max(var(--space-4), env(safe-area-inset-left));
+  padding-right: max(var(--space-4), env(safe-area-inset-right));
+  padding-bottom: max(var(--space-4), env(safe-area-inset-bottom));
+}
+
+/*
+ * Reduced-motion baseline. Every animation and transition collapses to a
+ * near-zero duration when the OS setting is on — respected globally so
+ * individual components do not have to remember. Duration is 0.01ms rather
+ * than 0 so state-change callbacks that key off `transitionend` still fire.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /*

@@ -3,6 +3,8 @@ import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getReadiness } from "@/modules/platform/service";
 import { getFaceServiceStatus } from "@/modules/institutions/overview";
 import { StatCard, StatGrid } from "@/components/ui/attendance-stat";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { ReadinessList } from "@/components/platform/readiness-list";
 
@@ -40,20 +42,27 @@ export default async function PlatformSystemHealthPage() {
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
-      <header className="flex flex-wrap items-start justify-between gap-3">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-xl font-semibold text-neutral-900">System health</h1>
+          <Link
+            href="/dashboard/platform"
+            className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
+          >
+            ← Platform
+          </Link>
+          <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+            System health
+          </h1>
           <p className="text-sm text-neutral-500">
             The technical state of this deployment. Operational status, the
             recognition service, and what stands between this build and a
             production release.
           </p>
         </div>
-        <Link
-          href="/dashboard/platform"
-          className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
-        >
-          Platform overview
+        <Link href="/dashboard/platform" className="shrink-0">
+          <Button type="button" variant="secondary" className="w-full sm:w-auto">
+            Platform overview →
+          </Button>
         </Link>
       </header>
 
@@ -99,12 +108,14 @@ export default async function PlatformSystemHealthPage() {
               {faceService.modelName ?? "unknown"} {faceService.modelVersion ?? ""}
             </dd>
             <dt className="text-neutral-500">Production eligible</dt>
-            <dd className="font-medium text-amber-800">
-              {faceService.productionEligible === null
-                ? "Unknown — the service did not answer"
-                : faceService.productionEligible
-                  ? "Yes"
-                  : "No — training-data provenance unresolved"}
+            <dd>
+              {faceService.productionEligible === null ? (
+                <Badge tone="neutral">Unknown — the service did not answer</Badge>
+              ) : faceService.productionEligible ? (
+                <Badge tone="positive">Yes</Badge>
+              ) : (
+                <Badge tone="warning">No — training-data provenance unresolved</Badge>
+              )}
             </dd>
           </dl>
         )}

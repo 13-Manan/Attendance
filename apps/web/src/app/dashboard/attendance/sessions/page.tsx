@@ -9,7 +9,10 @@ import {
 import { SESSION_STATUSES } from "@/modules/attendance-analytics/types";
 import type { FacultySessionFilters } from "@/modules/attendance-analytics/types";
 import { SessionRow } from "@/components/attendance/session-list";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { EmptyState, Panel } from "@/components/ui/panel";
+import { Select } from "@/components/ui/select";
 
 interface PageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -84,100 +87,85 @@ export default async function FacultySessionsPage({ searchParams }: PageProps) {
 
   return (
     <div className="flex w-full max-w-4xl flex-col gap-5">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-xl font-semibold text-neutral-900">Attendance sessions</h1>
+          <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+            {list.scope === "institution" ? "Institution sessions" : "My sessions"}
+          </span>
+          <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
+            Attendance sessions
+          </h1>
           <p className="text-sm text-neutral-500">
             {list.scope === "institution"
               ? "Every register in this institution."
               : "Registers for the classes and subjects assigned to you."}
           </p>
         </div>
-        <Link
-          href="/dashboard/attendance"
-          className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
-        >
-          Take attendance
+        <Link href="/dashboard/attendance" className="shrink-0">
+          <Button type="button" className="w-full sm:w-auto">
+            + Take attendance
+          </Button>
         </Link>
       </header>
 
-      <Panel title="Filter">
+      <Panel
+        title="Filter"
+        description="Filters compose into the URL — a filtered view is a shareable link."
+      >
         {/* A plain GET form: submitting rewrites the query string, which is
             the page's entire state. No action, no Server Action, nothing to
             authorize — reading this page is already gated above. */}
-        <form method="get" className="flex flex-col gap-3">
+        <form method="get" className="flex flex-col gap-4">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            <label className="flex flex-col gap-1">
-              <span className="text-xs font-medium text-neutral-600">From</span>
-              <input
-                type="date"
-                name="from"
-                defaultValue={filters.from ?? ""}
-                className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
-              />
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-neutral-600">
+              From
+              <Input type="date" name="from" defaultValue={filters.from ?? ""} />
             </label>
 
-            <label className="flex flex-col gap-1">
-              <span className="text-xs font-medium text-neutral-600">To</span>
-              <input
-                type="date"
-                name="to"
-                defaultValue={filters.to ?? ""}
-                className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
-              />
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-neutral-600">
+              To
+              <Input type="date" name="to" defaultValue={filters.to ?? ""} />
             </label>
 
-            <label className="flex flex-col gap-1">
-              <span className="text-xs font-medium text-neutral-600">Class</span>
-              <select
-                name="cohortId"
-                defaultValue={filters.cohortId ?? ""}
-                className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
-              >
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-neutral-600">
+              Class
+              <Select name="cohortId" defaultValue={filters.cohortId ?? ""}>
                 <option value="">All classes</option>
                 {list.cohorts.map((cohort) => (
                   <option key={cohort.cohortId} value={cohort.cohortId}>
                     {cohort.name}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
 
             {isCollege ? (
-              <label className="flex flex-col gap-1">
-                <span className="text-xs font-medium text-neutral-600">Subject</span>
-                <select
-                  name="cohortSubjectId"
-                  defaultValue={filters.cohortSubjectId ?? ""}
-                  className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
-                >
+              <label className="flex flex-col gap-1.5 text-xs font-medium text-neutral-600">
+                Subject
+                <Select name="cohortSubjectId" defaultValue={filters.cohortSubjectId ?? ""}>
                   <option value="">All subjects</option>
                   {list.subjects.map((subject) => (
                     <option key={subject.cohortSubjectId} value={subject.cohortSubjectId}>
                       {subject.subjectName} · {subject.cohortName}
                     </option>
                   ))}
-                </select>
+                </Select>
               </label>
             ) : null}
 
-            <label className="flex flex-col gap-1">
-              <span className="text-xs font-medium text-neutral-600">Status</span>
-              <select
-                name="status"
-                defaultValue={filters.status ?? ""}
-                className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
-              >
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-neutral-600">
+              Status
+              <Select name="status" defaultValue={filters.status ?? ""}>
                 <option value="">Any status</option>
                 {SESSION_STATUSES.map((status) => (
                   <option key={status} value={status}>
                     {STATUS_LABELS[status]}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
 
-            <label className="flex items-center gap-2 sm:mt-6">
+            <label className="flex items-center gap-2 sm:mt-7">
               <input
                 type="checkbox"
                 name="today"
@@ -189,33 +177,29 @@ export default async function FacultySessionsPage({ searchParams }: PageProps) {
             </label>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="submit"
-              className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
-            >
-              Apply filters
-            </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="submit">Apply filters</Button>
             {hasFilters ? (
-              <Link
-                href="/dashboard/attendance/sessions"
-                className="rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
-              >
-                Clear
+              <Link href="/dashboard/attendance/sessions">
+                <Button type="button" variant="secondary">
+                  Clear
+                </Button>
               </Link>
             ) : null}
-            <Link
-              href="/dashboard/attendance/sessions?today=1"
-              className="text-sm text-neutral-600 hover:underline"
-            >
-              Today
-            </Link>
-            <Link
-              href="/dashboard/attendance/sessions?status=REVIEW"
-              className="text-sm text-neutral-600 hover:underline"
-            >
-              Needs review
-            </Link>
+            <div className="ml-auto flex flex-wrap items-center gap-3 text-xs">
+              <Link
+                href="/dashboard/attendance/sessions?today=1"
+                className="text-neutral-600 underline-offset-2 hover:text-neutral-900 hover:underline"
+              >
+                Today
+              </Link>
+              <Link
+                href="/dashboard/attendance/sessions?status=REVIEW"
+                className="text-neutral-600 underline-offset-2 hover:text-neutral-900 hover:underline"
+              >
+                Needs review
+              </Link>
+            </div>
           </div>
         </form>
       </Panel>
