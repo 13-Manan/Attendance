@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { getCurrentUser } from "@/modules/auth-tenancy/session";
 import { safeNextPath } from "@/modules/auth-tenancy/redirect";
+import { InstallAppButton } from "@/components/pwa/install-app-button";
 import { LoginForm } from "./login-form";
 
 export const metadata: Metadata = {
@@ -146,6 +147,12 @@ export default async function LoginPage({ searchParams }: PageProps) {
             Accounts are issued by your institution administrator. If you cannot
             sign in, contact them rather than creating a second account.
           </p>
+
+          {/* Secondary product action. Client-side; renders nothing on the
+              server, and nothing at all when installation is unavailable or
+              the app is already installed. Deliberately below the primary
+              copy so it never competes visually with the Sign-in flow. */}
+          <InstallAppButton />
         </div>
       </section>
     </main>
