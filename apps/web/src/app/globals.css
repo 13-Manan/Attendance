@@ -1,20 +1,46 @@
 @import "tailwindcss";
 
 /*
- * Attendance — responsive & design-system foundation (Phase 3).
+ * Attendance — responsive & design-system foundation.
  *
  * Tokens are documented in `docs/ui-ux/MASTER-DESIGN-SYSTEM.md`. Naming is
- * semantic (`--color-bg-surface`, not `--color-white`); consumers never see raw
- * hex. Existing `--background` / `--foreground` are preserved as aliases so
- * older components keep working while future phases migrate.
+ * semantic (`--color-bg-surface`, not `--color-white`); consumers never see
+ * raw hex. Existing `--background` / `--foreground` are preserved as aliases
+ * so pre-token components keep working.
+ *
+ * ------------------------------------------------------------------------
+ * System dark-mode strategy
+ * ------------------------------------------------------------------------
+ * The application follows `prefers-color-scheme` — no manual toggle, no JS.
+ * Two independent layers keep the whole product in sync automatically:
+ *
+ *   1. Semantic tokens (`--color-bg-*`, `--color-text-*`, `--color-brand`, …)
+ *      flip inside `@media (prefers-color-scheme: dark)`. Anything that
+ *      already reads a semantic token adapts for free.
+ *
+ *   2. Tailwind v4's *palette* variables (`--color-neutral-*`, `--color-white`,
+ *      `--color-emerald-*`, `--color-red-*`, `--color-amber-*`, `--color-blue-*`,
+ *      `--color-green-*`) are also remapped in the same media query. This is
+ *      the essential move: the codebase has ~30 pages using utilities like
+ *      `bg-white`, `bg-neutral-50`, `text-neutral-900`, `border-neutral-200`,
+ *      `bg-emerald-50 text-emerald-700` for attendance status pills. Tailwind
+ *      v4 compiles each of those to `background: var(--color-<name>)`, so
+ *      overriding the palette variable is what makes the whole existing
+ *      utility surface follow the OS preference without touching any page.
+ *
+ * The two layers are consistent by construction — they share the same
+ * neutral scale — and each has one job. This file is the only place either
+ * needs to be tuned.
  */
 
 :root {
-  /* -- Legacy aliases (kept for backwards compatibility) ---------------- */
+  color-scheme: light dark;
+
+  /* ---- Legacy aliases (kept for backwards compatibility) --------------- */
   --background: #ffffff;
   --foreground: #171717;
 
-  /* -- Neutral surface & text ----------------------------------------- */
+  /* ---- Neutral surface & text ------------------------------------------ */
   --color-bg-canvas: #fafafa;
   --color-bg-surface: #ffffff;
   --color-bg-elevated: #ffffff;
@@ -26,14 +52,21 @@
   --color-text-muted: #737373;
   --color-text-disabled: #a3a3a3;
 
-  /* -- Brand & action --------------------------------------------------- */
+  /* ---- Brand & action -------------------------------------------------- */
+  /*
+   * `--color-brand` is the deep navy of the login brand column. It is
+   * *deliberately* dark in both themes — the brand column is a designed
+   * "always dark" hero surface (its own light text depends on it), not a
+   * system-following surface. The dark-mode override below only shifts it
+   * slightly darker so it does not glow against the canvas.
+   */
   --color-brand: #1e293b;
   --color-brand-accent: #4f46e5;
   --color-brand-accent-hover: #4338ca;
   --color-action-primary: #171717;
   --color-action-primary-fg: #ffffff;
 
-  /* -- Semantic status ------------------------------------------------- */
+  /* ---- Semantic status ------------------------------------------------- */
   --color-success: #059669;
   --color-success-bg: #ecfdf5;
   --color-warning: #d97706;
@@ -45,7 +78,7 @@
   --color-neutral-state: #525252;
   --color-neutral-state-bg: #f5f5f5;
 
-  /* -- Spacing (4px base) --------------------------------------------- */
+  /* ---- Spacing (4px base) --------------------------------------------- */
   --space-0: 0;
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -58,20 +91,20 @@
   --space-12: 3rem;
   --space-16: 4rem;
 
-  /* -- Radius ---------------------------------------------------------- */
+  /* ---- Radius ---------------------------------------------------------- */
   --radius-sm: 0.25rem;
   --radius-md: 0.375rem;
   --radius-lg: 0.5rem;
   --radius-xl: 0.75rem;
   --radius-full: 9999px;
 
-  /* -- Elevation ------------------------------------------------------- */
+  /* ---- Elevation ------------------------------------------------------- */
   --elev-1: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 1px rgba(0, 0, 0, 0.03);
   --elev-2: 0 4px 8px -2px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
   --elev-3: 0 12px 24px -8px rgba(0, 0, 0, 0.12), 0 4px 8px -4px rgba(0, 0, 0, 0.06);
   --elev-4: 0 24px 48px -12px rgba(0, 0, 0, 0.18);
 
-  /* -- Z-index --------------------------------------------------------- */
+  /* ---- Z-index --------------------------------------------------------- */
   --z-base: 0;
   --z-sticky: 10;
   --z-dropdown: 20;
@@ -80,15 +113,15 @@
   --z-popover: 50;
   --z-toast: 60;
 
-  /* -- Motion ---------------------------------------------------------- */
+  /* ---- Motion ---------------------------------------------------------- */
   --motion-duration-fast: 100ms;
   --motion-duration-base: 150ms;
   --motion-duration-slow: 250ms;
   --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --motion-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* -- Responsive page rhythm ----------------------------------------- */
-  --page-padding-x: var(--space-4); /* base (mobile) */
+  /* ---- Responsive page rhythm ----------------------------------------- */
+  --page-padding-x: var(--space-4);
   --page-padding-y: var(--space-4);
   --page-max-width: 1440px;
 }
@@ -115,9 +148,9 @@
 }
 
 /*
- * Tailwind v4: expose selected tokens so utilities (`bg-surface`,
- * `text-primary`, etc.) resolve without hand-written `bg-[color:var(...)]`.
- * The `@theme inline` block is additive — Tailwind's own defaults still apply.
+ * Tailwind v4: expose selected semantic tokens as utilities so future code
+ * can write `bg-surface`, `text-primary` etc. without a `bg-[color:var(...)]`
+ * escape hatch. Additive; Tailwind's own defaults still apply.
  */
 @theme inline {
   --color-background: var(--background);
@@ -150,8 +183,7 @@
     --background: #0a0a0a;
     --foreground: #ededed;
 
-    /* Dark-mode overrides. Backgrounds move down the neutral scale rather
-       than to pure black; status hues shift lighter for on-dark contrast. */
+    /* Semantic surface & text — layered, not pure black */
     --color-bg-canvas: #0a0a0a;
     --color-bg-surface: #171717;
     --color-bg-elevated: #1f1f1f;
@@ -163,12 +195,19 @@
     --color-text-muted: #737373;
     --color-text-disabled: #525252;
 
-    --color-brand: #e2e8f0;
+    /*
+     * Brand column stays intentionally dark. `#0f172a` is one stop below the
+     * light-mode value so it sits distinct from the canvas without turning
+     * the white brand text into the low-contrast disaster we shipped
+     * before.
+     */
+    --color-brand: #0f172a;
     --color-brand-accent: #818cf8;
     --color-brand-accent-hover: #a5b4fc;
     --color-action-primary: #fafafa;
     --color-action-primary-fg: #0a0a0a;
 
+    /* Semantic tints — lighter foreground, deeper background, keeps contrast */
     --color-success: #34d399;
     --color-success-bg: #064e3b;
     --color-warning: #fbbf24;
@@ -179,6 +218,109 @@
     --color-info-bg: #1e3a8a;
     --color-neutral-state: #a3a3a3;
     --color-neutral-state-bg: #262626;
+
+    /*
+     * ------------------------------------------------------------------
+     * Tailwind v4 palette remap (the key move for legacy utilities)
+     * ------------------------------------------------------------------
+     * Utility classes like `bg-white`, `bg-neutral-50`, `text-neutral-900`,
+     * `border-neutral-200`, `bg-emerald-50 text-emerald-700` compile to
+     * `background: var(--color-<name>)` in Tailwind v4. Overriding the
+     * palette variables inside this media query flips every one of them
+     * atomically, without touching a single page.
+     *
+     * Neutrals are reversed against their light-mode positions on the
+     * scale, so a component that wanted "one step above canvas" in light
+     * still means "one step above canvas" in dark. The tint scales
+     * (emerald, red, amber, blue, green) get lower saturation and shifted
+     * lightness to remain readable on dark surfaces without ever looking
+     * like a highlighter.
+     */
+
+    /* Base */
+    --color-white: #171717;
+    --color-black: #fafafa;
+
+    /* Neutral (Tailwind default zinc-like) — inverted */
+    --color-neutral-50: #0a0a0a;
+    --color-neutral-100: #171717;
+    --color-neutral-200: #262626;
+    --color-neutral-300: #404040;
+    --color-neutral-400: #525252;
+    --color-neutral-500: #737373;
+    --color-neutral-600: #a3a3a3;
+    --color-neutral-700: #d4d4d4;
+    --color-neutral-800: #e5e5e5;
+    --color-neutral-900: #fafafa;
+    --color-neutral-950: #ffffff;
+
+    /*
+     * Attendance status tints (used in ResultBadge, SessionStatusBadge, and
+     * various stat cards). Backgrounds land in the 900 range so the pill sits
+     * quietly on a dark card; foregrounds land in the 200–400 range so the
+     * label reads without shouting. Rings stay a little darker so they read
+     * as a border rather than a halo.
+     */
+
+    /* Emerald — PRESENT / positive */
+    --color-emerald-50: #052e2b;
+    --color-emerald-100: #064e3b;
+    --color-emerald-200: #065f46;
+    --color-emerald-300: #047857;
+    --color-emerald-400: #059669;
+    --color-emerald-500: #10b981;
+    --color-emerald-600: #34d399;
+    --color-emerald-700: #6ee7b7;
+    --color-emerald-800: #a7f3d0;
+    --color-emerald-900: #d1fae5;
+
+    /* Red — ABSENT / danger */
+    --color-red-50: #2a0808;
+    --color-red-100: #450a0a;
+    --color-red-200: #7f1d1d;
+    --color-red-300: #991b1b;
+    --color-red-400: #b91c1c;
+    --color-red-500: #dc2626;
+    --color-red-600: #ef4444;
+    --color-red-700: #f87171;
+    --color-red-800: #fca5a5;
+    --color-red-900: #fecaca;
+
+    /* Amber — NEEDS_REVIEW / warning */
+    --color-amber-50: #2a1a05;
+    --color-amber-100: #451a03;
+    --color-amber-200: #78350f;
+    --color-amber-300: #92400e;
+    --color-amber-400: #b45309;
+    --color-amber-500: #d97706;
+    --color-amber-600: #f59e0b;
+    --color-amber-700: #fbbf24;
+    --color-amber-800: #fcd34d;
+    --color-amber-900: #fde68a;
+
+    /* Blue — INFO */
+    --color-blue-50: #0a1a2a;
+    --color-blue-100: #172554;
+    --color-blue-200: #1e3a8a;
+    --color-blue-300: #1e40af;
+    --color-blue-400: #1d4ed8;
+    --color-blue-500: #2563eb;
+    --color-blue-600: #3b82f6;
+    --color-blue-700: #60a5fa;
+    --color-blue-800: #93c5fd;
+    --color-blue-900: #bfdbfe;
+
+    /* Green — positive (Badge tone="positive" uses green-100/-800) */
+    --color-green-50: #052e2b;
+    --color-green-100: #064e3b;
+    --color-green-200: #065f46;
+    --color-green-300: #047857;
+    --color-green-400: #059669;
+    --color-green-500: #16a34a;
+    --color-green-600: #22c55e;
+    --color-green-700: #6ee7b7;
+    --color-green-800: #a7f3d0;
+    --color-green-900: #d1fae5;
   }
 }
 
@@ -187,9 +329,8 @@ body {
   color: var(--foreground);
   /*
    * Use the Geist family loaded in `layout.tsx` (`--font-geist-sans`) with a
-   * conservative system-font fallback. The former hard-coded `Arial` prevented
-   * the loaded font from ever being seen — a Phase 3 typography-foundation fix
-   * called out in `docs/ui-ux/MASTER-DESIGN-SYSTEM.md` §5.1.
+   * conservative system-font fallback. Also drives autofill and native form
+   * controls to respect the current color scheme.
    */
   font-family:
     var(--font-geist-sans),
@@ -201,24 +342,32 @@ body {
     sans-serif;
 }
 
-/*
- * Global responsive-foundation rules.
- *
- * These are intentionally minimal — presentation only, no layout injection.
- * They keep the app usable on the exact viewports the design system targets
- * (390, 768, 1024, 1440, 1800) without changing what any page renders.
- */
-
-/* Prevent iOS from bumping text up when the device rotates; without it a
-   phone in landscape shows body copy a size larger than portrait. */
+/* Prevent iOS from bumping text up when the device rotates. */
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 }
 
-/* Safe-area padding utility for anything docked to the viewport edge on a
-   notched device (future bottom sheets, sticky action bars). Applied via
-   class, never globally, so ordinary in-flow content is untouched. */
+/*
+ * Autofill in dark mode: Chromium paints a hard yellow-tinted background
+ * that reads as light-mode leakage on a dark form. Force the visible
+ * background back to our surface via a long inset shadow (there is no
+ * `background` property that Chromium accepts on `:-webkit-autofill`).
+ */
+@media (prefers-color-scheme: dark) {
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  textarea:-webkit-autofill,
+  select:-webkit-autofill {
+    -webkit-text-fill-color: var(--color-text-primary);
+    -webkit-box-shadow: 0 0 0 1000px var(--color-bg-surface) inset;
+    caret-color: var(--color-text-primary);
+    transition: background-color 5000s ease-in-out 0s;
+  }
+}
+
+/* Safe-area padding utility for docked mobile surfaces. */
 .safe-area-inset {
   padding-left: max(var(--space-4), env(safe-area-inset-left));
   padding-right: max(var(--space-4), env(safe-area-inset-right));
@@ -226,10 +375,8 @@ html {
 }
 
 /*
- * Reduced-motion baseline. Every animation and transition collapses to a
- * near-zero duration when the OS setting is on — respected globally so
- * individual components do not have to remember. Duration is 0.01ms rather
- * than 0 so state-change callbacks that key off `transitionend` still fire.
+ * Reduced-motion baseline. Duration is 0.01ms rather than 0 so
+ * state-change callbacks that key off `transitionend` still fire.
  */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -243,33 +390,67 @@ html {
 }
 
 /*
- * Print rules — the "PDF-ready" half of report export. See
- * src/app/dashboard/reports/print/page.tsx: rather than render PDFs on the
- * server, the printable report is a real page and the browser's own print
- * engine writes the file.
- *
- * Nothing here changes the screen. Every rule is inside `@media print`.
+ * Print rules — the "PDF-ready" half of report export. A dark-mode browser
+ * must not print white text onto white paper, so this block force-restores
+ * the light palette *only* for print, without disturbing the on-screen dark
+ * theme.
  */
 @media print {
-  /* A dark-mode browser must not print white text onto white paper. */
   :root {
-    --background: #ffffff;
-    --foreground: #171717;
+    color-scheme: light !important;
+    --background: #ffffff !important;
+    --foreground: #171717 !important;
+
+    /* Semantic tokens back to light values */
+    --color-bg-canvas: #fafafa !important;
+    --color-bg-surface: #ffffff !important;
+    --color-bg-elevated: #ffffff !important;
+    --color-bg-sunken: #f5f5f5 !important;
+    --color-border-subtle: #e5e5e5 !important;
+    --color-border-strong: #d4d4d4 !important;
+    --color-text-primary: #171717 !important;
+    --color-text-secondary: #525252 !important;
+    --color-text-muted: #737373 !important;
+
+    /* Tailwind palette back to light for the rest of the utilities */
+    --color-white: #ffffff !important;
+    --color-black: #000000 !important;
+    --color-neutral-50: #fafafa !important;
+    --color-neutral-100: #f5f5f5 !important;
+    --color-neutral-200: #e5e5e5 !important;
+    --color-neutral-300: #d4d4d4 !important;
+    --color-neutral-400: #a3a3a3 !important;
+    --color-neutral-500: #737373 !important;
+    --color-neutral-600: #525252 !important;
+    --color-neutral-700: #404040 !important;
+    --color-neutral-800: #262626 !important;
+    --color-neutral-900: #171717 !important;
+    --color-neutral-950: #0a0a0a !important;
+
+    --color-emerald-50: #ecfdf5 !important;
+    --color-emerald-500: #10b981 !important;
+    --color-emerald-700: #047857 !important;
+    --color-red-50: #fef2f2 !important;
+    --color-red-500: #ef4444 !important;
+    --color-red-700: #b91c1c !important;
+    --color-amber-50: #fffbeb !important;
+    --color-amber-500: #f59e0b !important;
+    --color-amber-700: #b45309 !important;
+    --color-blue-50: #eff6ff !important;
+    --color-blue-500: #3b82f6 !important;
+    --color-blue-700: #1d4ed8 !important;
+    --color-green-50: #f0fdf4 !important;
+    --color-green-800: #166534 !important;
   }
 
   body {
     background: #ffffff;
     color: #171717;
-    /* Attendance bars and the amber "below threshold" markings carry meaning.
-       Browsers strip backgrounds by default to save ink; here that would
-       remove the only visual distinction between a full bar and an empty
-       one. */
+    /* Attendance bars carry meaning; keep their backgrounds when printing. */
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
 
-  /* The page itself provides the margin, so the layout's screen padding does
-     not stack on top of it. */
   @page {
     margin: 14mm;
   }
@@ -278,8 +459,7 @@ html {
     padding: 0 !important;
   }
 
-  /* A link in a printed report is a dead end; underlining it just adds noise
-     to text nobody can click. */
+  /* A link in a printed report is a dead end. */
   a {
     text-decoration: none !important;
     color: inherit !important;

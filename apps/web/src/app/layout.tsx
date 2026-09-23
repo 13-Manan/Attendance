@@ -42,7 +42,10 @@ export const metadata: Metadata = {
  * how somebody reads a roster on a phone they are holding at arm's length.
  */
 export const viewport: Viewport = {
-  themeColor: "#171717",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#171717" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
+  ],
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

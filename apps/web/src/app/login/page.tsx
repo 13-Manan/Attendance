@@ -41,32 +41,45 @@ export default async function LoginPage({ searchParams }: PageProps) {
     >
       {/* Brand column: shown only on lg+ so the form dominates on phones and
           tablets. Deliberately restrained — an operational product, not a
-          marketing landing. No decorative image, no gradient, no glass. */}
+          marketing landing. No decorative image, no gradient, no glass.
+
+          Colour discipline: the brand column is a designed "always dark"
+          hero, so every foreground here is hard-coded to white via inline
+          `color`. The Tailwind palette remap in dark mode flips utility
+          classes like `text-white` and `bg-white/10` — leaving them on
+          would produce dark text on the dark brand background, which is
+          exactly the bug this page had before. Inline styles override the
+          remap because they reference literal white, not a CSS variable. */}
       <aside
         aria-hidden
-        className="relative hidden overflow-hidden bg-neutral-900 text-white lg:flex lg:flex-col lg:justify-between lg:p-12"
-        style={{ backgroundColor: "var(--color-brand)" }}
+        className="relative hidden overflow-hidden lg:flex lg:flex-col lg:justify-between lg:p-12"
+        style={{ backgroundColor: "var(--color-brand)", color: "#ffffff" }}
       >
         <div className="flex items-center gap-3">
           <span
-            className="flex size-10 items-center justify-center rounded-xl bg-white/10 text-lg font-semibold text-white ring-1 ring-white/15"
+            className="flex size-10 items-center justify-center rounded-xl text-lg font-semibold ring-1"
+            style={{
+              backgroundColor: "rgba(255, 255, 255, 0.1)",
+              color: "#ffffff",
+              boxShadow: "inset 0 0 0 1px rgba(255, 255, 255, 0.15)",
+            }}
           >
             A
           </span>
-          <span className="text-sm font-semibold tracking-tight text-white">
+          <span className="text-sm font-semibold tracking-tight" style={{ color: "#ffffff" }}>
             Attendance Platform
           </span>
         </div>
         <div className="flex max-w-sm flex-col gap-4">
-          <p className="text-2xl font-semibold leading-snug text-white">
+          <p className="text-2xl font-semibold leading-snug" style={{ color: "#ffffff" }}>
             Face-assisted attendance for schools and colleges.
           </p>
-          <p className="text-sm leading-relaxed text-white/70">
+          <p className="text-sm leading-relaxed" style={{ color: "rgba(255, 255, 255, 0.7)" }}>
             Faculty stay in control. AI assists — it never overrides a human
             decision. Every correction is auditable.
           </p>
         </div>
-        <p className="text-xs text-white/50">
+        <p className="text-xs" style={{ color: "rgba(255, 255, 255, 0.5)" }}>
           © {new Date().getFullYear()} Attendance Platform
         </p>
       </aside>
@@ -82,8 +95,8 @@ export default async function LoginPage({ searchParams }: PageProps) {
                 text, so announcing the monogram would just repeat it. */}
             <span
               aria-hidden
-              className="flex size-11 items-center justify-center rounded-xl bg-neutral-900 text-lg font-semibold text-white lg:hidden"
-              style={{ backgroundColor: "var(--color-brand)" }}
+              className="flex size-11 items-center justify-center rounded-xl text-lg font-semibold lg:hidden"
+              style={{ backgroundColor: "var(--color-brand)", color: "#ffffff" }}
             >
               A
             </span>
