@@ -744,13 +744,14 @@ test("scenario 26: a malformed face-ai response does not fabricate attendance", 
     pool: [poolRow("stu-a", 0.95)],
     detectEmbed: async () => ({ faces: [] }) as unknown as DetectEmbedResponse,
   });
-  const summary = await runRecognitionForSession(
-    makeUser(),
-    { sessionId: "sess-1", images: images(1) },
-    h.deps,
+  // No model identity means nothing says the embeddings are comparable with
+  // the pool. The run is refused — no summary, so nobody is invented as
+  // present, and the enrolled student is not reported as "no match" either.
+  await assert.rejects(
+    () =>
+      runRecognitionForSession(makeUser(), { sessionId: "sess-1", images: images(1) }, h.deps),
+    /face_ai_model_changed/,
   );
-  assert.equal(summary.perStudent.length, 0);
-  assert.deepEqual(summary.unmatchedStudentIds, ["stu-a"], "nobody is invented as present");
 });
 
 test("scenario 27: a face-ai outage surfaces as retryable, not as an empty class", async () => {

@@ -291,6 +291,8 @@ export async function startOrResumeCaptureSession(
         cohortId: input.cohortId,
         cohortSubjectId: input.cohortSubjectId,
         sessionDate: { gte: dayStart, lt: dayEnd },
+        // A discarded lecture holds no register; see findExistingDailySession.
+        status: { not: "CANCELLED" },
       },
     });
     if (existing) {

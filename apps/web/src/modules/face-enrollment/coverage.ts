@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/modules/authorization/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
+import type { TemplateModel } from "./policy";
 
 /**
  * Face enrollment, seen from an administrator's desk.
@@ -48,11 +49,26 @@ export interface UnenrolledStudent {
   id: string;
   studentCode: string;
   name: string;
+  /** Has samples, but only from a model this deployment no longer runs. */
+  needsReenrollment: boolean;
 }
 
 export interface FaceCoverage {
   activeStudents: number;
+  /**
+   * Students the running model can recognise — at least one active sample made
+   * by it. When the running model is unknown this falls back to "any active
+   * sample" and `runningModelKnown` is false, so the page can say so.
+   */
   enrolledStudents: number;
+  /**
+   * Students whose every active sample came from another model. Stored and
+   * shown, never compared: until they are re-enrolled they are exactly as
+   * unrecognisable as a student with no sample, and counting them as enrolled
+   * is how a model switch would read as 100% coverage while matching nobody.
+   */
+  needsReenrollment: number;
+  runningModelKnown: boolean;
   samples: number;
   cohorts: CohortCoverage[];
   models: ModelUsage[];
@@ -66,7 +82,7 @@ const UNENROLLED_LIMIT = 100;
 
 export interface CoverageDeps {
   countActiveStudents?: (institutionId: string) => Promise<number>;
-  enrolledStudentIds?: (institutionId: string) => Promise<string[]>;
+  enrolledStudentIds?: (institutionId: string, model?: TemplateModel) => Promise<string[]>;
   modelUsage?: (institutionId: string) => Promise<ModelUsage[]>;
   cohortMembership?: (
     institutionId: string,
@@ -82,16 +98,21 @@ async function countActiveStudents(institutionId: string): Promise<number> {
 }
 
 /**
- * The distinct students with at least one active sample.
+ * The distinct students with at least one active sample — from `model` when
+ * given, from any model otherwise.
  *
  * A `groupBy` on `studentId` rather than a `findMany`, so the embedding rows
  * themselves are never materialised — the result is a list of student ids and
  * nothing else.
  */
-async function enrolledStudentIds(institutionId: string): Promise<string[]> {
+async function enrolledStudentIds(institutionId: string, model?: TemplateModel): Promise<string[]> {
   const rows = await prisma.faceEmbedding.groupBy({
     by: ["studentId"],
-    where: { institutionId, isActive: true },
+    where: {
+      institutionId,
+      isActive: true,
+      ...(model ? { modelName: model.modelName, modelVersion: model.modelVersion } : {}),
+    },
   });
   return rows.map((row) => row.studentId);
 }
@@ -149,7 +170,12 @@ function deps(overrides: CoverageDeps) {
   };
 }
 
-/** Pure: turns the five reads into the view model. Exported for the test. */
+/**
+ * Pure: turns the reads into the view model. Exported for the test.
+ *
+ * `usableIds` is the subset of `enrolledIds` whose samples the running model
+ * can compare, or null when the running model is unknown.
+ */
 export function summarise(
   activeStudents: number,
   enrolledIds: readonly string[],
@@ -166,8 +192,10 @@ export function summarise(
     firstName: string;
     lastName: string;
   }>,
+  usableIds: readonly string[] | null = null,
 ): FaceCoverage {
-  const enrolled = new Set(enrolledIds);
+  const stored = new Set(enrolledIds);
+  const enrolled = new Set(usableIds ?? enrolledIds);
 
   const byCohort = new Map<string, CohortCoverage>();
   for (const row of membership) {
@@ -188,6 +216,8 @@ export function summarise(
   return {
     activeStudents,
     enrolledStudents: enrolled.size,
+    needsReenrollment: [...stored].filter((id) => !enrolled.has(id)).length,
+    runningModelKnown: usableIds !== null,
     samples: models.reduce((total, model) => total + model.samples, 0),
     // Worst coverage first: this list is a to-do, and a section at 12% should
     // not be below one at 100% because of its name.
@@ -199,13 +229,15 @@ export function summarise(
       id: student.id,
       studentCode: student.studentCode,
       name: `${student.firstName} ${student.lastName}`.trim(),
+      needsReenrollment: stored.has(student.id),
     })),
     unenrolledShown: Math.min(missing.length, UNENROLLED_LIMIT),
   };
 }
 
 /**
- * Institution-wide coverage.
+ * Institution-wide coverage, measured against `runningModel` — pass null when
+ * the face service could not say which model it runs.
  *
  * Gated on `faceEmbedding.manage` rather than `institution.read`: this is the
  * biometric module, and who is and is not enrolled is information about
@@ -214,6 +246,7 @@ export function summarise(
  */
 export async function getFaceCoverage(
   actor: SessionUser,
+  runningModel: TemplateModel | null,
   overrides: CoverageDeps = {},
 ): Promise<FaceCoverage> {
   const d = deps(overrides);
@@ -223,13 +256,14 @@ export async function getFaceCoverage(
   }
   const institutionId = actor.institutionId;
 
-  const [activeStudents, enrolledIds, models, membership, candidates] = await Promise.all([
+  const [activeStudents, enrolledIds, usableIds, models, membership, candidates] = await Promise.all([
     d.countActiveStudents(institutionId),
     d.enrolledStudentIds(institutionId),
+    runningModel ? d.enrolledStudentIds(institutionId, runningModel) : Promise.resolve(null),
     d.modelUsage(institutionId),
     d.cohortMembership(institutionId),
     d.studentsByIds(institutionId, 1000),
   ]);
 
-  return summarise(activeStudents, enrolledIds, models, membership, candidates);
+  return summarise(activeStudents, enrolledIds, models, membership, candidates, usableIds);
 }

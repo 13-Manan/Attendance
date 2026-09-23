@@ -221,6 +221,8 @@ export interface RecognitionRunSummary {
    * know whether the student was even in the search space.
    */
   candidateScope: "cohort" | "cohortSubject";
+  /** Distinct students with a template for the running model — not the
+   * template count, which runs up to five per student. */
   candidatePoolSize: number;
   /** How many candidate embeddings were skipped because their `modelVersion`
    * did not match the running model. Surfaced rather than swallowed so

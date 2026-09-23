@@ -198,6 +198,20 @@ function describeProcessingError(error: unknown): { message: string; canRollCall
       canRollCall: true,
     };
   }
+  if (raw === "face_ai_model_changed") {
+    return {
+      message:
+        "The recognition model changed while these captures were being processed, so nothing was compared. Try again, or call the roll manually.",
+      canRollCall: true,
+    };
+  }
+  if (raw.startsWith("face_ai_invalid_embedding:")) {
+    return {
+      message:
+        "The recognition service returned an unusable result, so nothing was compared. Call the roll manually and report this to your administrator.",
+      canRollCall: true,
+    };
+  }
   return {
     message: raw
       ? `Recognition could not be completed: ${raw}`
@@ -870,8 +884,11 @@ export function CaptureWizard({
         >
           The recognition model currently loaded is{" "}
           <strong>not cleared for production use</strong> (backend: {summary.modelName} ·{" "}
-          {summary.modelVersion}). Face counts and matches below describe the
-          pipeline, not real identification. Confirm every student yourself.
+          {summary.modelVersion}).{" "}
+          {summary.modelName === "mock"
+            ? "It is a test stub that cannot recognise a real face: face counts below describe the pipeline, not real identification."
+            : "Recognition does run and the matches below are real comparisons, but the model's licence is not cleared for production, so treat every match as a suggestion."}{" "}
+          Confirm every student yourself.
         </div>
       )}
 
@@ -958,8 +975,12 @@ export function CaptureWizard({
             {recognition?.detectedFacesTotal === 1 ? " was" : "s were"} detected, but
             none matched an enrolled student.
           </strong>{" "}
-          This usually means the class has no face enrollments yet. Every student is
-          waiting for your decision rather than being marked absent.
+          {recognition?.candidatePoolSize === 0
+            ? "No student in this class has a face enrollment for the recognition model now running. Samples taken under an earlier model are kept but never compared — those students must be re-enrolled."
+            : recognition?.modelName === "mock"
+              ? "The recognition service is running its mock test backend, which cannot recognise a real face, so no capture will match. This is a configuration issue, not a problem with the enrollments."
+              : "None of the enrolled students scored high enough to suggest — they may be out of frame, facing away, or poorly lit."}{" "}
+          Every student is waiting for your decision rather than being marked absent.
         </div>
       )}
 

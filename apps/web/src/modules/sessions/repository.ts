@@ -54,6 +54,12 @@ export async function transitionSessionStatus(
  * invariant that DAILY-mode (school) institutions require. Uses a
  * 24-hour half-open range so the check is timezone-agnostic at this layer —
  * timezone canonicalization is the caller's job.
+ *
+ * A CANCELLED session is not "today's session". Discarding keeps the row for
+ * the audit trail, but it holds no register, so it must not stop the class
+ * teacher starting again — every other reader of "today" (analytics, review,
+ * reporting) already skips it. A FINALIZED register still counts: re-taking a
+ * confirmed register is a correction, not a new session.
  */
 export function findExistingDailySession(
   cohortId: string,
@@ -68,6 +74,7 @@ export function findExistingDailySession(
       cohortId,
       cohortSubjectId: null,
       sessionDate: { gte: dayStart, lt: dayEnd },
+      status: { not: "CANCELLED" },
     },
   });
 }

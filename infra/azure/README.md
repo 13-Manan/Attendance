@@ -294,9 +294,14 @@ set today.
 
 ## Face AI: a blocker infrastructure cannot solve
 
-`services/face-ai/app/config.py` ships two backends:
+`services/face-ai/app/config.py` ships three backends:
 
-- `mock` — a deterministic hash stub. No weights, **no real recognition**.
+- `mock` — a deterministic hash stub. No weights, **no real recognition**:
+  a real re-capture of an enrolled student never matches, so every register
+  shows the class as "no match found".
+- `opencv` — YuNet + SFace. Real recognition, but commercial use is
+  **unclear** (see `services/face-ai/app/models/LICENSING.md`), and the
+  weights are not baked into the image.
 - `onnx` — a scaffold with **no weights and no verified licence**.
 
 Per ADR-0006, InsightFace's pretrained weights are confirmed **non-commercial
@@ -308,6 +313,13 @@ So: this infrastructure can be provisioned and the services can run, but
 commercially-licensed model is obtained.** That is a procurement decision.
 `faceModelBackend` stays `mock` and `FACE_AI_REQUIRE_PRODUCTION_MODEL` stays
 false until it is resolved.
+
+Moving production to a real backend is three changes plus a data step:
+weights in the image (`scripts/fetch_models.py` at build time, with
+`FACE_MODEL_DIR` set — see the Dockerfile comment), `faceModelBackend` in
+`parameters/production.bicepparam`, and a redeploy. Every template enrolled
+under `mock` is then outside the candidate pool (recognition filters by
+model), so every student must be re-enrolled.
 
 ---
 

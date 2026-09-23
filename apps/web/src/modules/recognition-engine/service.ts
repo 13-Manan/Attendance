@@ -33,6 +33,7 @@ import type {
 } from "./types";
 import { MAX_CAPTURES_PER_SESSION } from "@/modules/attendance-capture/types";
 import { requireCohortSubjectAccess } from "@/modules/authorization/cohort-access";
+import { inspectEmbedding } from "@/modules/face-enrollment/policy";
 
 /**
  * Phase 5 recognition engine.
@@ -518,6 +519,25 @@ export async function runRecognitionForSession(
   );
   const durationMs = Date.now() - startedAtMs;
 
+  // The candidate pool was filtered by the model `/v1/model-info` named, but
+  // the embeddings came from a second request. A revision rollout between the
+  // two would score one model's faces against another model's templates —
+  // and the mock and SFace are both 128-d, so the dimension check below
+  // would not notice. Refuse rather than report nonsense as "no match".
+  if (
+    response.modelName !== modelInfo.modelName ||
+    response.modelVersion !== modelInfo.modelVersion
+  ) {
+    throw new Error("face_ai_model_changed");
+  }
+  // Same contract enrollment enforces on the template side. A NaN or a
+  // wrong-length vector scores as a silent UNMATCHED; it is a service fault,
+  // and the teacher should see it as one.
+  for (const face of response.faces) {
+    const check = inspectEmbedding(face.embedding);
+    if (!check.ok) throw new Error(`face_ai_invalid_embedding:${check.problem}`);
+  }
+
   let detectedFacesTotal = 0;
   let scoredFacesTotal = 0;
   let skippedIncompatibleCandidates = 0;
@@ -585,15 +605,17 @@ export async function runRecognitionForSession(
 
   const perStudent = aggregateByStudent(perFace, policy);
   const claimedStudentIds = new Set(perStudent.map((s) => s.studentId));
-  const unmatchedStudentIds = candidates
-    .map((c) => c.studentId)
-    .filter((id) => !claimedStudentIds.has(id));
+  // Candidates are templates, and a student may hold several. Both figures
+  // below are about students, so collapse first — otherwise one unmatched
+  // student with three samples reads as "No match found: 3".
+  const candidateStudentIds = [...new Set(candidates.map((c) => c.studentId))];
+  const unmatchedStudentIds = candidateStudentIds.filter((id) => !claimedStudentIds.has(id));
 
   const summary: RecognitionRunSummary = {
     sessionId: session.id,
     cohortId: session.cohortId,
     candidateScope,
-    candidatePoolSize: candidates.length,
+    candidatePoolSize: candidateStudentIds.length,
     skippedIncompatibleCandidates,
     detectedFacesTotal,
     scoredFacesTotal,

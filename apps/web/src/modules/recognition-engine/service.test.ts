@@ -221,6 +221,9 @@ function harness(opts: {
   subjectPool?: CandidateEmbeddingWithVector[];
   faces?: DetectEmbedResponse["faces"];
   modelInfo?: ModelInfoResponse;
+  /** What `/v1/detect-embed` claims produced its embeddings. Defaults to the
+   * model-info answer, as it does when nothing changes between the calls. */
+  responseModel?: { modelName: string; modelVersion: string };
   policyOverrides?: Partial<RecognitionPolicy>;
   /** Made to reject so a test can assert the subject-ownership gate. */
   subjectAccessError?: Error;
@@ -256,8 +259,8 @@ function harness(opts: {
         calls.detectEmbed.push(req);
         return {
           faces: opts.faces ?? [],
-          modelName: modelInfo.modelName,
-          modelVersion: modelInfo.modelVersion,
+          modelName: opts.responseModel?.modelName ?? modelInfo.modelName,
+          modelVersion: opts.responseModel?.modelVersion ?? modelInfo.modelVersion,
         } as DetectEmbedResponse;
       },
       policyOverrides: opts.policyOverrides,
@@ -1129,4 +1132,78 @@ test("a run records when it happened and how long it took", async () => {
   const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps);
   assert.equal(summary.completedAt, "2026-09-20T09:30:00.000Z");
   assert.ok(summary.durationMs >= 0);
+});
+
+// ===========================================================================
+// 11. Web ↔ face-ai contract at recognition time
+// ===========================================================================
+
+test("embeddings from a different model than the pool was filtered by are refused, not scored", async () => {
+  // model-info said mock; by the time detect-embed ran, a new revision was
+  // serving SFace. Same width, different space — scoring them is meaningless.
+  const h = harness({
+    pool: [poolRow("stu-a", 0.95)],
+    faces: [detectedFace(1, REFERENCE)],
+    responseModel: { modelName: "opencv-yunet-sface", modelVersion: "yunet-2023mar+sface-2021dec+pp1" },
+  });
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps),
+    /face_ai_model_changed/,
+  );
+});
+
+test("a preprocessing bump alone is enough to refuse the run", async () => {
+  const h = harness({
+    pool: [poolRow("stu-a", 0.95)],
+    faces: [detectedFace(1, REFERENCE)],
+    responseModel: { modelName: "mock", modelVersion: "0.1.0+pp2" },
+  });
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps),
+    /face_ai_model_changed/,
+  );
+});
+
+test("a NaN in a returned face embedding fails the run instead of reading as no match", async () => {
+  const broken = [...REFERENCE];
+  broken[5] = Number.NaN;
+  const h = harness({ pool: [poolRow("stu-a", 0.95)], faces: [detectedFace(1, broken)] });
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps),
+    /face_ai_invalid_embedding:not_finite/,
+  );
+});
+
+test("a wrong-width returned face embedding fails the run", async () => {
+  const h = harness({
+    pool: [poolRow("stu-a", 0.95)],
+    faces: [detectedFace(1, new Array<number>(DIM * 4).fill(1 / Math.sqrt(DIM * 4)))],
+  });
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps),
+    /face_ai_invalid_embedding:wrong_dimension/,
+  );
+});
+
+test("an unnormalised returned face embedding fails the run", async () => {
+  const h = harness({
+    pool: [poolRow("stu-a", 0.95)],
+    faces: [detectedFace(1, REFERENCE.map((x) => x * 3))],
+  });
+  await assert.rejects(
+    () => runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps),
+    /face_ai_invalid_embedding:not_normalised/,
+  );
+});
+
+test("a student holding several templates counts once in the pool and once as unmatched", async () => {
+  const sample = (id: string, similarity: number) => ({ ...poolRow("stu-a", similarity), id });
+  const h = harness({
+    pool: [sample("emb-a1", 0.1), sample("emb-a2", 0.12), sample("emb-a3", 0.08), poolRow("stu-b", 0.95)],
+    faces: [detectedFace(1, REFERENCE)],
+  });
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps);
+  assert.equal(summary.candidatePoolSize, 2);
+  assert.deepEqual(summary.unmatchedStudentIds, ["stu-a"]);
+  assert.equal(summary.perStudent[0].studentId, "stu-b");
 });

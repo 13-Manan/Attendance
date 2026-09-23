@@ -18,6 +18,11 @@ import type { AttendanceSession } from "@/modules/sessions/types";
  *
  * The day is compared in UTC, matching `sessionDate`'s own convention across
  * the attendance engine.
+ *
+ * A discarded session does not block a fresh one, so a day can hold a
+ * CANCELLED row and a live one. The live one is the register; the cancelled
+ * one is returned only when it is all there is, which keeps the service's
+ * `session_cancelled` refusal meaning what it did before.
  */
 export async function findSessionForDay(
   cohortId: string,
@@ -29,13 +34,11 @@ export async function findSessionForDay(
   const dayEnd = new Date(dayStart);
   dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
 
-  return prisma.attendanceSession.findFirst({
-    where: {
-      cohortId,
-      cohortSubjectId,
-      sessionDate: { gte: dayStart, lt: dayEnd },
-    },
+  const where = { cohortId, cohortSubjectId, sessionDate: { gte: dayStart, lt: dayEnd } };
+  const live = await prisma.attendanceSession.findFirst({
+    where: { ...where, status: { not: "CANCELLED" } },
   });
+  return live ?? prisma.attendanceSession.findFirst({ where, orderBy: { startedAt: "desc" } });
 }
 
 export async function getSessionById(id: string): Promise<AttendanceSession | null> {

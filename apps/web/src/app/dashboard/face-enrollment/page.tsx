@@ -133,12 +133,11 @@ export default async function FaceEnrollmentPage() {
     );
   }
 
-  const [coverage, model] = await Promise.all([
-    getFaceCoverage(user),
-    // Best effort. A face service that is down must not take this page with
-    // it: the coverage figures come from our own database and are still true.
-    faceModelInfo().catch(() => null),
-  ]);
+  // Best effort. A face service that is down must not take this page with
+  // it: the coverage figures come from our own database and are still true.
+  // Asked first, because "enrolled" means enrolled for the model now running.
+  const model = await faceModelInfo().catch(() => null);
+  const coverage = await getFaceCoverage(user, model);
   const missing = Math.max(0, coverage.activeStudents - coverage.enrolledStudents);
 
   return (
@@ -184,9 +183,22 @@ export default async function FaceEnrollmentPage() {
         </dl>
         <p className="text-xs text-neutral-500">
           {missing === 0
-            ? "Every active student has at least one sample."
-            : `${missing} active student(s) have none. Attendance still works for them — they are marked by hand.`}
+            ? "Every active student can be recognised by the running model."
+            : `${missing} active student(s) cannot be recognised by the running model. Attendance still works for them — they are marked by hand.`}
+          {coverage.runningModelKnown
+            ? ""
+            : " The running model is unknown, so samples from any model are counted here."}
         </p>
+        {coverage.needsReenrollment > 0 ? (
+          <p role="alert" className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            <span className="font-medium">
+              {coverage.needsReenrollment} student(s) must be re-enrolled.
+            </span>{" "}
+            Their samples were made by a model this deployment no longer runs, so they are kept
+            but never compared, and these students will not be recognised until a new sample is
+            taken with the running model. They are listed below as &ldquo;Re-enroll&rdquo;.
+          </p>
+        ) : null}
       </Panel>
 
       <Panel
@@ -240,7 +252,7 @@ export default async function FaceEnrollmentPage() {
         description={
           missing === 0
             ? "Nobody is missing."
-            : `${missing} student(s) have no sample${
+            : `${missing} student(s) have no sample the running model can use${
                 coverage.unenrolledShown < missing
                   ? `; the first ${coverage.unenrolledShown} are listed.`
                   : "."
@@ -248,7 +260,7 @@ export default async function FaceEnrollmentPage() {
         }
       >
         {coverage.unenrolled.length === 0 ? (
-          <EmptyState>Every active student has at least one sample.</EmptyState>
+          <EmptyState>Every active student can be recognised by the running model.</EmptyState>
         ) : (
           <ul className="flex flex-wrap gap-2">
             {coverage.unenrolled.map((student) => (
@@ -258,6 +270,11 @@ export default async function FaceEnrollmentPage() {
               >
                 <span className="font-mono text-xs text-neutral-500">{student.studentCode}</span>{" "}
                 {student.name}
+                {student.needsReenrollment ? (
+                  <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-900">
+                    Re-enroll
+                  </span>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -283,11 +300,18 @@ export default async function FaceEnrollmentPage() {
           <EmptyState>No samples are stored, so no model has been used.</EmptyState>
         ) : (
           <ul className="flex flex-col gap-1.5">
-            {coverage.models.map((model) => (
-              <li key={`${model.modelName}:${model.modelVersion}`} className="text-sm text-neutral-700">
-                <span className="font-medium text-neutral-900">{model.modelName}</span>{" "}
-                <span className="text-neutral-500">{model.modelVersion}</span> — {model.samples}{" "}
+            {coverage.models.map((stored) => (
+              <li key={`${stored.modelName}:${stored.modelVersion}`} className="text-sm text-neutral-700">
+                <span className="font-medium text-neutral-900">{stored.modelName}</span>{" "}
+                <span className="text-neutral-500">{stored.modelVersion}</span> — {stored.samples}{" "}
                 sample(s)
+                {model ? (
+                  model.modelName === stored.modelName && model.modelVersion === stored.modelVersion ? (
+                    <span className="text-green-700"> · running</span>
+                  ) : (
+                    <span className="text-amber-800"> · not running — never compared</span>
+                  )
+                ) : null}
               </li>
             ))}
           </ul>

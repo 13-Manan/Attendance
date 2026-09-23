@@ -100,3 +100,53 @@ test("nothing biometric is in the returned shape", () => {
     assert.ok(!serialised.includes(forbidden), `${forbidden} must not appear`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// A model switch. Samples from a model the deployment no longer runs are
+// never compared, so they must not count as coverage.
+// ---------------------------------------------------------------------------
+
+test("after a model switch, students with only old samples are not counted as enrolled", () => {
+  const result = summarise(
+    3,
+    ["a", "b", "c"],
+    [{ modelName: "mock", modelVersion: "0.1.0+pp1", samples: 3 }],
+    [member("x", "a"), member("x", "b"), member("x", "c")],
+    [student("a"), student("b"), student("c")],
+    [],
+  );
+  assert.equal(result.enrolledStudents, 0);
+  assert.equal(result.needsReenrollment, 3);
+  assert.equal(result.cohorts[0]?.enrolled, 0);
+  assert.deepEqual(
+    result.unenrolled.map((s) => [s.id, s.needsReenrollment]),
+    [["a", true], ["b", true], ["c", true]],
+  );
+});
+
+test("re-enrolled students count again; never-enrolled ones are not flagged for re-enrollment", () => {
+  const result = summarise(
+    3,
+    ["a", "b"],
+    [],
+    [member("x", "a"), member("x", "b"), member("x", "c")],
+    [student("a"), student("b"), student("c")],
+    ["a"],
+  );
+  assert.equal(result.enrolledStudents, 1);
+  assert.equal(result.needsReenrollment, 1);
+  assert.equal(result.cohorts[0]?.enrolled, 1);
+  assert.deepEqual(
+    result.unenrolled.map((s) => [s.id, s.needsReenrollment]),
+    [["b", true], ["c", false]],
+  );
+});
+
+test("an unknown running model falls back to any sample and says so", () => {
+  const known = summarise(1, ["a"], [], [], [], ["a"]);
+  assert.equal(known.runningModelKnown, true);
+  const unknown = summarise(1, ["a"], [], [], [], null);
+  assert.equal(unknown.runningModelKnown, false);
+  assert.equal(unknown.enrolledStudents, 1);
+  assert.equal(unknown.needsReenrollment, 0);
+});

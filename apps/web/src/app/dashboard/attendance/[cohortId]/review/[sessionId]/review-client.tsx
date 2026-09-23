@@ -99,10 +99,12 @@ function reasonText(student: AttendanceReviewStudent): string {
   }
 }
 
-/** Confidence as a short, honest label. Null means "never compared" — which
- * must not render as 0%, since that would read as a confident non-match. */
-function confidenceLabel(value: number | null): string {
-  if (value === null) return "not compared";
+/** Confidence as a short, honest label. Null must not render as 0%, since
+ * that would read as a confident non-match. It means one of two things, and
+ * the reason says which: the student was compared and no face came near them
+ * (`no_match`), or they were never compared at all. */
+function confidenceLabel(value: number | null, reason: AttendanceReviewReason): string {
+  if (value === null) return reason === "no_match" ? "no match" : "not compared";
   return `${Math.round(value * 100)}% match`;
 }
 
@@ -559,7 +561,7 @@ export function ReviewBoard({ initialBoard }: Props) {
                 <span
                   className={`rounded-full px-2 py-0.5 font-medium ${confidenceToneClasses(student.aiConfidence, presentMin)}`}
                 >
-                  {confidenceLabel(student.aiConfidence)}
+                  {confidenceLabel(student.aiConfidence, student.reason)}
                 </span>
                 {student.bestFaceId && (
                   <span className="text-neutral-500">
@@ -673,7 +675,7 @@ export function ReviewBoard({ initialBoard }: Props) {
                 >
                   {student.isManuallyCorrected
                     ? "marked by faculty"
-                    : confidenceLabel(student.aiConfidence)}
+                    : confidenceLabel(student.aiConfidence, student.reason)}
                 </span>
                 {suggested && (
                   <Button
