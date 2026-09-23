@@ -29,6 +29,8 @@ const SEGMENT_LABELS: Record<string, string> = {
 
   academic: "Academic",
   cohorts: "Classes",
+  classes: "Classes",
+  sections: "Sections",
   units: "Classes & units",
   subjects: "Subjects",
   sessions: "Academic sessions",

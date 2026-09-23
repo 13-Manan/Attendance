@@ -47,6 +47,14 @@ test("an institution admin is offered the administrative actions", () => {
   }
 });
 
+test("a school's Create a class goes to the class setup, a college's to its class screen", () => {
+  const can = canFor("SCHOOL_ADMIN");
+  const hrefFor = (kind: "SCHOOL" | "COLLEGE") =>
+    buildQuickActions(can, kind).find((action) => action.label === "Create a class")?.href;
+  assert.equal(hrefFor("SCHOOL"), "/dashboard/academic/classes/new");
+  assert.equal(hrefFor("COLLEGE"), "/dashboard/academic/cohorts/new");
+});
+
 test("an attendance operator is offered the register and nothing that corrects it", () => {
   // This role deliberately cannot finalise or correct; the panel must not
   // suggest otherwise.

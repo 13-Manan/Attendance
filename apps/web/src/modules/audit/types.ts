@@ -151,6 +151,14 @@ export type AuditAction =
   | "user.deactivated"
   | "user.reactivated"
   | "cohort_faculty.removed"
+  // School academic setup. A section set up by mistake can be removed, but
+  // only while nothing has ever happened in it — no student placed, no
+  // register taken, no subject — and the class or section above it goes with
+  // it only if nothing else uses it. These are the rows that prove it existed
+  // and who removed it; before this, nothing in the academic structure could be
+  // deleted at all, so there was no action to reuse.
+  | "cohort.deleted"
+  | "academic_unit.deleted"
   | "cohort_subject.faculty_assigned"
   // Phase 10 Integration Hub. The product requirement is explicit: log the
   // API client, endpoint, timestamp, status, request id, resource and failure

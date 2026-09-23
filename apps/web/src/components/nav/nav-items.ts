@@ -55,13 +55,14 @@ export interface NavItem {
  *
  * ## Why some labels depend on the institution
  *
- * A school has grades and sections; a college has departments, semesters and
- * courses. One route (`/dashboard/academic/units`) serves both, because it is
- * one tree in one table — see the abstraction note in `schema.prisma`. Calling
- * it "Sections" at a college would be wrong in the product's own terms, so the
- * label follows the institution. Subjects go further and disappear at a
- * school: `createSubjectForRequest` refuses `subjects_are_college_only`, and a
- * link to a screen that can only refuse is worse than no link.
+ * A school has classes and sections; a college has departments, semesters and
+ * courses. A school is offered two links — Academic year and Classes — and
+ * sets up a class, its sections and their teachers in one place
+ * (`/dashboard/academic/classes`). A college keeps the structure, class and
+ * subject screens, which show the same rows one table at a time. Subjects
+ * would disappear at a school regardless: `createSubjectForRequest` refuses
+ * `subjects_are_college_only`, and a link to a screen that can only refuse is
+ * worse than no link.
  */
 export const NAV_ITEMS: NavItem[] = [
   {
@@ -108,13 +109,14 @@ export const NAV_ITEMS: NavItem[] = [
     label: "Classes",
     group: "Academic",
     permission: "academicStructure.manage",
+    only: "COLLEGE",
   },
   {
     href: "/dashboard/academic/units",
-    label: "Sections",
-    collegeLabel: "Programs & semesters",
+    label: "Programs & semesters",
     group: "Academic",
     permission: "academicStructure.manage",
+    only: "COLLEGE",
   },
   {
     href: "/dashboard/academic/subjects",
@@ -125,9 +127,21 @@ export const NAV_ITEMS: NavItem[] = [
   },
   {
     href: "/dashboard/academic/sessions",
-    label: "Academic sessions",
+    label: "Academic year",
+    collegeLabel: "Academic sessions",
     group: "Academic",
     permission: "academicStructure.manage",
+  },
+  {
+    // A school sets up its classes, sections and their teachers on one screen,
+    // in its own words; the three college screens above are the same rows seen
+    // one table at a time. Their routes still answer at a school — a bookmark
+    // keeps working — they are just not where a principal is sent.
+    href: "/dashboard/academic/classes",
+    label: "Classes",
+    group: "Academic",
+    permission: "academicStructure.manage",
+    only: "SCHOOL",
   },
 
   {

@@ -23,21 +23,27 @@ const createSchema = z.object({
 
 export interface CreateAcademicSessionFormState {
   error?: string;
+  /** Echoed back so a refused submission does not clear the form. */
+  values?: { name: string; startDate: string; endDate: string };
+  /** Changes on every submission, so the fields remount with the values above. */
+  attempt?: number;
 }
 
 export async function createAcademicSessionForm(
-  _prev: CreateAcademicSessionFormState,
+  prev: CreateAcademicSessionFormState,
   formData: FormData,
 ): Promise<CreateAcademicSessionFormState> {
   const actor = await requireUser();
   if (!actor.institutionId) return { error: "Platform accounts cannot create academic sessions." };
 
-  const parsed = createSchema.safeParse({
-    name: formData.get("name"),
-    startDate: formData.get("startDate"),
-    endDate: formData.get("endDate"),
-  });
-  if (!parsed.success) return { error: "All fields are required." };
+  const values = {
+    name: String(formData.get("name") ?? ""),
+    startDate: String(formData.get("startDate") ?? ""),
+    endDate: String(formData.get("endDate") ?? ""),
+  };
+  const attempt = (prev.attempt ?? 0) + 1;
+  const parsed = createSchema.safeParse(values);
+  if (!parsed.success) return { error: "All fields are required.", values, attempt };
 
   try {
     await createAcademicSessionForRequest(actor, {
@@ -51,7 +57,7 @@ export async function createAcademicSessionForm(
     // reason — the dates are the wrong way round, or the name is taken — and
     // dropping it left the form saying "check dates and uniqueness" to someone
     // who had got one of the two right.
-    return { error: describe(error, "The academic year could not be created.") };
+    return { error: describe(error, "The academic year could not be created."), values, attempt };
   }
   redirect("/dashboard/academic/sessions");
 }

@@ -40,14 +40,22 @@ test("a platform-level account (no institution kind) is not narrowed by kind", (
   assert.ok(hrefs(buildNavSections(can, null)).includes("/dashboard/academic/subjects"));
 });
 
-test("the units link is named for the institution it belongs to", () => {
+test("a school is offered Academic year and Classes, and nothing more technical", () => {
   const can = allowing("academicStructure.manage");
-  const labelAt = (kind: "SCHOOL" | "COLLEGE") =>
-    buildNavSections(can, kind)
-      .flatMap((section) => section.items)
-      .find((item) => item.href === "/dashboard/academic/units")?.label;
-  assert.equal(labelAt("SCHOOL"), "Sections");
-  assert.equal(labelAt("COLLEGE"), "Programs & semesters");
+  const academic = (kind: "SCHOOL" | "COLLEGE") =>
+    buildNavSections(can, kind).find((section) => section.group === "Academic")?.items ?? [];
+
+  assert.deepEqual(academic("SCHOOL"), [
+    { href: "/dashboard/academic/sessions", label: "Academic year" },
+    { href: "/dashboard/academic/classes", label: "Classes" },
+  ]);
+  // A college's screens are unchanged.
+  assert.deepEqual(academic("COLLEGE"), [
+    { href: "/dashboard/academic/cohorts", label: "Classes" },
+    { href: "/dashboard/academic/units", label: "Programs & semesters" },
+    { href: "/dashboard/academic/subjects", label: "Subjects" },
+    { href: "/dashboard/academic/sessions", label: "Academic sessions" },
+  ]);
 });
 
 test("sections come back in the declared group order", () => {

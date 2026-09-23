@@ -54,7 +54,7 @@ export function Sidebar({
   return (
     <nav
       aria-label="Main"
-      className="flex shrink-0 gap-1 overflow-x-auto border-b border-neutral-200 p-2 md:w-56 md:flex-col md:gap-4 md:overflow-x-visible md:border-r md:border-b-0 md:p-4 print:hidden"
+      className="relative flex shrink-0 gap-1 overflow-x-auto border-b border-neutral-200 p-2 md:w-56 md:flex-col md:gap-4 md:overflow-x-visible md:border-r md:border-b-0 md:p-4 print:hidden"
     >
       {sections.map((section) => (
         <div key={section.group} className="flex shrink-0 gap-1 md:flex-col">

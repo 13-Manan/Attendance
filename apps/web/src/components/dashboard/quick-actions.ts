@@ -38,10 +38,18 @@ export const QUICK_ACTIONS: QuickAction[] = [
     permission: "student.create",
   },
   {
+    href: "/dashboard/academic/classes/new",
+    label: "Create a class",
+    description: "Add a class and its sections for this academic year.",
+    permission: "academicStructure.manage",
+    only: "SCHOOL",
+  },
+  {
     href: "/dashboard/academic/cohorts/new",
     label: "Create a class",
     description: "Set up a new cohort for the current academic session.",
     permission: "academicStructure.manage",
+    only: "COLLEGE",
   },
   {
     href: "/dashboard/face-enrollment",

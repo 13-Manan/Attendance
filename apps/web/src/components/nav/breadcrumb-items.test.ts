@@ -45,6 +45,12 @@ test("only the last crumb is current", () => {
 test("known segments use their written label", () => {
   assert.equal(buildBreadcrumbs("/dashboard/integrations/api-keys").at(-1)?.label, "API keys");
   assert.equal(buildBreadcrumbs("/dashboard/academic/units").at(-1)?.label, "Classes & units");
+  assert.deepEqual(
+    buildBreadcrumbs("/dashboard/academic/classes/cmu5dxyun000aitgu1x4tzn33/sections").map(
+      (crumb) => crumb.label,
+    ),
+    ["Dashboard", "Academic", "Classes", "Details", "Sections"],
+  );
   assert.equal(buildBreadcrumbs("/portal/attendance").at(0)?.label, "My attendance");
 });
 
