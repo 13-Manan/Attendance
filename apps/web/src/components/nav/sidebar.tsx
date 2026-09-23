@@ -42,6 +42,13 @@ export function Sidebar({
     isPlatformUser(user),
   );
 
+  // The full set of hrefs the shell will render. `NavLink` uses this to
+  // decide "am I the most specific match for the current pathname?" — the
+  // fix for the double-active-navigation bug where a parent link
+  // (/dashboard/platform) stayed lit while the viewer was on a child that
+  // is *also* a nav destination (/dashboard/platform/institutions).
+  const siblingHrefs = sections.flatMap((section) => section.items.map((item) => item.href));
+
   // `print:hidden` for the same reason as the topbar: navigation links are not
   // part of a printed report, and on paper they cost a column.
   return (
@@ -59,7 +66,12 @@ export function Sidebar({
             {section.group}
           </h2>
           {section.items.map((item) => (
-            <NavLink key={item.href} href={item.href} label={item.label} />
+            <NavLink
+              key={item.href}
+              href={item.href}
+              label={item.label}
+              siblingHrefs={siblingHrefs}
+            />
           ))}
         </div>
       ))}

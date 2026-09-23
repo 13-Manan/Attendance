@@ -36,7 +36,12 @@ export default async function PortalLayout({ children }: { children: React.React
         className="flex gap-1 overflow-x-auto border-b border-neutral-200 px-2 py-2 sm:gap-2 sm:px-4 print:hidden"
       >
         {PORTAL_LINKS.map((link) => (
-          <NavLink key={link.href} href={link.href} label={link.label} />
+          <NavLink
+            key={link.href}
+            href={link.href}
+            label={link.label}
+            siblingHrefs={PORTAL_LINKS.map((l) => l.href)}
+          />
         ))}
       </nav>
       <main className="flex-1 p-4 sm:p-6">{children}</main>
