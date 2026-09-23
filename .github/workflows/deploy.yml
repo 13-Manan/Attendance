@@ -594,11 +594,16 @@ jobs:
           # Two separate assertions. `/` proves the Next.js app renders a page;
           # /api/health proves a route handler executes. Either can fail while
           # the other passes, so neither stands in for the other.
+          #
+          # `/` is a server-side auth-aware entry point — anonymous requests
+          # are 307'd to /login. Follow the redirect with `-L` and assert on
+          # the *final* status so we still prove the app is serving a real
+          # page (login), not just that the redirect exists.
           probe() {
             path="$1"
             code=""
             for _ in $(seq 1 20); do
-              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://${fqdn}${path}" || echo 000)
+              code=$(curl -sL -o /dev/null -w '%{http_code}' --max-time 15 "https://${fqdn}${path}" || echo 000)
               echo "  GET https://${fqdn}${path} -> $code"
               if [ "$code" = "200" ]; then
                 return 0
