@@ -49,3 +49,24 @@ npm-debug.log*
 # misc
 *.tsbuildinfo
 .turbo/
+
+# --- Defense-in-depth for public-repository posture ---
+#
+# The tree does not currently contain any of these paths, but publishing a
+# repository is a one-way action and a future `git add .` should not be the
+# thing that undoes it. Every rule below either protects a category of
+# credential this project could conceivably grow (release signing, TLS
+# material, integration secrets) or catches a local-only artefact that has
+# already accumulated in the working tree (`.claude/` scratch, personal
+# architecture PDFs). Duplicates of rules above are not repeated.
+.claude/
+*.pdf
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials/
+secrets/
+local.properties
