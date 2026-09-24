@@ -112,7 +112,10 @@ export async function insertFaceEmbedding(
 export interface NearestTemplateRow {
   embeddingId: string;
   studentId: string;
-  similarity: number;
+  /** The backend's own cosine, straight from pgvector. NOT on the product's
+   * scale: a caller comparing this against `presentMin` is comparing two
+   * different units. Put it through `calibrateScore` first. */
+  rawSimilarity: number;
 }
 
 /**
@@ -190,7 +193,7 @@ export async function findNearestTemplatesInInstitution(
   return rows.map((row) => ({
     embeddingId: row.embeddingId,
     studentId: row.studentId,
-    similarity: Number(row.similarity),
+    rawSimilarity: Number(row.similarity),
   }));
 }
 
@@ -244,7 +247,7 @@ export async function findOwnTemplateSimilarities(
   return rows.map((row) => ({
     embeddingId: row.embeddingId,
     studentId: row.studentId,
-    similarity: Number(row.similarity),
+    rawSimilarity: Number(row.similarity),
   }));
 }
 

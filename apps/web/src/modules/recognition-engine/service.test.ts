@@ -1474,8 +1474,8 @@ test("group photo: the summary carries no embedding, even for unknown faces", as
 // The assignment and clustering primitives, directly
 // ---------------------------------------------------------------------------
 
-function scored(studentId: string, similarity: number) {
-  return { studentId, embeddingId: `emb-${studentId}`, similarity };
+function scored(studentId: string, similarity: number, rawSimilarity = similarity) {
+  return { studentId, embeddingId: `emb-${studentId}`, similarity, rawSimilarity };
 }
 
 test("assignFacesOneToOne gives each student to the face that resembles them most", () => {
@@ -1526,9 +1526,174 @@ test("countDistinctUnknownFaces never merges two faces from the same photo", () 
         { captureNumber: 1, embedding: v },
         { captureNumber: 1, embedding: v },
       ],
-      0.62,
+      { presentMin: 0.62 },
     ),
     2,
   );
-  assert.equal(countDistinctUnknownFaces([], 0.62), 0);
+  assert.equal(countDistinctUnknownFaces([], { presentMin: 0.62 }), 0);
+});
+
+// ---------------------------------------------------------------------------
+// Reading one backend's scale
+// ---------------------------------------------------------------------------
+
+/** The map services/face-ai publishes for the dlib recogniser. */
+const DLIB_CALIBRATION = {
+  id: "dlib-resnet-v1.azure-d03.2026-09-24",
+  knots: [
+    { raw: -1, calibrated: -1 },
+    { raw: 0.93, calibrated: 0.45 },
+    { raw: 0.955, calibrated: 0.62 },
+    { raw: 1, calibrated: 1 },
+  ],
+  rawAmbiguityMargin: 0.01,
+};
+
+test("a raw score that clears presentMin is not a match once calibrated", () => {
+  // 0.94 raw is two different people for this recogniser. Read as though it
+  // were already on the product's scale, it marks a stranger present — the
+  // single failure this whole mechanism exists to prevent.
+  const uncalibrated = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [candidate("s1", 0.94)],
+    DIM,
+    policy(),
+  );
+  assert.equal(uncalibrated.decision, "MATCHED");
+
+  const calibrated = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [candidate("s1", 0.94)],
+    DIM,
+    policy({ calibration: DLIB_CALIBRATION }),
+  );
+  assert.equal(calibrated.decision, "UNCERTAIN");
+  assert.ok(calibrated.best!.similarity < 0.62);
+  assert.equal(calibrated.best!.rawSimilarity.toFixed(4), "0.9400");
+});
+
+test("a genuinely confident raw score still matches after calibration", () => {
+  // The map must not simply refuse everything: 0.97 raw is the same person.
+  const result = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [candidate("s1", 0.97)],
+    DIM,
+    policy({ calibration: DLIB_CALIBRATION }),
+  );
+  assert.equal(result.decision, "MATCHED");
+});
+
+test("a raw score below the review knot is no match at all", () => {
+  const result = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [candidate("s1", 0.9)],
+    DIM,
+    policy({ calibration: DLIB_CALIBRATION }),
+  );
+  assert.equal(result.decision, "UNMATCHED");
+});
+
+test("both scales are reported, so a stored result stays explainable", () => {
+  const { byStudent } = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [candidate("s1", 0.97), candidate("s2", 0.9)],
+    DIM,
+    policy({ calibration: DLIB_CALIBRATION }),
+  );
+  for (const scored of byStudent) {
+    assert.notEqual(scored.similarity, scored.rawSimilarity);
+    assert.ok(scored.similarity <= 1 && scored.similarity >= -1);
+  }
+});
+
+test("two students within the backend's raw margin are ambiguous, not present", () => {
+  // Their calibrated scores are 0.05 apart — clear of the institution's
+  // margin — but 0.004 apart raw, which is the same face to this recogniser.
+  const result = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [candidate("s1", 0.985), candidate("s2", 0.981)],
+    DIM,
+    policy({ calibration: DLIB_CALIBRATION, ambiguityMargin: 0.01 }),
+  );
+  assert.ok(result.best!.similarity - result.runnerUp!.similarity > 0.01);
+  assert.ok(result.best!.rawSimilarity - result.runnerUp!.rawSimilarity < 0.01);
+  assert.equal(result.wasAmbiguous, true);
+  assert.equal(result.decision, "UNCERTAIN");
+});
+
+test("the institution's margin still applies on top of the backend's", () => {
+  // Far apart on the raw scale, close on the calibrated one.
+  const result = scoreFaceAgainstCandidates(
+    REFERENCE,
+    [candidate("s1", 0.97), candidate("s2", 0.9695)],
+    DIM,
+    policy({ calibration: DLIB_CALIBRATION, ambiguityMargin: 0.05 }),
+  );
+  assert.equal(result.wasAmbiguous, true);
+});
+
+test("unknown visitors are clustered on the calibrated scale", () => {
+  // Read raw, two strangers 0.9 apart from nobody would merge into one
+  // visitor, because 0.9 clears presentMin 0.62 on the wrong scale.
+  const a = vecAtSimilarity(1);
+  const b = vecAtSimilarity(0.9);
+  const faces = [
+    { captureNumber: 1, embedding: a },
+    { captureNumber: 2, embedding: b },
+  ];
+  assert.equal(countDistinctUnknownFaces(faces, { presentMin: 0.62 }), 1);
+  assert.equal(
+    countDistinctUnknownFaces(faces, { presentMin: 0.62, calibration: DLIB_CALIBRATION }),
+    2,
+  );
+});
+
+test("the same visitor across two photographs is still one visitor", () => {
+  const a = vecAtSimilarity(1);
+  const b = vecAtSimilarity(0.98);
+  assert.equal(
+    countDistinctUnknownFaces(
+      [
+        { captureNumber: 1, embedding: a },
+        { captureNumber: 2, embedding: b },
+      ],
+      { presentMin: 0.62, calibration: DLIB_CALIBRATION },
+    ),
+    1,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// One student, one face (the worked example from the specification)
+// ---------------------------------------------------------------------------
+
+test("a student contested by two faces is given to one of them and reviewed", () => {
+  // Three faces in a photograph. F1 and F2 both want Rahul; F3 wants Priya:
+  //   F1 -> Rahul .81, Aman .79
+  //   F2 -> Rahul .80, Aman .65
+  //   F3 -> Priya .90
+  // Rahul cannot be in two places in one photograph. The assignment gives him
+  // to the face that resembles him most, and the other face falls to its own
+  // next choice rather than being dropped or given the same student again.
+  const { assignments, contested } = assignFacesOneToOne(
+    [
+      { faceIndex: 0, byStudent: [scored("rahul", 0.81), scored("aman", 0.79)] },
+      { faceIndex: 1, byStudent: [scored("rahul", 0.8), scored("aman", 0.65)] },
+      { faceIndex: 2, byStudent: [scored("priya", 0.9)] },
+    ],
+    policy(),
+  );
+
+  assert.deepEqual(
+    assignments.map((a) => a.assigned?.studentId ?? null),
+    ["rahul", "aman", "priya"],
+  );
+  // No student appears twice.
+  const assigned = assignments.map((a) => a.assigned?.studentId).filter(Boolean);
+  assert.equal(new Set(assigned).size, assigned.length);
+  // F2 did not get its first choice, and that is recorded rather than hidden.
+  assert.equal(assignments[1].reassigned, true);
+  assert.equal(assignments[1].topChoice?.studentId, "rahul");
+  // Rahul was wanted by two faces, so his result is a teacher's to confirm.
+  assert.deepEqual([...contested], ["rahul"]);
 });

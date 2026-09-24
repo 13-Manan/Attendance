@@ -15,7 +15,12 @@ import type {
   GalleryRemoveRequest,
   GalleryRemoveResponse,
   ModelInfoResponse,
+  ScoreCalibration,
 } from "@attendance/shared-types";
+import {
+  calibrateScore,
+  resolveCalibration,
+} from "@/modules/recognition-engine/calibration";
 import {
   GALLERY_ENROLLMENT_THRESHOLDS,
   galleryIdForCohort,
@@ -34,6 +39,7 @@ import {
   summariseEnrollmentStatus,
   type EnrollmentCollision,
   type FaceEnrollmentStatusSummary,
+  type NeighbourTemplate,
   type TemplateModel,
 } from "./policy";
 import {
@@ -429,6 +435,21 @@ async function performEnrollment(
     return performGalleryEnrollment(actor, student, input, channel, options, modelInfo, storedModels, d);
   }
 
+  // How this backend's similarity scores read on the product's scale. Needed
+  // before the image is sent, not after: without it the duplicate and
+  // collision scans below would compare two different units, and the sample
+  // would be stored on the strength of a check that did not mean what it
+  // said. A model whose scale cannot be established is a refusal — the
+  // retryable kind, because the usual cause is the service being briefly
+  // unreachable.
+  let calibration: ScoreCalibration | null;
+  try {
+    if (!modelInfo) throw new Error("model_info_unavailable");
+    calibration = resolveCalibration(modelInfo);
+  } catch {
+    return refuse("service_error", channel, statusBeforeModelKnown);
+  }
+
   // -- 6. Model -----------------------------------------------------------
   let response: EnrollResponse;
   try {
@@ -481,6 +502,7 @@ async function performEnrollment(
     response.embedding,
     runningModel,
     options.replace,
+    calibration,
     d,
   );
   if (collision.kind !== "none") {
@@ -787,8 +809,18 @@ async function detectCollision(
   embedding: number[],
   model: TemplateModel,
   isReplacement: boolean,
+  calibration: ScoreCalibration | null,
   d: ResolvedDeps,
 ): Promise<EnrollmentCollision> {
+  // pgvector returns the backend's own cosine. The thresholds below are the
+  // institution's, on the product's scale, so every row is mapped onto that
+  // scale before either is compared with the other.
+  const onProductScale = (rows: repo.NearestTemplateRow[]): NeighbourTemplate[] =>
+    rows.map((row) => ({
+      ...row,
+      similarity: calibrateScore(row.rawSimilarity, calibration),
+    }));
+
   let neighbours: repo.NearestTemplateRow[];
   try {
     neighbours = await d.findNearestTemplates(
@@ -802,7 +834,11 @@ async function detectCollision(
   }
 
   const thresholds = resolveConfidenceThresholds(institution);
-  const collision = classifyEnrollmentCollision(neighbours, student.id, thresholds);
+  const collision = classifyEnrollmentCollision(
+    onProductScale(neighbours),
+    student.id,
+    thresholds,
+  );
 
   // A replacement is allowed to be the same face as the sample it replaces —
   // that is the ordinary case when somebody re-takes a poor photograph of the
@@ -833,7 +869,7 @@ async function detectCollision(
     return { kind: "none" };
   }
 
-  return classifyOwnSampleMismatch(own, thresholds);
+  return classifyOwnSampleMismatch(onProductScale(own), thresholds);
 }
 
 /**

@@ -267,7 +267,18 @@ def test_every_registry_entry_declares_a_commercial_use_status():
 #: ``azure`` ships no weights: it calls Microsoft's managed Azure AI Face
 #: service under the subscription's product terms. Its separate Limited Access
 #: gate on identification is enforced at runtime, not by this flag.
-LICENCE_VERIFIED_BACKENDS = frozenset({"azure"})
+#:
+#: ``azure_detection_own_recognition`` does run weights in this container: the
+#: dlib ResNet recogniser, released into the public domain by its author and
+#: checksum-pinned in app/models/model_files.py. Its licence audit is written
+#: up in docs/MODEL_LICENSES.md, including the residual question about the
+#: non-commercial research sets in its training data.
+LICENCE_VERIFIED_BACKENDS = frozenset({"azure", "azure_detection_own_recognition"})
+
+#: Backends that run weights in this container and have *not* been cleared.
+#: Separate from the set above so that clearing one is an edit to both this
+#: file and models/LICENSING.md, never a single flag flip.
+UNVERIFIED_SELF_HOSTED_BACKENDS = frozenset({"onnx", "opencv"})
 
 
 def test_no_shipped_backend_claims_commercial_clearance_it_does_not_have():
@@ -283,9 +294,12 @@ def test_no_shipped_backend_claims_commercial_clearance_it_does_not_have():
         )
 
 
-def test_every_self_hosted_backend_stays_out_of_production():
-    # Every backend that runs weights in this container is still unverified.
-    # Only the managed service is cleared.
+def test_every_unverified_self_hosted_backend_stays_out_of_production():
+    # The scaffold and the OpenCV pair still have no cleared weights licence,
+    # so neither can serve production however convenient it would be.
+    for name in UNVERIFIED_SELF_HOSTED_BACKENDS:
+        assert MODEL_REGISTRY[name].commercial_use != "permitted", name
+
     permitted = {
         name
         for name, registration in MODEL_REGISTRY.items()

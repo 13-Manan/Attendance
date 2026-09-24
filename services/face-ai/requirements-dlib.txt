@@ -1,0 +1,17 @@
+# The recogniser, built from source in the image's builder stage.
+#
+# dlib publishes no wheels: every release on PyPI is a source distribution, so
+# this is compiled during the build against the same slim base the service
+# runs on. That is also why it is not in requirements.txt — a `pip install -r`
+# on a developer machine would start a five-minute C++ build.
+#
+# The hash is the release sha256 from PyPI. `pip --require-hashes` refuses to
+# install anything else, so a compromised or substituted sdist fails the build
+# rather than producing an image whose recogniser nobody chose. The pinned
+# GOLDEN_* self-test in app/models/dlib_recognition.py then checks the *built*
+# artefact: this line proves the source, the self-test proves the binary.
+#
+# Licence: Boost Software License 1.0 (the library). The model weights are a
+# separate artefact with a separate licence — see docs/MODEL_LICENSES.md.
+dlib==20.0.1 \
+    --hash=sha256:7cb2a09467de032332c743bc967007f016598c66c9c9ebc54a5b66d3d9e46d54

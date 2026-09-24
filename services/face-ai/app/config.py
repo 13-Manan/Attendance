@@ -14,6 +14,7 @@ from functools import lru_cache
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
+from app.models.azure_dlib_provider import AzureDetectionOwnRecognitionProvider
 from app.models.azure_provider import AzureFaceModelProvider
 from app.models.base import FaceModelProvider
 from app.models.mock_model import MockEmbeddingModel
@@ -93,6 +94,26 @@ MODEL_REGISTRY: dict[str, BackendRegistration] = {
             "Identification/Verification need Microsoft's Limited Access "
             "approval (https://aka.ms/facerecognition); without it the "
             "backend detects faces and identifies nobody."
+        ),
+    ),
+    "azure_detection_own_recognition": BackendRegistration(
+        provider_cls=AzureDetectionOwnRecognitionProvider,
+        # Azure detects; this service recognises. Nothing here waits on
+        # Limited Access approval, because Identify is never called. Every
+        # stage is cleared for commercial use: the managed detector under the
+        # subscription's product terms, dlib's code under Boost 1.0, and the
+        # recogniser's weights released into the public domain by their
+        # author. docs/MODEL_LICENSES.md records the one residual risk — about
+        # half the training images came from two non-commercially licensed
+        # research sets — as a matter for legal review, not a licence defect
+        # in what is shipped.
+        commercial_use="permitted",
+        licence_note=(
+            "Azure AI Face Detect (Microsoft Product Terms) + dlib ResNet v1 "
+            "recognition run in-process. Weights are public domain "
+            "(davisking/dlib-models), dlib is Boost 1.0. Needs FACE_MODEL_DIR "
+            "with the pinned recogniser and Azure Face credentials. Residual "
+            "training-data risk is documented in docs/MODEL_LICENSES.md."
         ),
     ),
 }
@@ -251,6 +272,18 @@ def build_provider(settings: Settings) -> FaceModelProvider:
             top_k=settings.face_detector_top_k,
             min_face_pixels=settings.face_min_enrolment_face_pixels,
             max_detection_edge=settings.face_max_detection_edge or None,
+        )
+    if registration.provider_cls is AzureDetectionOwnRecognitionProvider:
+        return AzureDetectionOwnRecognitionProvider(
+            model_dir=settings.face_model_dir,
+            endpoint=settings.azure_face_endpoint,
+            key=(
+                settings.azure_face_key.get_secret_value()
+                if settings.azure_face_key is not None
+                else None
+            ),
+            timeout_s=settings.azure_face_timeout_s,
+            max_retries=settings.azure_face_max_retries,
         )
     if registration.provider_cls is AzureFaceModelProvider:
         return AzureFaceModelProvider(

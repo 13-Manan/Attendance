@@ -94,6 +94,7 @@ def embed(
         embeddingDim=model.embedding_dim,
         weightsVersion=model.weights_version,
         preprocessingVersion=model.preprocessing_version,
+        alignmentVersion=model.alignment_version,
         aligned=aligned.aligned,
     )
 
@@ -144,6 +145,7 @@ def enroll(
         embeddingDim=model.embedding_dim,
         weightsVersion=model.weights_version,
         preprocessingVersion=model.preprocessing_version,
+        alignmentVersion=model.alignment_version,
         aligned=outcome.aligned,
     )
 
@@ -168,7 +170,11 @@ def match(
     thresholds = resolve_thresholds(request.thresholds)
     probe = model.embed(request.image_base64, None, None)
     scores, skipped = score_candidates(
-        probe, request.candidates, thresholds, model.embedding_dim
+        probe,
+        request.candidates,
+        thresholds,
+        model.embedding_dim,
+        calibration=model.calibration(),
     )
     best = scores[0] if scores else None
     return MatchResponse(

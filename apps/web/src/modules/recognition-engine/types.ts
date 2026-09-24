@@ -3,6 +3,7 @@ import type {
   IdentificationStatus,
   MatchStatus,
   RejectedFaceReason,
+  ScoreCalibration,
 } from "@attendance/shared-types";
 import type { ConfidenceThresholds } from "@/modules/institutions/types";
 import type { AttendanceResult } from "@/modules/recognition-results/types";
@@ -44,6 +45,18 @@ export interface RecognitionPolicy extends ConfidenceThresholds {
    * low-quality corners) from creating spurious review noise.
    */
   minDetectionConfidence: number;
+  /**
+   * How to read the running backend's raw similarity scores on the scale the
+   * two thresholds above are written against. Supplied from
+   * `GET /v1/model-info` by `runRecognitionForSession`; see
+   * `recognition-engine/calibration.ts`.
+   *
+   * Optional because most policies are built by tests and benchmarks against
+   * a backend whose raw scale IS the product's. Omitted means exactly that —
+   * and a *production* backend that publishes none is refused at the
+   * model-info boundary rather than quietly read raw.
+   */
+  calibration?: ScoreCalibration | null;
 }
 
 export const DEFAULT_AMBIGUITY_MARGIN = 0.05;

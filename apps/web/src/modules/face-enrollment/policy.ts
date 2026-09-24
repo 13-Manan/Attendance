@@ -110,6 +110,10 @@ export function inspectEmbedding(embedding: readonly number[]): EmbeddingRejecti
  * `cosine_similarity` in services/face-ai/app/matching.py — the same number
  * has to come out of both, or a template that enrollment called distinct would
  * be a match at attendance time.
+ *
+ * The result is the backend's RAW scale. Anything that compares it against
+ * `presentMin`, `reviewMin` or any other product threshold must put it through
+ * `calibrateScore` first.
  */
 export function similarity(a: readonly number[], b: readonly number[]): number {
   if (a.length !== b.length) return 0;
@@ -129,7 +133,14 @@ export function similarity(a: readonly number[], b: readonly number[]): number {
 export interface NeighbourTemplate {
   embeddingId: string;
   studentId: string;
+  /** On the PRODUCT's scale — comparable with `presentMin` / `reviewMin`.
+   * The caller calibrates before handing rows here; see
+   * `recognition-engine/calibration.ts`. */
   similarity: number;
+  /** The backend's own cosine. Only the "is this literally the same
+   * photograph" test reads this, because that test is about the vectors
+   * themselves rather than about what a threshold means. */
+  rawSimilarity: number;
 }
 
 /**
@@ -144,6 +155,13 @@ export interface NeighbourTemplate {
  * It is not a refusal on safety grounds, and it is reported differently from a
  * collision with another student: nothing is wrong with the face, there is
  * simply nothing to gain from storing it twice.
+ *
+ * Compared against the RAW cosine, never a calibrated one. This is not a
+ * statement about confidence, it is "these two vectors are the same vector",
+ * and that is a property of the numbers themselves. Feeding it a calibrated
+ * score would move the bar with every recalibration and, on a backend whose
+ * raw scale runs high, would stop detecting re-submitted photographs
+ * altogether.
  */
 export const SAME_TEMPLATE_SIMILARITY = 0.99;
 
@@ -206,6 +224,8 @@ export function classifyEnrollmentCollision(
         strongestOther = neighbour;
       }
     } else if (!strongestOwn || neighbour.similarity > strongestOwn.similarity) {
+      // Ranking by the calibrated score picks the same row as ranking by the
+      // raw one: calibration is monotone by construction.
       strongestOwn = neighbour;
     }
   }
@@ -229,7 +249,7 @@ export function classifyEnrollmentCollision(
     }
   }
 
-  if (strongestOwn && strongestOwn.similarity >= SAME_TEMPLATE_SIMILARITY) {
+  if (strongestOwn && strongestOwn.rawSimilarity >= SAME_TEMPLATE_SIMILARITY) {
     return {
       kind: "already_enrolled",
       embeddingId: strongestOwn.embeddingId,

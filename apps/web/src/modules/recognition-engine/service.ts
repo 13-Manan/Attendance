@@ -28,6 +28,7 @@ import type {
   RejectedFaceReason,
 } from "@attendance/shared-types";
 import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
+import { calibrateScore, resolveCalibration } from "./calibration";
 import type {
   AggregationDowngrade,
   CandidateTemplate,
@@ -149,8 +150,15 @@ export function buildRecognitionPolicyForInstitution(
 
 export interface ScoredCandidate {
   studentId: string;
+  /** On the product's scale — the number `presentMin` and `reviewMin` are
+   * written against. Equal to `rawSimilarity` when the backend publishes no
+   * calibration. */
   similarity: number;
   embeddingId: string | null;
+  /** The backend's own cosine, before calibration. Kept because the raw
+   * ambiguity margin is measured on this scale and because a stored result
+   * stays explainable after a recalibration. */
+  rawSimilarity: number;
 }
 
 /**
@@ -205,11 +213,16 @@ export function scoreFaceAgainstCandidates(
       skipped++;
       continue;
     }
-    const s = cosineSimilarity(faceEmbedding, c.embedding);
+    const raw = cosineSimilarity(faceEmbedding, c.embedding);
+    // Calibrated here, at the one place raw cosines are produced, so that
+    // everything downstream — the thresholds, the assignment, the aggregate,
+    // the number shown to a teacher — is on a single scale.
+    const s = calibrateScore(raw, policy.calibration);
     const scored: ScoredCandidate = {
       studentId: c.studentId,
       similarity: s,
       embeddingId: c.embeddingId ?? null,
+      rawSimilarity: raw,
     };
     const own = perStudent.get(c.studentId);
     if (!own || s > own.similarity) perStudent.set(c.studentId, scored);
@@ -243,10 +256,18 @@ export function scoreFaceAgainstCandidates(
   // Ambiguity rule: two *different students* near-tied for the top match must
   // never auto-mark a "confident" match — the spec explicitly forbids silently
   // converting uncertainty into PRESENT.
+  //
+  // Two margins, and either one is enough to demote. The institution's margin
+  // is in calibrated points, which is what an administrator can reason about.
+  // The backend's own margin is in raw points, because calibration stretches
+  // the top of the scale: two students 0.002 raw apart are the same face to
+  // the recogniser however far apart their calibrated scores end up.
+  const rawMargin = policy.calibration?.rawAmbiguityMargin ?? 0;
   const wasAmbiguous =
     decision === "MATCHED" &&
     runnerUp !== null &&
-    best.similarity - runnerUp.similarity < policy.ambiguityMargin;
+    (best.similarity - runnerUp.similarity < policy.ambiguityMargin ||
+      best.rawSimilarity - runnerUp.rawSimilarity < rawMargin);
   if (wasAmbiguous) decision = "UNCERTAIN";
   return { best, runnerUp, decision, wasAmbiguous, skippedIncompatible: skipped, byStudent };
 }
@@ -292,8 +313,12 @@ export function scoreGalleryCandidates(
     if (!own || candidate.confidence > own.similarity) {
       perStudent.set(owner.studentId, {
         studentId: owner.studentId,
+        // A provider confidence, already on its own scale and judged against
+        // the gallery thresholds. No embedding calibration applies: there is
+        // no cosine here to calibrate.
         similarity: candidate.confidence,
         embeddingId: owner.embeddingId,
+        rawSimilarity: candidate.confidence,
       });
     }
   }
@@ -416,8 +441,8 @@ export function assignFacesOneToOne(
  *
  * An unknown face in photo 1 and one in photo 2 may be the same visitor.
  * Faces in the SAME photo are different people by definition; faces in
- * different photos are merged when their embeddings agree at `presentMin` or
- * better — the same bar a face must clear to be suggested as a student.
+ * different photos are merged when their calibrated similarity reaches
+ * `presentMin` — the same bar a face must clear to be suggested as a student.
  * Single-linkage, processed in capture order, so the count is deterministic.
  *
  * Works on vectors held in memory for the length of the run. Nothing about
@@ -425,16 +450,23 @@ export function assignFacesOneToOne(
  */
 export function countDistinctUnknownFaces(
   faces: Array<{ captureNumber: number; embedding: number[] }>,
-  presentMin: number,
+  policy: Pick<RecognitionPolicy, "presentMin" | "calibration">,
 ): number {
   const clusters: Array<{ captures: Set<number>; members: number[][] }> = [];
   for (const face of faces) {
     let bestCluster: (typeof clusters)[number] | null = null;
-    let bestScore = presentMin;
+    let bestScore = policy.presentMin;
     for (const cluster of clusters) {
       if (cluster.captures.has(face.captureNumber)) continue;
       for (const member of cluster.members) {
-        const s = cosineSimilarity(face.embedding, member);
+        // Calibrated, like every other comparison. Raw scores read against
+        // presentMin would merge every stranger in the room into one visitor
+        // on a backend whose raw scale sits high — the count a teacher uses
+        // to decide whether somebody who should not be there was.
+        const s = calibrateScore(
+          cosineSimilarity(face.embedding, member),
+          policy.calibration,
+        );
         if (s >= bestScore) {
           bestScore = s;
           bestCluster = cluster;
@@ -860,11 +892,15 @@ async function identifyAgainstGallery(
   deps: RunRecognitionForSessionDeps,
 ): Promise<FrontHalf> {
   // The provider's confidence is not a cosine similarity, so the
-  // institution's pair does not apply. Its detection floor does.
+  // institution's pair does not apply. Its detection floor does. Nor does an
+  // embedding backend's calibration: there is no cosine here to calibrate,
+  // and applying one would re-band every gallery result against a map
+  // measured on somebody else's scale.
   const policy: RecognitionPolicy = {
     ...institutionPolicy,
     ...GALLERY_RECOGNITION_THRESHOLDS,
     ...deps.policyOverrides,
+    calibration: null,
   };
   const modelFilter = {
     modelName: modelInfo.modelName,
@@ -1019,13 +1055,21 @@ export async function runRecognitionForSession(
       return faceModelInfo();
     }))();
 
+  // How to read this backend's numbers. Throws when a production embedding
+  // backend publishes no map rather than assuming its raw scale is ours —
+  // that assumption is what would mark a room full of strangers present.
+  const scoredPolicy: RecognitionPolicy = {
+    ...policy,
+    calibration: resolveCalibration(modelInfo),
+  };
+
   // Two front halves, one back half. Each front half decides who every face
   // might be — by comparing vectors here, or by asking the provider that holds
   // the class gallery — and everything after that (one-to-one assignment,
   // demotions, aggregation, the summary) is the same code for both.
   const run = isGalleryModel(modelInfo)
     ? await identifyAgainstGallery(session, input, modelInfo, policy, deps)
-    : await scoreAgainstEmbeddings(session, input, modelInfo, policy, deps);
+    : await scoreAgainstEmbeddings(session, input, modelInfo, scoredPolicy, deps);
   const scoredFaces = run.faces;
   const runPolicy = run.policy;
 
@@ -1180,7 +1224,7 @@ export async function runRecognitionForSession(
     // with each other, so the certain lower bound is reported instead.
     unknownFacesTotal: run.gallery
       ? countUnknownFacesWithoutVectors(unknownCaptures)
-      : countDistinctUnknownFaces(unknownEmbeddings, runPolicy.presentMin),
+      : countDistinctUnknownFaces(unknownEmbeddings, runPolicy),
     recommendRetake: (rejectedFaces.face_too_small ?? 0) > 0 || (flaggedFaces.face_too_small ?? 0) > 0,
     ...(run.gallery
       ? {

@@ -201,8 +201,8 @@ async function main() {
   assert.equal(probeSelf.length, 1);
   assert.equal(probeSelf[0].studentId, ids.studentOne);
   assert.ok(
-    Math.abs(probeSelf[0].similarity - 1) < 1e-5,
-    `a vector compared with itself scored ${probeSelf[0].similarity}`,
+    Math.abs(probeSelf[0].rawSimilarity - 1) < 1e-5,
+    `a vector compared with itself scored ${probeSelf[0].rawSimilarity}`,
   );
   ok("the <=> scan finds the identical template and scores it 1.0");
 

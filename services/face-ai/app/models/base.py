@@ -51,6 +51,7 @@ from app.schemas import (
     IdentificationStatus,
     IdentifyResponse,
     RejectedFace,
+    ScoreCalibration,
     SessionImageInput,
     TemplateKind,
 )
@@ -142,6 +143,10 @@ class FaceModelProvider(ABC):
     #: order or normalisation changes — any of which invalidates every
     #: previously stored embedding just as surely as new weights would.
     preprocessing_version: str
+    #: Bumped whenever the landmarks used for alignment, or the template they
+    #: are warped onto, change. None for a backend with no alignment of its
+    #: own to version.
+    alignment_version: str | None = None
     #: Fixed by the contract. A backend with a different native dimension is
     #: a contract change (EMBEDDING_DIMENSION, the pgvector column and every
     #: stored template), not something an adapter papers over by projecting.
@@ -180,12 +185,25 @@ class FaceModelProvider(ABC):
     def version(self) -> str:
         """Composite provenance string persisted with every embedding.
 
-        Weights and preprocessing are combined because either one changing
-        makes old vectors incomparable, and only one column exists to record
-        it. Parsing this apart is never necessary — the structured components
-        travel on the wire as their own fields.
+        Weights, preprocessing and alignment are combined because any one
+        changing makes old vectors incomparable, and apps/web compares
+        templates on this string. Parsing it apart is never necessary — the
+        structured components travel on the wire as their own fields.
         """
-        return f"{self.weights_version}+pp{self.preprocessing_version}"
+        version = f"{self.weights_version}+pp{self.preprocessing_version}"
+        if self.alignment_version is not None:
+            version += f"+al{self.alignment_version}"
+        return version
+
+    def calibration(self) -> ScoreCalibration | None:
+        """How to read this backend's raw similarity on the product's scale.
+
+        None means the raw scale already is the product's. A recogniser that
+        scores differently, and dlib scores most different-person pairs
+        above 0.8, must override this. Thresholds tuned for one scale would
+        otherwise pass nearly everyone.
+        """
+        return None
 
     def stage_descriptors(self) -> tuple[StageDescriptor, ...]:
         """The stages this provider is built from. A composed provider
@@ -217,6 +235,8 @@ class FaceModelProvider(ABC):
             stages=[stage.to_info() for stage in self.stage_descriptors()],
             templateKind=self.template_kind,
             identification=self.identification_status(),
+            alignmentVersion=self.alignment_version,
+            calibration=self.calibration(),
         )
 
     # -- pipeline stages ----------------------------------------------------

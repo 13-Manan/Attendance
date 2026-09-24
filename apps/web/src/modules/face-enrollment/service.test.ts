@@ -568,7 +568,7 @@ test("a broken embedding contract is audited, because it is a deployment fault",
 test("a face already enrolled against another student is refused", async () => {
   const h = harness({
     students: [student(), student({ id: "student-2", userId: "u2", studentCode: "S-002", firstName: "Rohan", lastName: "Gupta" })],
-    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", similarity: 0.93 }],
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
   });
 
   const result = await enrollFaceForStudentRequest(
@@ -586,7 +586,7 @@ test("a face already enrolled against another student is refused", async () => {
 test("a staff refusal names the student it collided with, because only they can resolve it", async () => {
   const h = harness({
     students: [student(), student({ id: "student-2", userId: "u2", studentCode: "S-002", firstName: "Rohan", lastName: "Gupta" })],
-    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", similarity: 0.93 }],
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
   });
 
   const result = await enrollFaceForStudentRequest(
@@ -604,7 +604,7 @@ test("a student is never told whose face theirs collided with", async () => {
   const h = harness({
     institution: institution({ type: "COLLEGE" }),
     students: [student(), student({ id: "student-2", userId: "u2", studentCode: "S-002", firstName: "Rohan", lastName: "Gupta" })],
-    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", similarity: 0.93 }],
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
   });
 
   const result = await enrollOwnFaceRequest(studentUser(), CAMERA, h.deps);
@@ -619,7 +619,7 @@ test("a student is never told whose face theirs collided with", async () => {
 test("a near-collision is refused as ambiguous rather than stored", async () => {
   const h = harness({
     students: [student(), student({ id: "student-2", userId: "u2", studentCode: "S-002" })],
-    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", similarity: 0.5 }],
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.5 }],
   });
 
   const result = await enrollFaceForStudentRequest(
@@ -634,7 +634,7 @@ test("a near-collision is refused as ambiguous rather than stored", async () => 
 test("a collision is audited with both student ids and no vector", async () => {
   const h = harness({
     students: [student(), student({ id: "student-2", userId: "u2", studentCode: "S-002" })],
-    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", similarity: 0.93 }],
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
   });
 
   await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
@@ -658,7 +658,7 @@ test("a photograph of somebody else entirely is refused, even when nobody is enr
   // and that person is marked present as them.
   const h = harness({
     storedModels: [MODEL],
-    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.19 }],
+    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.19 }],
   });
 
   const result = await enrollFaceForStudentRequest(
@@ -674,7 +674,7 @@ test("a photograph of somebody else entirely is refused, even when nobody is enr
 test("the mismatch refusal is retryable, because the next photograph may be the right one", async () => {
   const h = harness({
     storedModels: [MODEL],
-    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.19 }],
+    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.19 }],
   });
   const result = await enrollFaceForStudentRequest(
     staffAdmin(),
@@ -691,8 +691,8 @@ test("a mismatch is audited with no second student and no vector", async () => {
   const h = harness({
     storedModels: [MODEL],
     ownSimilarities: [
-      { embeddingId: "emb-own", studentId: "student-1", similarity: 0.19 },
-      { embeddingId: "emb-own-2", studentId: "student-1", similarity: 0.11 },
+      { embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.19 },
+      { embeddingId: "emb-own-2", studentId: "student-1", rawSimilarity: 0.11 },
     ],
   });
 
@@ -717,7 +717,7 @@ test("the own-sample query is scoped to one student at one institution", async (
 test("a staff mismatch says whose photograph to check; a student's does not name anyone", async () => {
   const mismatch = {
     storedModels: [MODEL],
-    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.19 }],
+    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.19 }],
   };
   const staff = harness(mismatch);
   const staffResult = await enrollFaceForStudentRequest(
@@ -762,7 +762,7 @@ test("a replacement is not checked against the templates it is about to retire",
   // check ran here, that student would have no way back in.
   const h = harness({
     storedModels: [MODEL],
-    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.05 }],
+    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.05 }],
   });
 
   const result = await replaceFaceEnrollmentRequest(
@@ -777,7 +777,7 @@ test("a replacement is not checked against the templates it is about to retire",
 
 test("re-submitting the same photograph is reported, not stored twice", async () => {
   const h = harness({
-    neighbours: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.999 }],
+    neighbours: [{ embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.999 }],
   });
 
   const result = await enrollFaceForStudentRequest(
@@ -794,7 +794,7 @@ test("re-submitting the same photograph is reported, not stored twice", async ()
 test("a second, genuinely different photograph of the same student is stored", async () => {
   const h = harness({
     storedModels: [MODEL],
-    neighbours: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.85 }],
+    neighbours: [{ embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.85 }],
   });
 
   const result = await enrollFaceForStudentRequest(
@@ -986,7 +986,7 @@ test("replacing with the same photograph is allowed, because that is the ordinar
   // vector. Refusing it as a duplicate would make replacement useless.
   const h = harness({
     storedModels: [MODEL],
-    neighbours: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.999 }],
+    neighbours: [{ embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.999 }],
   });
   const result = await replaceFaceEnrollmentRequest(
     staffAdmin(),
@@ -1001,7 +1001,7 @@ test("a replacement is still refused when the face belongs to another student", 
   // safety check is not a step replacement can skip.
   const h = harness({
     students: [student(), student({ id: "student-2", userId: "u2", studentCode: "S-002" })],
-    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", similarity: 0.95 }],
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.95 }],
   });
   const result = await replaceFaceEnrollmentRequest(
     staffAdmin(),
@@ -1409,4 +1409,84 @@ test("gallery: replace skips the own-person check, retires old samples and relea
   assert.equal(g.replacedWith.length, 1);
   // Once before sending (stale faces), once after retiring.
   assert.equal(g.released, 2);
+});
+
+test("enrollment stops when the model's scale cannot be established", async () => {
+  // Without model-info there is no way to know what the duplicate and
+  // collision scans' numbers mean. Storing a template on the strength of a
+  // check that did not mean what it said is the one mistake here that cannot
+  // be undone by retrying — so this refuses, retryably, before the
+  // photograph is sent anywhere.
+  const h = harness({ storedModels: [MODEL] });
+  h.deps.faceModelInfo = async () => {
+    throw new Error("down");
+  };
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.ok === false && result.reason, "service_error");
+  assert.equal(result.ok === false && result.retryable, true);
+  assert.equal(h.inserted.length, 0);
+});
+
+test("enrollment stops when a production model publishes no score calibration", async () => {
+  const h = harness({ storedModels: [MODEL] });
+  h.deps.faceModelInfo = async () => ({
+    ...MODEL_INFO,
+    commercialUse: "permitted",
+    productionEligible: true,
+    templateKind: "embedding",
+    calibration: null,
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "service_error");
+  assert.equal(h.inserted.length, 0);
+});
+
+test("a collision scan on a calibrated backend uses the product's scale", async () => {
+  // The neighbour is at 0.94 raw — two different people for the dlib
+  // recogniser, and 0.518 calibrated. Read raw it would refuse this student's
+  // own enrollment as somebody else's face; calibrated it is a flag, and the
+  // sample is still not stored.
+  const h = harness({
+    students: [
+      student(),
+      student({ id: "student-2", userId: "u2", studentCode: "S-002", firstName: "Rohan", lastName: "Gupta" }),
+    ],
+    storedModels: [MODEL],
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.94 }],
+  });
+  h.deps.faceModelInfo = async () => ({
+    ...MODEL_INFO,
+    calibration: {
+      id: "test",
+      knots: [
+        { raw: -1, calibrated: -1 },
+        { raw: 0.93, calibrated: 0.45 },
+        { raw: 0.955, calibrated: 0.62 },
+        { raw: 1, calibrated: 1 },
+      ],
+      rawAmbiguityMargin: 0.01,
+    },
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "ambiguous_identity");
+  assert.equal(h.inserted.length, 0);
 });

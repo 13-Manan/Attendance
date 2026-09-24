@@ -5,6 +5,7 @@ embedding dimension or request/response shape must be made in both places
 and treated as a contract version bump (FACE_AI_CONTRACT_VERSION).
 """
 
+from itertools import pairwise
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -381,6 +382,7 @@ class EmbedResponse(BaseModel):
     embedding_dim: int = Field(alias="embeddingDim")
     weights_version: str = Field(alias="weightsVersion")
     preprocessing_version: str = Field(alias="preprocessingVersion")
+    alignment_version: str | None = Field(default=None, alias="alignmentVersion")
     aligned: bool
 
 
@@ -399,6 +401,10 @@ class EnrollAccepted(BaseModel):
     embedding_dim: int = Field(alias="embeddingDim")
     weights_version: str = Field(alias="weightsVersion")
     preprocessing_version: str = Field(alias="preprocessingVersion")
+    # Stored with the template so that an alignment change can be traced
+    # without parsing modelVersion. None for a backend with no alignment of
+    # its own.
+    alignment_version: str | None = Field(default=None, alias="alignmentVersion")
     aligned: bool
 
 
@@ -467,8 +473,12 @@ class MatchScore(BaseModel):
     model_config = _CONFIG
 
     student_id: str = Field(alias="studentId")
+    #: On the product's scale: after the backend's calibration, when it has
+    #: one. This is what the thresholds were applied to.
     similarity: float
     status: MatchStatus
+    #: The cosine similarity before calibration, kept for audit.
+    raw_similarity: float | None = Field(default=None, alias="rawSimilarity")
 
 
 class MatchResponse(BaseModel):
@@ -522,6 +532,56 @@ IdentificationStatus = Literal[
 ]
 
 
+class CalibrationKnot(BaseModel):
+    model_config = _CONFIG
+
+    raw: float
+    calibrated: float
+
+
+class ScoreCalibration(BaseModel):
+    """How to read one recogniser's raw cosine similarity on the product's
+    scale.
+
+    apps/web's thresholds (``presentMin`` 0.62 and ``reviewMin`` 0.45 by
+    default) are numbers on one scale. A different recogniser puts genuine and
+    impostor pairs somewhere else entirely. dlib's ResNet, for example, scores
+    most pairs of different people above 0.8. So a backend whose raw scale
+    differs publishes a monotone piecewise-linear map. Every similarity passes
+    through it before any threshold sees it, and the raw value is kept next
+    to it for audit.
+
+    The knots come from a measured calibration run (docs/CALIBRATION.md) and
+    are not a guess. A backend without a calibration is read as-is.
+    """
+
+    model_config = _CONFIG
+
+    #: Names the calibration run, so a stored result can say which map
+    #: produced its score.
+    id: str = Field(min_length=1, max_length=128)
+    #: Start at raw -1 and end at raw 1. Both columns strictly increase.
+    knots: list[CalibrationKnot]
+    #: Top two raw scores closer than this make a face ambiguous. This
+    #: applies on top of the institution's margin, which is on the calibrated
+    #: scale.
+    raw_ambiguity_margin: float = Field(alias="rawAmbiguityMargin", ge=0.0, lt=1.0)
+
+    @field_validator("knots")
+    @classmethod
+    def _monotone(cls, knots: list[CalibrationKnot]) -> list[CalibrationKnot]:
+        if len(knots) < 2:
+            raise ValueError("a calibration needs at least two knots")
+        if knots[0].raw != -1.0 or knots[-1].raw != 1.0:
+            raise ValueError("calibration knots must span raw -1 to 1")
+        for low, high in pairwise(knots):
+            if not (high.raw > low.raw and high.calibrated > low.calibrated):
+                raise ValueError("calibration knots must strictly increase")
+        if not all(-1.0 <= k.calibrated <= 1.0 for k in knots):
+            raise ValueError("calibrated values must lie in [-1, 1]")
+        return knots
+
+
 class FaceModelInfo(BaseModel):
     model_config = _CONFIG
 
@@ -540,6 +600,12 @@ class FaceModelInfo(BaseModel):
     stages: list[PipelineStageInfo] = Field(default_factory=list)
     template_kind: TemplateKind = Field(default="embedding", alias="templateKind")
     identification: IdentificationStatus = "not_applicable"
+    #: Bumped whenever the landmark-to-template mapping changes. Already part
+    #: of ``modelVersion`` when set; reported on its own so nobody has to
+    #: parse that string.
+    alignment_version: str | None = Field(default=None, alias="alignmentVersion")
+    #: None means that raw similarities are already on the product's scale.
+    calibration: ScoreCalibration | None = None
 
 
 # `/v1/model-info` returns FaceModelInfo directly — no wrapper object, so the

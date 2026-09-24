@@ -112,8 +112,13 @@ test("vectors of different lengths score 0 rather than comparing a prefix", () =
 
 const THRESHOLDS = { presentMin: 0.62, reviewMin: 0.45 };
 
-function neighbour(studentId: string, score: number, id = `emb-${studentId}-${score}`): NeighbourTemplate {
-  return { embeddingId: id, studentId, similarity: score };
+function neighbour(
+  studentId: string,
+  score: number,
+  id = `emb-${studentId}-${score}`,
+  rawScore = score,
+): NeighbourTemplate {
+  return { embeddingId: id, studentId, similarity: score, rawSimilarity: rawScore };
 }
 
 test("a face that recognition would confidently call somebody else is refused", () => {
@@ -415,4 +420,78 @@ test("a student at the cap has no free slots and the number never goes negative"
   // with rows already stored. The count must still read as "none free".
   const overCap = new Array(MAX_SAMPLES_PER_STUDENT + 2).fill(RUNNING);
   assert.equal(summariseEnrollmentStatus(overCap, RUNNING).remainingSlots, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Collisions on a backend whose raw scale is not the product's
+// ---------------------------------------------------------------------------
+
+/**
+ * The caller has already mapped these rows onto the product's scale, so the
+ * two numbers differ: `similarity` is what the thresholds are written
+ * against, `rawSimilarity` is the recogniser's own cosine.
+ */
+function calibratedNeighbour(
+  studentId: string,
+  calibrated: number,
+  raw: number,
+): NeighbourTemplate {
+  return {
+    embeddingId: `emb-${studentId}`,
+    studentId,
+    similarity: calibrated,
+    rawSimilarity: raw,
+  };
+}
+
+test("a high raw score that is not a confident match is flagged, not refused outright", () => {
+  // 0.94 raw is two different people for the dlib recogniser, and calibrates
+  // to 0.518. Read raw it clears presentMin and every enrollment in the
+  // institution would be refused as somebody else's face.
+  const collision = classifyEnrollmentCollision(
+    [calibratedNeighbour("student-other", 0.518, 0.94)],
+    "student-target",
+    THRESHOLDS,
+  );
+  assert.equal(collision.kind, "ambiguous_with_other_student");
+});
+
+test("a genuinely colliding face is still refused on the calibrated scale", () => {
+  const collision = classifyEnrollmentCollision(
+    [calibratedNeighbour("student-other", 0.75, 0.97)],
+    "student-target",
+    THRESHOLDS,
+  );
+  assert.equal(collision.kind, "belongs_to_other_student");
+});
+
+test("the same photograph twice is detected by the raw score, not the calibrated one", () => {
+  // Identical vectors score 1.0 raw. Their calibrated score is also 1.0 here,
+  // but the test that matters is the one below: a re-submission whose
+  // calibrated score sits well under 0.99 must still be caught.
+  const collision = classifyEnrollmentCollision(
+    [calibratedNeighbour("student-target", 0.62, 0.995)],
+    "student-target",
+    THRESHOLDS,
+  );
+  assert.equal(collision.kind, "already_enrolled");
+});
+
+test("two genuine samples of one student are not mistaken for the same photograph", () => {
+  const collision = classifyEnrollmentCollision(
+    [calibratedNeighbour("student-target", 0.95, 0.985)],
+    "student-target",
+    THRESHOLDS,
+  );
+  assert.equal(collision.kind, "none");
+});
+
+test("an own-sample mismatch is judged on the calibrated scale", () => {
+  // 0.9 raw calibrates to 0.427, below reviewMin: this is not the same
+  // person. Read raw it would sail past and the wrong face would be stored.
+  const mismatch = classifyOwnSampleMismatch([{ similarity: 0.427 }], THRESHOLDS);
+  assert.equal(mismatch.kind, "does_not_match_own_samples");
+
+  const fine = classifyOwnSampleMismatch([{ similarity: 0.52 }], THRESHOLDS);
+  assert.equal(fine.kind, "none");
 });

@@ -25,10 +25,15 @@ cannot tell us what arrived.
 
 ## On not committing the weights
 
-The artefacts are ~37 MiB together and are not in git. Binary blobs in a source
+The artefacts are ~60 MiB together and are not in git. Binary blobs in a source
 repository are a licensing question as much as a size one — see LICENSING.md,
-where the commercial-use status of these very weights is still ``unclear``.
-``scripts/fetch_models.py`` acquires them reproducibly instead.
+where the commercial-use status of the YuNet/SFace weights is still
+``unclear``. ``scripts/fetch_models.py`` acquires them reproducibly instead.
+
+The dlib recogniser is the exception that proves the rule: its weights are
+public domain (docs/MODEL_LICENSES.md), so the production image bakes it in at
+build time — fetched by the same script, verified against the same pin, and
+checked again at startup. Nothing is downloaded while the service runs.
 """
 
 from __future__ import annotations
@@ -60,6 +65,13 @@ class ModelArtifact:
     #: and inventing a version number the upstream does not publish would make
     #: provenance harder to trace, not easier.
     upstream_release: str
+    #: Set when ``source_url`` serves a compressed file. The download is then
+    #: verified twice: the archive against ``archive_sha256``, and the
+    #: decompressed bytes against ``sha256``. Only the decompressed file is
+    #: kept, and only it is verified at startup.
+    archive_format: str | None = None
+    archive_sha256: str | None = None
+    archive_size_bytes: int | None = None
 
 
 #: YuNet face detector. 227 KiB.
@@ -88,7 +100,46 @@ SFACE = ModelArtifact(
     upstream_release="2021dec",
 )
 
+#: dlib's ResNet face recogniser (``dlib_face_recognition_resnet_model_v1``).
+#: 21.4 MiB compressed and 22.5 MiB on disk. It emits a 128-d descriptor from a
+#: 150x150 aligned chip. Used by the ``azure_detection_own_recognition`` backend.
+#:
+#: The URL pins the upstream commit that added the file (2017-02-11). The
+#: identical bytes are also served at http://dlib.net/files/. Both hashes were
+#: computed from downloads of both sources, which matched byte for byte. They
+#: were not copied from a README. The licence evidence is in
+#: docs/MODEL_LICENSES.md.
+DLIB_RESNET = ModelArtifact(
+    role="recognizer",
+    filename="dlib_face_recognition_resnet_model_v1.dat",
+    sha256="55533b28a95800a551ba546ba62fe69625c7e95a7061c338adffead08719da30",
+    size_bytes=22466066,
+    source_url=(
+        "https://github.com/davisking/dlib-models/raw/"
+        "2a61575dd45d818271c085ff8cd747613a48f20d/"
+        "dlib_face_recognition_resnet_model_v1.dat.bz2"
+    ),
+    upstream_release="v1 (davisking/dlib-models@2a61575)",
+    archive_format="bz2",
+    archive_sha256="abb1f61041e434465855ce81c2bd546e830d28bcbed8d27ffbe5bb408b11553a",
+    archive_size_bytes=21428389,
+)
+
+#: What the ``opencv`` backend loads. Its name predates the other sets.
 REQUIRED_ARTIFACTS: tuple[ModelArtifact, ...] = (YUNET, SFACE)
+
+#: What the ``azure_detection_own_recognition`` backend loads. Azure does the
+#: detecting, so there is no local detector to pin.
+DLIB_ARTIFACTS: tuple[ModelArtifact, ...] = (DLIB_RESNET,)
+
+#: Named sets for ``scripts/fetch_models.py``. The production image fetches
+#: only ``dlib``: YuNet and SFace are not cleared for commercial use and do
+#: not belong in an image that serves institutions.
+ARTIFACT_SETS: dict[str, tuple[ModelArtifact, ...]] = {
+    "opencv": REQUIRED_ARTIFACTS,
+    "dlib": DLIB_ARTIFACTS,
+    "all": REQUIRED_ARTIFACTS + DLIB_ARTIFACTS,
+}
 
 
 def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -155,6 +206,16 @@ def verify_artifact(model_dir: str | Path, artifact: ModelArtifact) -> Path:
     return path
 
 
-def verify_all(model_dir: str | Path) -> dict[str, Path]:
-    """Verify every required artefact. Returns role -> path."""
-    return {a.role: verify_artifact(model_dir, a) for a in REQUIRED_ARTIFACTS}
+def verify_all(
+    model_dir: str | Path,
+    artifacts: tuple[ModelArtifact, ...] = REQUIRED_ARTIFACTS,
+) -> dict[str, Path]:
+    """Verify every artefact in a set. Returns role -> path.
+
+    Keyed by role, so a set must not hold two artefacts with the same role.
+    ``ARTIFACT_SETS["all"]`` does, which is why it is for fetching only.
+    """
+    roles = [a.role for a in artifacts]
+    if len(set(roles)) != len(roles):
+        raise ValueError(f"artefact set has duplicate roles: {roles}")
+    return {a.role: verify_artifact(model_dir, a) for a in artifacts}

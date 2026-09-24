@@ -106,6 +106,51 @@ export interface FaceModelInfo {
   /** Whether a gallery backend can identify people right now. See
    * IdentificationStatus. Absent from an older service. */
   identification?: IdentificationStatus;
+  /** Structured component: the landmark-to-template mapping. Already part of
+   * `modelVersion` when set; reported separately so nobody has to parse that
+   * string to know whether two templates were aligned the same way. Absent
+   * from a backend that does no alignment of its own. */
+  alignmentVersion?: string | null;
+  /** How to read this backend's raw similarity scores. See ScoreCalibration.
+   * Absent or null means the raw scale IS the product's scale. */
+  calibration?: ScoreCalibration | null;
+}
+
+/**
+ * The map from one backend's raw similarity onto the product's scale.
+ *
+ * Different recognisers put "the same person" at very different numbers. A
+ * raw cosine of 0.94 is two different people for dlib's ResNet and a confident
+ * match for a model trained with a margin loss. The product's thresholds
+ * (present 0.62, review 0.45) are set by institutions who cannot be asked to
+ * know which recogniser is deployed, so a backend whose raw scale differs
+ * publishes this map and apps/web applies it to every score before any
+ * threshold sees it.
+ *
+ * Piecewise linear between `knots`, which must span raw -1 to 1 and increase
+ * strictly in both coordinates — so the mapping is monotone and order is
+ * preserved. The values come from a measured evaluation, never a guess; the
+ * evidence is in services/face-ai/docs/CALIBRATION.md.
+ */
+export interface ScoreCalibration {
+  /** Identifies the measurement this map came from, e.g.
+   * "dlib-resnet-v1.azure-d03.2026-09-24". Recorded with results so a
+   * recalibration is visible in the audit trail. */
+  id: string;
+  knots: CalibrationKnot[];
+  /** Minimum separation, ON THE RAW SCALE, between the top two candidates for
+   * a match to count as unambiguous. A raw margin as well as the calibrated
+   * one because near the top of the scale calibration compresses differences:
+   * two students 0.002 raw apart are the same face to this recogniser however
+   * far apart their calibrated scores land. */
+  rawAmbiguityMargin: number;
+}
+
+export interface CalibrationKnot {
+  /** The backend's own similarity. */
+  raw: number;
+  /** What it means on the product's 0..1 scale. */
+  calibrated: number;
 }
 
 export type TemplateKind = "embedding" | "gallery";
@@ -481,9 +526,15 @@ export const DEFAULT_MATCH_THRESHOLDS: MatchThresholds = {
 
 export interface MatchCandidateScore {
   studentId: string;
-  /** Cosine similarity in [-1, 1]. */
+  /** Similarity on the PRODUCT's scale, in [-1, 1] — the number the
+   * thresholds are written against. Equal to `rawSimilarity` unless the
+   * backend published a ScoreCalibration. */
   similarity: number;
   status: MatchStatus;
+  /** The backend's own cosine similarity, before calibration. Reported so a
+   * score stays explainable and a recalibration can be replayed against
+   * stored results. Absent from an older service. */
+  rawSimilarity?: number;
 }
 
 export interface MatchRequest extends FaceImageInput {

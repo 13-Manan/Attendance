@@ -45,6 +45,10 @@ def test_model_info_exposes_full_provenance(client):
         # An embedding backend: apps/web stores and compares the vectors.
         "templateKind": "embedding",
         "identification": "not_applicable",
+        # No alignment of its own, and no calibration: its raw scale is read
+        # as the product's.
+        "alignmentVersion": None,
+        "calibration": None,
         # The mock describes itself as what it is: a hash, not a recogniser.
         "stages": [
             {
