@@ -4,6 +4,7 @@ import { requirePermission, requireSameInstitution } from "@/modules/authorizati
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { getStudentById } from "@/modules/students/repository";
 import type { Student } from "@/modules/students/types";
+import { releaseGalleryFaces, type GalleryReleaseResult } from "@/modules/face-gallery/service";
 import * as repo from "./repository";
 import {
   classroomImageExpired,
@@ -71,6 +72,13 @@ export interface PrivacyDeps {
   deleteClassroomImages?: typeof repo.deleteClassroomImages;
   getStudentById?: (id: string) => Promise<Student | null>;
   audit?: (input: RecordAuditLogInput) => Promise<void>;
+  /** Deletes the provider-side faces of gallery-backed samples (Azure AI
+   * Face). See modules/face-gallery/service.ts. */
+  releaseGalleryFaces?: (
+    institutionId: string,
+    studentIds: string[],
+    options: { includeActive: boolean },
+  ) => Promise<GalleryReleaseResult>;
   now?: () => Date;
 }
 
@@ -87,6 +95,10 @@ function deps(overrides: PrivacyDeps) {
     deleteClassroomImages: overrides.deleteClassroomImages ?? repo.deleteClassroomImages,
     getStudentById: overrides.getStudentById ?? getStudentById,
     audit: overrides.audit ?? ((input: RecordAuditLogInput) => defaultRecordAuditLog(input)),
+    releaseGalleryFaces:
+      overrides.releaseGalleryFaces ??
+      ((institutionId: string, studentIds: string[], options: { includeActive: boolean }) =>
+        releaseGalleryFaces(institutionId, studentIds, options)),
     now: overrides.now ?? (() => new Date()),
   };
 }
@@ -233,6 +245,20 @@ export async function runRetentionSweep(
     deactivateForStudent,
   );
   const deactivatedForAge = await d.deactivateTemplates(institutionId, deactivateForAge);
+
+  // Gallery-backed samples also live at the provider. Their faces go before
+  // any row is deleted, because the placement rows are the only record of
+  // where they are; `deleteTemplates` keeps any row whose faces could not be
+  // removed, and the next sweep retries it.
+  const touched = new Set([...deactivateForStudent, ...deactivateForAge, ...toDelete]);
+  const touchedStudents = [
+    ...new Set(candidates.filter((c) => touched.has(c.id)).map((c) => c.studentId)),
+  ];
+  if (touchedStudents.length > 0) {
+    await d
+      .releaseGalleryFaces(institutionId, touchedStudents, { includeActive: false })
+      .catch(() => null);
+  }
   const deletedTemplates = await d.deleteTemplates(institutionId, toDelete);
 
   const images = await d.listClassroomImages(institutionId);
@@ -309,6 +335,18 @@ export async function deleteStudentFaceData(
   // deletions to an administrator who believes they erased a record is the
   // worse of the two failures.
   requireSameInstitution(actor, student.institutionId);
+
+  // Faces held by a gallery provider first, all of them. An erasure that
+  // deleted the rows while the provider still held the face would report a
+  // deletion that had not happened, so a provider failure refuses instead.
+  const released = await d.releaseGalleryFaces(institutionId, [studentId], {
+    includeActive: true,
+  });
+  if (released.pending > 0) {
+    throw new RetentionPolicyError(
+      "The face recognition provider could not be reached, so this student's face data was not erased. Nothing was deleted — try again in a few minutes.",
+    );
+  }
 
   const ids = await d.listTemplateIdsForStudent(institutionId, studentId);
   const deletedTemplates = await d.deleteTemplates(institutionId, ids);

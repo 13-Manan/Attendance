@@ -53,9 +53,13 @@ param faceAiImage = 'mcr.microsoft.com/k8se/quickstart:latest'
 param migrateImage = 'mcr.microsoft.com/k8se/quickstart:latest'
 param enableKeyVaultSecretRefs = false
 
-// "mock" is the only backend whose weights are licence-cleared, because it has
-// none. See docs/adr/0006 and services/face-ai/app/models/LICENSING.md.
-param faceModelBackend = 'mock'
+// Azure AI Face: a managed service, so no weights to licence. Its key is the
+// Key Vault secret AZURE-FACE-KEY and is attached only with
+// enableKeyVaultSecretRefs (pass 2), which the live apps already run with.
+// Identification needs Microsoft's Limited Access approval; until then the
+// service detects only. See docs/AZURE_FACE.md.
+param faceModelBackend = 'azure'
+param azureFaceEndpoint = 'https://attendance-azure-face.cognitiveservices.azure.com/'
 
 param captureRetentionDays = 30
 

@@ -123,39 +123,28 @@ def enroll(
     template exists.
 
     So the stages run in the order ``base.py`` describes them: detect, then
-    align with what the detector found, then embed the aligned crop. A backend
+    align with what the detector found, then embed the aligned crop — inside
+    ``enroll_image``, so a backend can do all of it from a single decode. A backend
     whose detector yields no landmarks still works — ``aligned`` comes back
     false and says so honestly, rather than the route guaranteeing it could
     never be true.
     """
-    assessment = model.assess_quality(request.image_base64)
-    if assessment.reason != "ok":
+    outcome = model.enroll_image(request.image_base64)
+    if outcome.assessment.reason != "ok" or outcome.embedding is None:
         return EnrollRejected(
-            assessment=assessment,
+            assessment=outcome.assessment,
             modelName=model.name,
             modelVersion=model.version,
         )
-
-    # An `ok` assessment means exactly one face, so the first is the subject.
-    # A backend that disagrees with itself here (quality says one face,
-    # detection finds none) degrades to an unaligned crop rather than failing
-    # an enrolment somebody is standing in front of.
-    detection = model.detect(request.image_base64)
-    face = detection.faces[0] if detection.faces else None
-    bounding_box = face.bounding_box if face else None
-    landmarks = face.landmarks if face else None
-
-    aligned = model.align(request.image_base64, bounding_box, landmarks)
-    embedding = model.embed(request.image_base64, bounding_box, landmarks)
     return EnrollAccepted(
-        assessment=assessment,
-        embedding=embedding,
+        assessment=outcome.assessment,
+        embedding=outcome.embedding,
         modelName=model.name,
         modelVersion=model.version,
         embeddingDim=model.embedding_dim,
         weightsVersion=model.weights_version,
         preprocessingVersion=model.preprocessing_version,
-        aligned=aligned.aligned,
+        aligned=outcome.aligned,
     )
 
 

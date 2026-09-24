@@ -17,7 +17,7 @@ import type { TemplateModel } from "./policy";
  * ## What it must never contain
  *
  * A vector, a photograph, or a URL to one. `FaceEmbedding.embedding` is an
- * `Unsupported("vector(512)")` column that the Prisma client cannot select,
+ * `Unsupported("vector(128)")` column that the Prisma client cannot select,
  * and `sourceImageUrl` is not selected here either. Every query in this file
  * is a count or a group-by: the numbers describe the coverage, and nothing
  * leaves the database that could describe a face.

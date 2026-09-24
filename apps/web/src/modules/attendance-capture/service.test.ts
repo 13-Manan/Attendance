@@ -96,8 +96,12 @@ function makeDetectResponse(faceCount: number, confidence = 0.95): DetectRespons
   };
 }
 
-/** Swallows the metadata write so analyze tests need no database. */
-const NO_RECORD = { recordCaptureAnalysis: async () => {} };
+/** Swallows the metadata write so analyze tests need no database, and
+ * answers the model-info read so they need no face-ai either. */
+const NO_RECORD = {
+  recordCaptureAnalysis: async () => {},
+  fetchModelInfo: async () => ({ productionEligible: false }),
+};
 
 /** One per-capture verdict, as the server records it. */
 function analysis(overrides: Partial<CaptureImageAnalysis> = {}): CaptureImageAnalysis {
@@ -340,6 +344,45 @@ test("analyzeCaptureImage: happy path returns face count and never leaks embeddi
     assert.equal("embedding" in result, false);
     assert.equal("embeddings" in result, false);
   }
+});
+
+test("analyzeCaptureImage: production eligibility comes from the service's model report", async () => {
+  const faculty = makeUser({ permissions: ["attendanceSession.capture", "cohort.manage"] });
+  const run = (fetchModelInfo: () => Promise<{
+    productionEligible: boolean;
+    modelName?: string;
+    modelVersion?: string;
+  }>) =>
+    analyzeCaptureImage(
+      faculty,
+      { sessionId: "sess-1", sequenceNumber: 1, imageBase64: "a".repeat(200) },
+      {
+        getSessionById: async () => makeSession({ status: "CAPTURING" }),
+        faceDetect: async () => makeDetectResponse(3, 0.9),
+        recordCaptureAnalysis: async () => {},
+        fetchModelInfo,
+      },
+    );
+  const eligible = (r: Awaited<ReturnType<typeof run>>) => r.ok && r.productionEligible;
+
+  // The same build that ran detection, reported eligible: believed.
+  assert.equal(
+    eligible(await run(async () => ({ productionEligible: true, modelName: "mock", modelVersion: "0.1.0+pp1" }))),
+    true,
+  );
+  // Eligible, but for a different build than the one that just detected —
+  // the service changed model between the two calls. Not believed.
+  assert.equal(
+    eligible(await run(async () => ({ productionEligible: true, modelName: "other", modelVersion: "1" }))),
+    false,
+  );
+  // The report could not be read: the safe answer, not a crash.
+  assert.equal(
+    eligible(await run(async () => {
+      throw new Error("face-ai model-info failed: 503");
+    })),
+    false,
+  );
 });
 
 test("analyzeCaptureImage: zero-face capture is reported as no_faces with a retake hint", async () => {

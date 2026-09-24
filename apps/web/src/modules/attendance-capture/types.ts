@@ -1,3 +1,4 @@
+import type { IdentificationStatus } from "@attendance/shared-types";
 import type { AttendanceMode, ConfidenceThresholds } from "@/modules/institutions/types";
 import type { AttendanceSession, SessionStatus } from "@/modules/sessions/types";
 
@@ -64,6 +65,9 @@ export interface CaptureImageAnalysis {
    * when this is false so faculty cannot mistake the preview for a real
    * attendance mark. */
   productionEligible: boolean;
+  /** Gallery providers only: whether identification is allowed right now.
+   * Absent for embedding backends. */
+  identification?: IdentificationStatus;
   /** Coarse quality label the UI shows next to the thumbnail. */
   qualityLabel: "good" | "acceptable" | "poor" | "no_faces";
   qualityHint: string;
@@ -107,6 +111,8 @@ export interface CaptureSessionSummary {
   modelName: string;
   modelVersion: string;
   productionEligible: boolean;
+  /** From the latest capture, when the provider reports it. */
+  identification?: IdentificationStatus;
   status: SessionStatus;
   enrolledStudentCount: number;
   /** True when at least one capture produced faces the detector was happy

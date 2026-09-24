@@ -100,8 +100,11 @@ param migrateImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 @description('Pass 2 switch — see modules/app.bicep header.')
 param enableKeyVaultSecretRefs bool = false
 
-@description('Face AI backend. Only "mock" is licence-cleared today (ADR-0006).')
+@description('Face AI backend: "mock", or "azure" for Azure AI Face (docs/AZURE_FACE.md).')
 param faceModelBackend string = 'mock'
+
+@description('Azure AI Face endpoint, used when faceModelBackend is "azure".')
+param azureFaceEndpoint string = ''
 
 @description('Days before classroom captures are deleted by lifecycle policy.')
 param captureRetentionDays int = 30
@@ -202,6 +205,7 @@ module apps 'modules/app.bicep' = {
     faceAiImage: faceAiImage
     enableKeyVaultSecretRefs: enableKeyVaultSecretRefs
     faceModelBackend: faceModelBackend
+    azureFaceEndpoint: azureFaceEndpoint
     tags: tags
   }
 }

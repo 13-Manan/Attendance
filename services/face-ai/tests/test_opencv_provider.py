@@ -48,6 +48,7 @@ from app.models.opencv_provider import (
     ImageDecodeError,
     ModelNotLoadedError,
     OpenCVFaceModelProvider,
+    SFaceEmbedder,
 )
 from app.schemas import (
     EMBEDDING_DIMENSION,
@@ -113,9 +114,9 @@ class StubDetector:
     """Stands in for ``cv2.FaceDetectorYN`` to inject a malformed result.
 
     The real object's methods are read-only C++ bindings, so a fault cannot be
-    patched onto it — the whole collaborator is replaced instead. ``monkeypatch``
-    restores the original, which matters because the provider fixture is
-    module-scoped.
+    patched onto it — the whole collaborator inside the ``YuNetDetector``
+    stage is replaced instead. ``monkeypatch`` restores the original, which
+    matters because the provider fixture is module-scoped.
     """
 
     def __init__(self, result):
@@ -128,18 +129,25 @@ class StubDetector:
         return (1, self._result)
 
 
-class StubRecognizer:
-    """Delegates alignment to the real recogniser, fakes ``feature``."""
+class StubEmbedder:
+    """Stands in for the ``SFaceEmbedder`` stage and returns a fixed row per
+    crop, so a malformed network output can be injected."""
 
-    def __init__(self, real, feature_result):
-        self._real = real
-        self._feature_result = feature_result
+    descriptor = SFaceEmbedder.descriptor
 
-    def alignCrop(self, image, row):
-        return self._real.alignCrop(image, row)
+    def __init__(self, row):
+        self._row = np.asarray(row, dtype=np.float32).reshape(1, -1)
 
-    def feature(self, _crop):
-        return self._feature_result
+    def load(self):
+        return None
+
+    def embed_crops(self, crops):
+        return np.repeat(self._row, len(crops), axis=0)
+
+
+def _patch_detector(monkeypatch, provider, result):
+    monkeypatch.setattr(provider.detector, "_detector", StubDetector(result))
+    monkeypatch.setattr(provider.detector, "_input_size", None)
 
 
 # ===========================================================================
@@ -304,17 +312,14 @@ def test_a_malformed_detector_result_reports_no_faces_rather_than_guessing(
 ):
     # Conservative direction on purpose: "no faces" routes every student to
     # review. Interpreting a malformed row could invent a match.
-    stub = StubDetector(np.zeros((2, 4), np.float32))
-    monkeypatch.setattr(provider, "_detector", stub)
-    monkeypatch.setattr(provider, "_detector_input_size", None)
+    _patch_detector(monkeypatch, provider, np.zeros((2, 4), np.float32))
     result = provider.detect(noise_image_b64(1))
     assert result.faces == []
 
 
 @needs_models
 def test_a_none_detector_result_reports_no_faces(provider, monkeypatch):
-    monkeypatch.setattr(provider, "_detector", StubDetector(None))
-    monkeypatch.setattr(provider, "_detector_input_size", None)
+    _patch_detector(monkeypatch, provider, None)
     assert provider.detect(noise_image_b64(1)).faces == []
 
 
@@ -331,9 +336,9 @@ def test_detector_tuning_reaches_opencv():
         model_dir=str(MODEL_DIR), score_threshold=0.9, nms_threshold=0.1, top_k=17
     )
     p.load()
-    assert p._score_threshold == 0.9
-    assert p._nms_threshold == 0.1
-    assert p._top_k == 17
+    assert p.detector._score_threshold == 0.9
+    assert p.detector._nms_threshold == 0.1
+    assert p.detector._top_k == 17
 
 
 @needs_models
@@ -341,9 +346,9 @@ def test_the_detector_input_size_follows_the_frame(provider):
     # YuNet derives its anchor grid from the declared input size; a mismatch
     # puts every box in the wrong place.
     provider.detect(noise_image_b64(3, width=320, height=240))
-    assert provider._detector_input_size == (320, 240)
+    assert provider.detector._input_size == (320, 240)
     provider.detect(noise_image_b64(3, width=640, height=480))
-    assert provider._detector_input_size == (640, 480)
+    assert provider.detector._input_size == (640, 480)
 
 
 # ===========================================================================
@@ -448,7 +453,7 @@ def test_sface_itself_does_not_emit_unit_vectors(provider):
     """
     image = provider._decode(noise_image_b64(11))
     crop, _ = provider._aligned_crop(image, BOX, LANDMARKS)
-    raw = np.asarray(provider._recognizer.feature(crop), dtype=np.float64).reshape(-1)
+    raw = provider.embedder.embed_crops([crop])[0].astype(np.float64)
     assert raw.shape == (128,)
     assert abs(float(np.linalg.norm(raw)) - 1.0) > 0.1
 
@@ -489,11 +494,7 @@ def test_channel_order_matters_which_proves_preprocessing_is_not_double_applied(
 def test_a_recogniser_returning_the_wrong_width_is_refused(provider, monkeypatch):
     image = provider._decode(noise_image_b64(14))
     crop, _ = provider._aligned_crop(image, BOX, LANDMARKS)
-    monkeypatch.setattr(
-        provider,
-        "_recognizer",
-        StubRecognizer(provider._recognizer, np.zeros((1, 512), np.float32)),
-    )
+    monkeypatch.setattr(provider, "embedder", StubEmbedder(np.zeros(512)))
     with pytest.raises(ModelNotLoadedError) as error:
         provider._embed_crop(crop)
     assert "512" in str(error.value)
@@ -505,11 +506,7 @@ def test_a_zero_vector_is_refused_rather_than_stored(provider, monkeypatch):
     # everything and quietly make one student permanently unrecognisable.
     image = provider._decode(noise_image_b64(15))
     crop, _ = provider._aligned_crop(image, BOX, LANDMARKS)
-    monkeypatch.setattr(
-        provider,
-        "_recognizer",
-        StubRecognizer(provider._recognizer, np.zeros((1, 128), np.float32)),
-    )
+    monkeypatch.setattr(provider, "embedder", StubEmbedder(np.zeros(128)))
     with pytest.raises(ImageDecodeError):
         provider._embed_crop(crop)
 
@@ -518,11 +515,7 @@ def test_a_zero_vector_is_refused_rather_than_stored(provider, monkeypatch):
 def test_a_non_finite_embedding_is_refused(provider, monkeypatch):
     image = provider._decode(noise_image_b64(16))
     crop, _ = provider._aligned_crop(image, BOX, LANDMARKS)
-    monkeypatch.setattr(
-        provider,
-        "_recognizer",
-        StubRecognizer(provider._recognizer, np.full((1, 128), np.nan, np.float32)),
-    )
+    monkeypatch.setattr(provider, "embedder", StubEmbedder(np.full(128, np.nan)))
     with pytest.raises(ImageDecodeError):
         provider._embed_crop(crop)
 
@@ -588,9 +581,7 @@ def test_the_classroom_path_returns_nothing_for_a_frame_with_no_faces(provider):
 def test_the_classroom_path_never_invents_a_face_from_a_malformed_result(
     provider, monkeypatch
 ):
-    stub = StubDetector(np.zeros((3, 4), np.float32))
-    monkeypatch.setattr(provider, "_detector", stub)
-    monkeypatch.setattr(provider, "_detector_input_size", None)
+    _patch_detector(monkeypatch, provider, np.zeros((3, 4), np.float32))
     assert (
         provider.detect_and_embed(
             SessionImageInput(sequenceNumber=2, imageBase64=noise_image_b64(19))
@@ -646,3 +637,24 @@ def test_an_undecodable_image_is_a_400_not_a_500(monkeypatch):
         assert "embedding" not in response.text
     finally:
         reset_model_cache()
+
+
+@needs_models
+def test_batched_embedding_matches_sface_one_crop_at_a_time(provider):
+    """The batched ``cv2.dnn`` path must produce exactly what
+    ``FaceRecognizerSF.feature`` produces per crop — otherwise every template
+    enrolled before batching would silently stop matching."""
+    rng = np.random.default_rng(21)
+    crops = [
+        cv2.GaussianBlur(
+            rng.integers(0, 256, (112, 112, 3)).astype(np.uint8), (0, 0), s
+        )
+        for s in (0.5, 1, 2, 3, 0.5, 1, 2, 3, 1, 2, 4)  # 11: crosses a chunk boundary
+    ]
+    reference = cv2.FaceRecognizerSF.create(
+        model=str(verify_all(MODEL_DIR)["recognizer"]), config=""
+    )
+    single = np.stack([np.asarray(reference.feature(c)).reshape(-1) for c in crops])
+    batched = provider.embedder.embed_crops(crops)
+    assert batched.shape == (11, 128)
+    assert float(np.max(np.abs(batched - single))) < 1e-4

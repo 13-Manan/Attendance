@@ -293,8 +293,15 @@ as recognition latency would be wrong.
 
 ## Current status
 
-**No benchmark has been run against a real dataset or a real model.** The
-mock backend is a deterministic hash stub: running the harness against it
+**Real-model calibration (2026-09-24):** `bench/calibrate_quality.py` was run
+against the `opencv` backend (YuNet + SFace) on 61 public-domain adult portrait
+pairs plus 89 single portraits, kept outside the repository. Results and
+limits: [`docs/FACE_RECOGNITION_CALIBRATION.md`](../../../docs/FACE_RECOGNITION_CALIBRATION.md).
+That model is **not production-approved**; the calibration does not change
+that. The manifest-driven accuracy harness (`python -m bench`) still has no
+consented classroom dataset to run on.
+
+The mock backend is a deterministic hash stub: running the harness against it
 produces ~100% false rejection, which is the correct result for a stub and
 proves only that the harness works. See
 [`../app/models/LICENSING.md`](../app/models/LICENSING.md).

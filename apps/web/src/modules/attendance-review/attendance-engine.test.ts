@@ -6,6 +6,7 @@ import {
   decideCandidate,
   generateAttendanceCandidates,
   getAttendanceReviewBoard,
+  mergeRoundDecision,
 } from "./service.ts";
 import type { AttendanceReviewDeps } from "./service.ts";
 import type { AttendanceRecordRow, SessionDetailRow } from "./repository.ts";
@@ -122,6 +123,10 @@ function runSummary(overrides: Partial<RecognitionRunSummary> = {}): Recognition
     perFace: [],
     perStudent: [],
     unmatchedStudentIds: [],
+    rejectedFaces: {},
+    flaggedFaces: {},
+    unknownFacesTotal: 0,
+    recommendRetake: false,
     ...overrides,
   };
 }
@@ -138,6 +143,7 @@ function suggestion(studentId: string, similarity = 0.9) {
     matchStatus: "MATCHED" as const,
     wasAmbiguous: false,
     downgrades: [],
+    bestQualityFlags: [],
     observations: [],
   };
 }
@@ -413,6 +419,23 @@ test("no recognition outcome produces a final result", () => {
     assert.notEqual(d.finalResult, "ABSENT", `${label} must never mean absent`);
     assert.notEqual(d.finalResult, "PRESENT", `${label} must never mean present`);
   }
+});
+
+test("a detect-only run neither marks nor rules out anybody", () => {
+  // Identification not approved: faces were counted, nobody was compared. The
+  // absence of an aggregate must not read as "compared and not there".
+  const d = decideCandidate({
+    aggregate: undefined,
+    recognitionRan: true,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+    identificationUnavailable: true,
+  });
+  assert.equal(d.aiResult, "NOT_EVALUATED");
+  assert.equal(d.finalResult, "NEEDS_REVIEW");
+  assert.equal(d.note.reason, "identification_unavailable");
+  assert.equal(d.note.wasComparable, false);
+  assert.equal(d.note.aiSuggestion, null);
 });
 
 test("only MATCHED carries a suggestion", () => {
@@ -797,4 +820,221 @@ test("every accepted suggestion carries exactly one correction", async () => {
     assert.equal(forRow.length, 1, `${studentId} has one recorded decision`);
     assert.equal(forRow[0].newResult, "PRESENT");
   }
+});
+
+// ===========================================================================
+// 11. Photographs that could not be used, and photographs added later
+// ===========================================================================
+
+function review(studentId: string, similarity: number, extra: Record<string, unknown> = {}) {
+  return {
+    ...suggestion(studentId, similarity),
+    advisoryResult: "NEEDS_REVIEW" as const,
+    matchStatus: "UNCERTAIN" as const,
+    ...extra,
+  };
+}
+
+function noteOf(store: ReturnType<typeof makeStore>, studentId: string) {
+  const bucket = store.metadata.attendanceReview as {
+    studentNotes: Record<string, { reason: string | null; observations?: Array<{ captureNumber: number }>; bestFaceId: string | null }>;
+    captureImages: Array<{ sequenceNumber: number }>;
+    recognition: Record<string, unknown>;
+  };
+  return { note: bucket.studentNotes[studentId], bucket };
+}
+
+test("a match demoted because the face was too small tells the reviewer so", () => {
+  const decision = decideCandidate({
+    aggregate: review("stu-001", 0.9, {
+      downgrades: ["low_quality_face"],
+      bestQualityFlags: ["face_too_small"],
+    }),
+    recognitionRan: true,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+  });
+  assert.equal(decision.note.reason, "face_too_small");
+  assert.equal(decision.finalResult, "NEEDS_REVIEW");
+  assert.equal(decision.note.aiSuggestion, null, "a flagged face is never a present suggestion");
+});
+
+test("a confusion between students outranks a poor photo as the review reason", () => {
+  const decision = decideCandidate({
+    aggregate: review("stu-001", 0.7, {
+      wasAmbiguous: true,
+      downgrades: ["reassigned_face"],
+      bestQualityFlags: ["blurred"],
+    }),
+    recognitionRan: true,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+  });
+  assert.equal(decision.note.reason, "ambiguous_match");
+});
+
+test("a blurred face in the review band is explained as low quality, not low confidence", () => {
+  const decision = decideCandidate({
+    aggregate: review("stu-001", 0.5, { bestQualityFlags: ["blurred"] }),
+    recognitionRan: true,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+  });
+  assert.equal(decision.note.reason, "low_quality");
+});
+
+test("faces too small to compare leave everyone unresolved for that reason, not as no match", async () => {
+  const store = makeStore(roster(3));
+  await generateAttendanceCandidates(
+    makeUser(),
+    {
+      sessionId: "sess-1",
+      recognition: runSummary({
+        detectedFacesTotal: 0,
+        scoredFacesTotal: 0,
+        rejectedFaces: { face_too_small: 3 },
+        recommendRetake: true,
+      }),
+    },
+    store.deps,
+  );
+  for (const row of store.rows.values()) {
+    assert.equal(row.aiResult, "NOT_EVALUATED", "nobody was ruled out");
+    assert.equal(row.finalResult, "NEEDS_REVIEW");
+  }
+  assert.equal(noteOf(store, "stu-001").note.reason, "face_too_small");
+  assert.equal(noteOf(store, "stu-001").bucket.recognition.recommendRetake, true);
+});
+
+test("a photo with no faces at all is still reported as no face detected", async () => {
+  const store = makeStore(roster(1));
+  await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition: runSummary({ detectedFacesTotal: 0, scoredFacesTotal: 0 }) },
+    store.deps,
+  );
+  assert.equal(noteOf(store, "stu-001").note.reason, "no_face_detected");
+});
+
+test("an added photo can find a student the first photo missed", async () => {
+  const { store } = await seed();
+  assert.equal(store.rows.get("stu-004")!.aiResult, "ABSENT");
+  await generateAttendanceCandidates(
+    makeUser(),
+    {
+      sessionId: "sess-1",
+      recognition: runSummary({ detectedFacesTotal: 1, perStudent: [suggestion("stu-004", 0.8)] }),
+      merge: true,
+    },
+    store.deps,
+  );
+  assert.equal(store.rows.get("stu-004")!.aiResult, "PRESENT");
+  // Not being in the second photo does not undo the first.
+  for (const id of ["stu-001", "stu-002", "stu-003"]) {
+    assert.equal(store.rows.get(id)!.aiResult, "PRESENT", id);
+  }
+  assert.equal(store.rows.get("stu-005")!.aiResult, "ABSENT");
+  assert.equal(store.rows.size, 5, "a merge adds evidence, not rows");
+});
+
+test("an added photo numbers its captures after the ones already taken", async () => {
+  const { store } = await seed();
+  const extra = suggestion("stu-004", 0.8);
+  await generateAttendanceCandidates(
+    makeUser(),
+    {
+      sessionId: "sess-1",
+      recognition: runSummary({
+        detectedFacesTotal: 1,
+        perFace: [{ imageSequenceNumber: 1, qualityScore: 0.7 }] as RecognitionRunSummary["perFace"],
+        perStudent: [{ ...extra, observations: [{ captureNumber: 1, faceIndex: 0, similarity: 0.8, matchStatus: "MATCHED", detectedFaceId: "1:0" }] as typeof extra.observations }],
+      }),
+      merge: true,
+    },
+    store.deps,
+  );
+  const { note, bucket } = noteOf(store, "stu-004");
+  // seed() recorded no capture images, so the added photo is capture 1 here;
+  // run the merge again and the next photo must be capture 2.
+  assert.equal(note.bestFaceId, "1:0");
+  await generateAttendanceCandidates(
+    makeUser(),
+    {
+      sessionId: "sess-1",
+      recognition: runSummary({
+        detectedFacesTotal: 1,
+        perFace: [{ imageSequenceNumber: 1, qualityScore: 0.7 }] as RecognitionRunSummary["perFace"],
+        perStudent: [{ ...suggestion("stu-005", 0.9), bestFaceId: "1:0" }],
+      }),
+      merge: true,
+    },
+    store.deps,
+  );
+  const after = noteOf(store, "stu-005");
+  assert.equal(after.note.bestFaceId, "2:0");
+  assert.deepEqual(after.bucket.captureImages.map((c) => c.sequenceNumber), [1, 2]);
+  assert.equal(after.bucket.recognition.rounds, 3);
+  assert.ok(bucket);
+});
+
+test("a teacher's decision survives an added photo", async () => {
+  const { store } = await seed();
+  await applyReviewDecision(
+    makeUser(),
+    { attendanceRecordId: store.recordIdFor("stu-004"), newResult: "ABSENT" },
+    store.deps,
+  );
+  await generateAttendanceCandidates(
+    makeUser(),
+    {
+      sessionId: "sess-1",
+      recognition: runSummary({ perStudent: [suggestion("stu-004", 0.95)] }),
+      merge: true,
+    },
+    store.deps,
+  );
+  assert.equal(store.rows.get("stu-004")!.finalResult, "ABSENT");
+  assert.equal(store.rows.get("stu-004")!.isManuallyCorrected, true);
+});
+
+test("a student two faces claimed stays in review even if a later photo is clear", () => {
+  const previousRow = {
+    id: "rec-a", sessionId: "sess-1", studentId: "stu-a",
+    aiResult: "NEEDS_REVIEW", aiConfidence: 0.9, finalResult: "NEEDS_REVIEW", isManuallyCorrected: false,
+  } as AttendanceRecordRow;
+  const previousNote = { reason: "duplicate_in_capture" as const, wasAmbiguous: true, wasComparable: true, bestFaceId: "1:0" };
+  const next = {
+    row: { institutionId: "inst-A", sessionId: "sess-1", studentId: "stu-a", aiResult: "PRESENT" as const, aiConfidence: 0.95, matchedEmbeddingId: "emb-a", finalResult: "NEEDS_REVIEW" as const },
+    note: { reason: null, aiSuggestion: "PRESENT" as const, wasAmbiguous: false, wasComparable: true, bestFaceId: "1:0" },
+  };
+  const merged = mergeRoundDecision(previousRow, previousNote, next, 1);
+  assert.equal(merged.write, null, "the confusion is kept");
+  assert.equal(merged.note.reason, "duplicate_in_capture");
+  // And the other way round: a clear first photo, a confused second.
+  const flipped = mergeRoundDecision(
+    { ...previousRow, aiResult: "PRESENT" },
+    { reason: null, aiSuggestion: "PRESENT", wasAmbiguous: false, wasComparable: true, bestFaceId: "1:0" },
+    { row: { ...next.row, aiResult: "NEEDS_REVIEW" }, note: { ...previousNote, bestFaceId: "1:2" } },
+    1,
+  );
+  assert.equal(flipped.write?.aiResult, "NEEDS_REVIEW");
+  assert.equal(flipped.note.reason, "duplicate_in_capture");
+  assert.equal(flipped.note.bestFaceId, "2:2");
+});
+
+test("an added photo from a different model build is refused, not blended in", async () => {
+  const { store } = await seed();
+  await assert.rejects(
+    generateAttendanceCandidates(
+      makeUser(),
+      {
+        sessionId: "sess-1",
+        recognition: runSummary({ modelVersion: "9.9.9", perStudent: [suggestion("stu-004")] }),
+        merge: true,
+      },
+      store.deps,
+    ),
+    /merge_model_mismatch/,
+  );
+  assert.equal(store.rows.get("stu-004")!.aiResult, "ABSENT", "nothing was written");
 });

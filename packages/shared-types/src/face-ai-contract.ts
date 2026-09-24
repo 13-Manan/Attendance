@@ -95,6 +95,44 @@ export interface FaceModelInfo {
   /** Contract version this service implements; must equal
    * FACE_AI_CONTRACT_VERSION on the caller's side. */
   contractVersion: string;
+  /** Per-stage identity and licensing. The provider is production-eligible
+   * only if every stage is. Absent from an older service. */
+  stages?: PipelineStageInfo[];
+  /** Where templates live. "embedding": apps/web stores the vector and
+   * compares it. "gallery": the provider (Azure Face) holds the templates and
+   * apps/web stores only the ids pointing at them. Absent from an older
+   * service, which means "embedding". */
+  templateKind?: TemplateKind;
+  /** Whether a gallery backend can identify people right now. See
+   * IdentificationStatus. Absent from an older service. */
+  identification?: IdentificationStatus;
+}
+
+export type TemplateKind = "embedding" | "gallery";
+
+/**
+ * - "enabled": identification works.
+ * - "not_approved": the provider refuses identification (Azure Face Limited
+ *   Access not granted). Faces are still detected; nobody is identified.
+ * - "unavailable": the provider could not be asked just now.
+ * - "not_applicable": an embedding backend, which leaves identification to
+ *   apps/web.
+ */
+export type IdentificationStatus = "enabled" | "not_approved" | "unavailable" | "not_applicable";
+
+/** One stage of the running pipeline (detector, aligner, embedder, matcher).
+ * Diagnostic: shown to administrators, never branched on by business logic. */
+export interface PipelineStageInfo {
+  role: "detector" | "aligner" | "embedder" | "matcher";
+  name: string;
+  version: string;
+  runtime: string;
+  commercialUse: CommercialUseStatus;
+  productionReady: boolean;
+  capabilities: string[];
+  requiredAssets: string[];
+  embeddingDim?: number | null;
+  licenceNote?: string | null;
 }
 
 /** `GET /v1/model-info` returns the provenance record directly. */
@@ -174,12 +212,69 @@ export interface DetectedFace {
   landmarks?: FaceLandmarks;
   /** Whether this embedding was produced from an aligned crop. */
   aligned?: boolean;
+  /** Every group-photo quality check this face failed. The face was still
+   * embedded; a flagged face is only ever sent to review, never suggested
+   * present. Empty (or absent, from an older service) means none failed —
+   * or that the backend measures nothing, in which case `qualityScore` is
+   * the detector confidence. */
+  qualityFlags?: FaceQualityReason[];
+  /** Shorter side of the face box, in pixels. */
+  faceSize?: number | null;
+}
+
+/** Why a detected face produced no embedding. ``low_quality`` comes only from
+ * the gallery backend: a face Azure rates unfit for recognition is never sent
+ * to Identify. */
+export type RejectedFaceReason =
+  | "face_too_small"
+  | "alignment_failed"
+  | "embedding_failed"
+  | "low_quality";
+
+/**
+ * A face the detector found and the pipeline could not embed.
+ *
+ * Reported rather than dropped: "three faces were too small to identify" is
+ * something a teacher can act on by taking a closer photo, and a silent drop
+ * is indistinguishable from "that student was not there". Carries no
+ * embedding and no pixels.
+ */
+export interface RejectedFace {
+  sequenceNumber: 1 | 2 | 3;
+  boundingBox: BoundingBox;
+  detectionConfidence: number;
+  reason: RejectedFaceReason;
+  faceSize?: number | null;
+}
+
+export interface DetectEmbedImageSummary {
+  sequenceNumber: 1 | 2 | 3;
+  imageWidth: number;
+  imageHeight: number;
+  detectedFaces: number;
+  embeddedFaces: number;
+  rejectedFaces: number;
+}
+
+/** Milliseconds per pipeline stage, summed over every image in the request. */
+export interface PipelineTimings {
+  decodeMs: number;
+  detectMs: number;
+  alignMs: number;
+  qualityMs: number;
+  embedMs: number;
+  totalMs: number;
 }
 
 export interface DetectEmbedResponse {
   faces: DetectedFace[];
   modelName: string;
   modelVersion: string;
+  /** Additive fields: absent from an older service, which the caller must
+   * read as "nothing rejected" rather than fail on. */
+  rejectedFaces?: RejectedFace[];
+  images?: DetectEmbedImageSummary[];
+  timings?: PipelineTimings | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +304,10 @@ export type FaceQualityReason =
   | "too_dark"
   | "occluded"
   | "bad_angle"
-  | "low_quality";
+  | "low_quality"
+  /** An over-exposed face (window behind the subject, flash at close range).
+   * Distinct from `too_dark` because the advice is the opposite. */
+  | "too_bright";
 
 /**
  * Availability of an individual quality metric.
@@ -242,6 +340,14 @@ export interface FaceQualityMetrics {
   /** Head pose deviation from frontal. */
   pose: FaceQualityMetric;
   occlusion: FaceQualityMetric;
+  /** Finer detail; optional because a backend that measures none of it (the
+   * mock) omits it. */
+  yaw?: FaceQualityMetric | null;
+  pitch?: FaceQualityMetric | null;
+  underexposure?: FaceQualityMetric | null;
+  overexposure?: FaceQualityMetric | null;
+  detectionConfidence?: FaceQualityMetric | null;
+  interEyeDistance?: FaceQualityMetric | null;
 }
 
 export interface FaceQualityAssessment {
@@ -254,7 +360,10 @@ export interface FaceQualityAssessment {
   metrics?: FaceQualityMetrics;
   /** Optional model-provided human-readable detail; NEVER show to end users
    * verbatim if the model backend is not audited — treat as debug-only. */
-  detail?: string;
+  detail?: string | null;
+  /** Every failed check, most actionable first. `reasons[0] === reason`
+   * whenever non-empty; empty means `ok`. */
+  reasons?: FaceQualityReason[];
 }
 
 export interface FaceImageInput {
@@ -404,4 +513,110 @@ export interface MatchResponse {
    * model's dimension — i.e. templates enrolled under a different model.
    * Silently skipping them would understate a miss as an absence. */
   skippedIncompatibleCandidates: number;
+}
+
+// ---------------------------------------------------------------------------
+// Gallery contract: /v1/gallery/enroll, /v1/gallery/remove, /v1/identify.
+// Only served by a backend whose model-info says templateKind "gallery"; an
+// embedding backend answers 409. Mirrors app/schemas.py.
+//
+// No vector crosses this contract. A gallery template is a (galleryId,
+// personId, persistedFaceId) triple pointing into the provider's store.
+// ---------------------------------------------------------------------------
+
+export interface GalleryTarget {
+  /** 1-64 of [a-z0-9_-]. One gallery per class. */
+  galleryId: string;
+  /** The student's existing person in this gallery, or null to create one. */
+  personId: string | null;
+  /** Opaque id stored as the provider-side person name. Never a real name. */
+  personName: string;
+}
+
+export interface GalleryEnrollRequest extends FaceImageInput {
+  targets: GalleryTarget[];
+  otherPersonMinConfidence?: number;
+  ownPersonMinConfidence?: number;
+}
+
+export interface GalleryPlacement {
+  galleryId: string;
+  personId: string;
+  persistedFaceId: string;
+  personCreated: boolean;
+}
+
+export interface GalleryCollision {
+  galleryId: string;
+  personId: string;
+  confidence: number;
+}
+
+export type GalleryEnrollOutcome = "accepted" | "rejected" | "collision" | "own_mismatch";
+
+export interface GalleryEnrollResponse {
+  outcome: GalleryEnrollOutcome;
+  assessment: FaceQualityAssessment;
+  placements: GalleryPlacement[];
+  collision: GalleryCollision | null;
+  ownConfidence: number | null;
+  modelName: string;
+  modelVersion: string;
+}
+
+export interface GalleryRemoval {
+  galleryId: string;
+  personId: string;
+  /** Null removes the whole person. */
+  persistedFaceId: string | null;
+}
+
+export interface GalleryRemoveRequest {
+  removals: GalleryRemoval[];
+}
+
+export interface GalleryRemoveResponse {
+  removed: number;
+}
+
+export interface IdentifyCandidate {
+  personId: string;
+  /** The provider's confidence, 0-1. NOT comparable with embedding cosine
+   * similarity, so it has its own thresholds. */
+  confidence: number;
+}
+
+export interface IdentifiedFace {
+  sequenceNumber: 1 | 2 | 3;
+  boundingBox: BoundingBox;
+  detectionConfidence: number;
+  qualityScore: number;
+  qualityFlags: FaceQualityReason[];
+  faceSize: number | null;
+  landmarks: FaceLandmarks | null;
+  /** Highest confidence first. Empty when nobody reached the threshold or
+   * identification is not available. */
+  candidates: IdentifyCandidate[];
+}
+
+export interface IdentifyRequest extends DetectEmbedRequest {
+  galleryId: string;
+  maxCandidates?: number;
+  confidenceThreshold?: number;
+}
+
+export interface IdentifyResponse {
+  faces: IdentifiedFace[];
+  rejectedFaces: RejectedFace[];
+  images: DetectEmbedImageSummary[];
+  /** "not_approved": detection only. Faces are real, every candidate list is
+   * empty, and nobody may be marked from this response. */
+  identification: IdentificationStatus;
+  /** False when the class has no trained gallery yet. */
+  galleryReady: boolean;
+  /** Identify requests sent to the provider, at most 10 faces each. */
+  identifyBatches: number;
+  modelName: string;
+  modelVersion: string;
+  timings: PipelineTimings | null;
 }

@@ -178,6 +178,7 @@ export async function findNearestTemplatesInInstitution(
     FROM "FaceEmbedding" fe
     WHERE fe."institutionId" = ${institutionId}
       AND fe."isActive" = TRUE
+      AND fe.embedding IS NOT NULL
       AND fe."modelName" = ${model.modelName}
       AND fe."modelVersion" = ${model.modelVersion}
     ORDER BY fe.embedding <=> ${literal}::vector
@@ -186,6 +187,60 @@ export async function findNearestTemplatesInInstitution(
 
   // Postgres returns the computed column as a numeric-ish value; Number() is
   // belt and braces for a driver that hands back a string.
+  return rows.map((row) => ({
+    embeddingId: row.embeddingId,
+    studentId: row.studentId,
+    similarity: Number(row.similarity),
+  }));
+}
+
+/**
+ * How similar a probe is to each of *this* student's own comparable templates.
+ *
+ * ## Why this is not a filter over `findNearestTemplatesInInstitution`
+ *
+ * That query returns the nearest few templates in the whole institution. The
+ * student's own samples appear in it when the new photograph resembles them —
+ * and are missing precisely when it does not, which is the case worth
+ * catching. Reading "no own rows in the neighbour list" as "this student has
+ * no samples" would make the mismatch check silently pass on every mismatch.
+ *
+ * Same privacy shape as the institution-wide scan: the comparison happens in
+ * Postgres and what comes back is an id and a number. No vector is
+ * materialised in the application. Scoped to the student, the institution and
+ * the running model — similarity across models is not a meaningful number.
+ */
+export async function findOwnTemplateSimilarities(
+  institutionId: string,
+  studentId: string,
+  probe: readonly number[],
+  model: { modelName: string; modelVersion: string },
+  client: Client = prisma,
+): Promise<NearestTemplateRow[]> {
+  if (probe.length !== EMBEDDING_DIMENSION) {
+    throw new Error(
+      `probe vector has ${probe.length} dimensions, expected ${EMBEDDING_DIMENSION}`,
+    );
+  }
+
+  const literal = vectorLiteral(probe);
+  const rows = await client.$queryRaw<
+    Array<{ embeddingId: string; studentId: string; similarity: number }>
+  >`
+    SELECT
+      fe.id                                       AS "embeddingId",
+      fe."studentId"                              AS "studentId",
+      1 - (fe.embedding <=> ${literal}::vector)   AS similarity
+    FROM "FaceEmbedding" fe
+    WHERE fe."institutionId" = ${institutionId}
+      AND fe."studentId" = ${studentId}
+      AND fe."isActive" = TRUE
+      AND fe.embedding IS NOT NULL
+      AND fe."modelName" = ${model.modelName}
+      AND fe."modelVersion" = ${model.modelVersion}
+    ORDER BY fe.embedding <=> ${literal}::vector
+  `;
+
   return rows.map((row) => ({
     embeddingId: row.embeddingId,
     studentId: row.studentId,

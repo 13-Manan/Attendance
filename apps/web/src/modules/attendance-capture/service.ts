@@ -28,7 +28,7 @@ import type {
   CapturableCohortSubject,
   StartCaptureSessionResult,
 } from "./types";
-import type { DetectRequest, DetectResponse } from "@attendance/shared-types";
+import type { DetectRequest, DetectResponse, IdentificationStatus } from "@attendance/shared-types";
 import { requireCohortSubjectAccess } from "@/modules/authorization/cohort-access";
 import { mergeSessionMetadata } from "@/modules/attendance-review/repository";
 
@@ -385,7 +385,12 @@ export interface AnalyzeCaptureImageDeps {
   detectTimeoutMs?: number;
   /** Injected model-info reader so a test can force productionEligible to
    * a known value without spinning up face-ai. Optional. */
-  fetchModelInfo?: () => Promise<{ productionEligible: boolean }>;
+  fetchModelInfo?: () => Promise<{
+    productionEligible: boolean;
+    modelName?: string;
+    modelVersion?: string;
+    identification?: IdentificationStatus;
+  }>;
   /** Records the accepted capture on the session, so the summary is built
    * from what the server saw rather than from what the browser reports. */
   recordCaptureAnalysis?: (
@@ -502,7 +507,10 @@ export async function analyzeCaptureImage(
     throw e;
   }
 
-  if (session.status !== "CAPTURING") {
+  // REVIEW as well as CAPTURING: a teacher looking at the register may add
+  // another photo of the room, which is merged into it rather than replacing
+  // it. A finalized or discarded session takes nothing more.
+  if (session.status !== "CAPTURING" && session.status !== "REVIEW") {
     return {
       ok: false,
       reason: "session_locked",
@@ -555,12 +563,35 @@ export async function analyzeCaptureImage(
   const averageQualityScore = null;
   const quality = classifyCaptureQuality(faceCount, averageDetectionConfidence);
 
-  // productionEligible lives in `/v1/model-info`; a real integration would
-  // cache it. Defaults to false — matching the ONNX scaffold / mock backends
-  // the service ships with — unless a caller overrides it.
-  const productionEligible = deps.fetchModelInfo
-    ? (await deps.fetchModelInfo()).productionEligible
-    : false;
+  // productionEligible lives in `/v1/model-info`, not on the detect response.
+  // Trusted only when that report names the same build that just ran the
+  // detection; anything else — a failed call, a service mid-restart onto a
+  // different model — reads as not eligible, which is the safe direction.
+  const readModelInfo =
+    deps.fetchModelInfo ??
+    (async () => {
+      const { faceModelInfo } = await import("@/lib/face-ai-client");
+      return faceModelInfo();
+    });
+  let productionEligible = false;
+  let identification: IdentificationStatus | undefined;
+  try {
+    const info: {
+      productionEligible: boolean;
+      modelName?: string;
+      modelVersion?: string;
+      identification?: IdentificationStatus;
+    } = await readModelInfo();
+    const sameBuild =
+      (info.modelName === undefined || info.modelName === response.modelName) &&
+      (info.modelVersion === undefined || info.modelVersion === response.modelVersion);
+    productionEligible = sameBuild && info.productionEligible === true;
+    // Same trust rule: only a report about the build that just ran counts.
+    // An unreadable one leaves it unset, never "enabled".
+    if (sameBuild && info.identification) identification = info.identification;
+  } catch {
+    productionEligible = false;
+  }
 
   const analysis: CaptureImageAnalysis = {
     sequenceNumber: input.sequenceNumber,
@@ -572,6 +603,7 @@ export async function analyzeCaptureImage(
     modelName: response.modelName,
     modelVersion: response.modelVersion,
     productionEligible,
+    ...(identification ? { identification } : {}),
     qualityLabel: quality.qualityLabel,
     qualityHint: quality.qualityHint,
   };
@@ -712,6 +744,7 @@ export async function summarizeCaptureSession(
     analyses.length > 0 && analyses.every((a) => a.productionEligible);
   const modelName = analyses[0]?.modelName ?? "unknown";
   const modelVersion = analyses[0]?.modelVersion ?? "unknown";
+  const identification = analyses.at(-1)?.identification;
 
   return {
     sessionId: session.id,
@@ -721,6 +754,7 @@ export async function summarizeCaptureSession(
     modelName,
     modelVersion,
     productionEligible,
+    ...(identification ? { identification } : {}),
     status: session.status,
     enrolledStudentCount,
     hasUsableCaptures,

@@ -47,13 +47,13 @@ from pathlib import Path
 import numpy as np
 
 from app.matching import score_candidates
-from app.schemas import DEFAULT_MATCH_THRESHOLDS, MatchCandidate
+from app.schemas import DEFAULT_MATCH_THRESHOLDS, EMBEDDING_DIMENSION, MatchCandidate
 
 # Cohort sizes from the brief, plus two stress points beyond any real class.
 CANDIDATE_COUNTS = (10, 20, 50, 100, 500, 2000, 5000)
 COHORT_SIZES = (10, 20, 50, 100)
 IMAGE_COUNTS = (1, 2, 3)
-EMBEDDING_DIM = 512
+EMBEDDING_DIM = EMBEDDING_DIMENSION
 
 
 @dataclass

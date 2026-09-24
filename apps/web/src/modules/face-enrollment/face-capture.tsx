@@ -12,6 +12,12 @@ import {
   inspectImageInBrowser,
   stripDataUrlPrefix,
 } from "./capture-support";
+import {
+  GUIDED_STEP_ORDER,
+  captureFeedbackHeadline,
+  currentGuidedStep,
+  guidedStep,
+} from "./guided-steps";
 import type { FaceCaptureSource, FaceEnrollmentResult } from "./types";
 
 /**
@@ -323,6 +329,13 @@ export function FaceCapture({
     <div className="flex flex-col gap-4">
       <SlotSummary status={status} subject={subject} />
 
+      {!atCapacity || replaceMode ? (
+        <GuidedSteps
+          usableSamples={replaceMode ? 0 : status.usableSamples}
+          subject={subject}
+        />
+      ) : null}
+
       <div className="flex flex-col gap-3">
         <div className="relative w-full max-w-md overflow-hidden rounded-lg border border-neutral-200 bg-neutral-900/5">
           {/* The video element stays mounted across stages rather than being
@@ -394,7 +407,10 @@ export function FaceCapture({
         {cameraError ? <Message tone="error">{cameraError}</Message> : null}
         {fileError ? <Message tone="error">{fileError}</Message> : null}
         {result ? (
-          <Message tone={result.ok ? "success" : "error"}>{result.message}</Message>
+          <Message tone={result.ok ? "success" : "error"}>
+            <strong className="block">{captureFeedbackHeadline(result)}</strong>
+            {result.message}
+          </Message>
         ) : null}
         {result?.ok && status.remainingSlots > 0 ? (
           <p className="text-xs text-neutral-500">
@@ -410,6 +426,55 @@ export function FaceCapture({
 // ---------------------------------------------------------------------------
 // Pieces
 // ---------------------------------------------------------------------------
+
+/**
+ * Which photograph to take next, out of the five the set asks for.
+ *
+ * A prompt, not a check: nothing verifies the head was turned (see
+ * guided-steps.ts), so nothing here claims it was.
+ */
+function GuidedSteps({
+  usableSamples,
+  subject,
+}: {
+  usableSamples: number;
+  subject: "student" | "self";
+}) {
+  const current = currentGuidedStep(usableSamples);
+  if (!current) return null;
+  const step = guidedStep(current, subject);
+  const index = GUIDED_STEP_ORDER.indexOf(current);
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-neutral-200 px-3 py-2">
+      <p className="text-sm font-medium text-neutral-900">
+        Sample {index + 1} of {GUIDED_STEP_ORDER.length} · {step.title}
+      </p>
+      <p className="text-sm text-neutral-700">{step.instruction}</p>
+      <ol className="flex flex-wrap gap-1.5" aria-label="Enrollment steps">
+        {GUIDED_STEP_ORDER.map((key, i) => {
+          const done = i < index;
+          const here = i === index;
+          return (
+            <li
+              key={key}
+              aria-current={here ? "step" : undefined}
+              className={`rounded-full px-2 py-0.5 text-[11px] ${
+                here
+                  ? "bg-neutral-900 text-white"
+                  : done
+                    ? "bg-green-50 text-green-800"
+                    : "bg-neutral-100 text-neutral-500"
+              }`}
+            >
+              {done ? "✓ " : ""}
+              {guidedStep(key, subject).title}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
 
 function SlotSummary({
   status,
@@ -615,8 +680,8 @@ function Message({ tone, children }: { tone: "success" | "error"; children: Reac
       ? "rounded-md bg-green-50 px-3 py-2 text-sm text-green-800"
       : "rounded-md bg-red-50 px-3 py-2 text-sm text-red-700";
   return (
-    <p role={tone === "success" ? "status" : "alert"} className={className}>
+    <div role={tone === "success" ? "status" : "alert"} className={className}>
       {children}
-    </p>
+    </div>
   );
 }

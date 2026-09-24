@@ -936,3 +936,41 @@ substitutes for that.
 
 `productionEligible` remains `false` and `FACE_AI_REQUIRE_PRODUCTION_MODEL`
 remains in force. Both release blockers stand.
+
+---
+
+## 11. Real-model calibration and group-photo scaling (2026-09-24)
+
+Section 2's "accuracy is unmeasured" is now true only for classroom
+conditions. The `opencv` backend (YuNet + SFace, **still not
+production-approved**) was calibrated on 61 public-domain adult portrait pairs
+plus 89 single portraits, held outside the repository:
+
+- rank-1 identification 61 / 61;
+- 0 of 9,089 impostor comparisons at or above `reviewMin` 0.45, worst 0.422;
+- 96.7% of genuine pairs at or above `presentMin` 0.62, all at or above 0.45.
+
+Thresholds were kept at 0.62 / 0.45. Method, degradation sweeps, the quality
+profiles they justify, and everything this does not cover (pose, children,
+relatives, demographics, real classrooms):
+[`FACE_RECOGNITION_CALIBRATION.md`](FACE_RECOGNITION_CALIBRATION.md).
+
+### Group-photo compute, 1920×1440, 64 px faces
+
+`bench/group_perf.py`: composed portrait grids, one worker, 5 iterations,
+Apple arm64, OpenCV 4.14.0. Real model compute; the scene is not a classroom.
+
+| Faces | p50 total | p95 total | detect p50 | embed p50 | peak RSS |
+| --- | --- | --- | --- | --- | --- |
+| 5 | 37.5 ms | 47.9 ms | 21.1 ms | 13.4 ms | 521 MB |
+| 10 | 71.9 ms | 75.3 ms | 22.1 ms | 44.2 ms | 548 MB |
+| 20 | 86.5 ms | 90.7 ms | 21.7 ms | 59.5 ms | 558 MB |
+| 30 | 107.7 ms | 110.2 ms | 20.7 ms | 80.0 ms | 563 MB |
+| 40 | 115.7 ms | 121.1 ms | 22.9 ms | 85.8 ms | 544 MB |
+| 50 | 162.6 ms | 172.7 ms | 22.6 ms | 131.9 ms | 553 MB |
+
+Detection is flat in face count (one pass over the whole frame);
+embedding grows roughly linearly. Memory is dominated by the loaded models and
+does not grow with the number of faces. A three-photo register for a 40-student
+class is therefore ~0.35 s of model compute on this machine; Azure Container
+Apps CPU will be slower and has not been measured.

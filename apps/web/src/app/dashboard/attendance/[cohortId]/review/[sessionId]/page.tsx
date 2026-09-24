@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getAttendanceReviewBoard } from "@/modules/attendance-review/service";
+import { hasPermission } from "@/modules/authorization/service";
 import { ForbiddenError } from "@/modules/authorization/types";
 import { ReviewBoard } from "./review-client";
 
@@ -40,6 +41,18 @@ export default async function AttendanceReviewPage({ params }: PageProps) {
     redirect(`/dashboard/attendance/${board.session.cohortId}/review/${sessionId}`);
   }
 
+  // Only a register still in review takes more photos, and only from someone
+  // who may capture; the capture page re-checks both before anything runs.
+  const addPhotoHref =
+    board.session.processingStatus === "REVIEW" &&
+    hasPermission(user, "attendanceSession.capture")
+      ? `/dashboard/attendance/${cohortId}/capture?add=1${
+          board.session.cohortSubjectId
+            ? `&subject=${encodeURIComponent(board.session.cohortSubjectId)}`
+            : ""
+        }`
+      : null;
+
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-4">
       <div className="flex flex-col gap-1">
@@ -71,7 +84,11 @@ export default async function AttendanceReviewPage({ params }: PageProps) {
           {board.session.facultyName ? ` · ${board.session.facultyName}` : ""}
         </p>
       </div>
-      <ReviewBoard initialBoard={board} />
+      <ReviewBoard
+        initialBoard={board}
+        showDiagnostics={hasPermission(user, "faceEmbedding.manage")}
+        addPhotoHref={addPhotoHref}
+      />
     </div>
   );
 }

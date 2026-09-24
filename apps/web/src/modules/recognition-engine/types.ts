@@ -1,4 +1,9 @@
-import type { MatchStatus } from "@attendance/shared-types";
+import type {
+  FaceQualityReason,
+  IdentificationStatus,
+  MatchStatus,
+  RejectedFaceReason,
+} from "@attendance/shared-types";
 import type { ConfidenceThresholds } from "@/modules/institutions/types";
 import type { AttendanceResult } from "@/modules/recognition-results/types";
 
@@ -95,8 +100,37 @@ export interface FaceRecognitionResult {
   decision: MatchStatus;
   /** When the face was dropped before comparison (e.g. below
    * `minDetectionConfidence`). Diagnostic — the UI can group these. */
-  dropReason: "low_detection_confidence" | null;
+  dropReason: "low_detection_confidence" | "identification_unavailable" | null;
+  /** Group-photo quality checks this face failed, as face-ai reported them.
+   * A flagged face can still be matched, but never above UNCERTAIN. */
+  qualityFlags: FaceQualityReason[];
+  /** Shorter side of the face box in pixels, when face-ai reported it. */
+  faceSize: number | null;
+  /** Every rule that made this face's decision more cautious than its raw
+   * similarity. Empty when the similarity was taken at face value. */
+  demotions: FaceDemotion[];
+  /** Another face in the SAME capture had this face's student as its own best
+   * candidate above the review floor. The student was given to the stronger
+   * face (this one), but one person is not in one photograph twice, so the
+   * student still goes to review. */
+  contested: boolean;
+  /** Scored, but attributed to nobody: no enrolled student came within the
+   * review floor, or every student it resembled was already claimed by a
+   * stronger face in the same photo. Never assigned to a student. */
+  unknown: boolean;
 }
+
+/**
+ * Why one face's decision was made more cautious.
+ *
+ *  - `ambiguous`   — a different student scored within the ambiguity margin.
+ *  - `low_quality` — face-ai flagged the face (too small, blurred, dark,
+ *                    turned away…). A poor face can resemble anybody.
+ *  - `reassigned`  — the face's best candidate was claimed by a stronger face
+ *                    in the same photo, so it was given its next-best free
+ *                    candidate. A second choice is never a confident one.
+ */
+export type FaceDemotion = "ambiguous" | "low_quality" | "reassigned";
 
 // ---------------------------------------------------------------------------
 // Per-observation provenance
@@ -124,6 +158,12 @@ export interface StudentObservation {
    * ambiguity margin. */
   wasAmbiguous: boolean;
   candidateEmbeddingId: string | null;
+  /** Face-level demotions carried from `FaceRecognitionResult`. */
+  demotions: FaceDemotion[];
+  qualityFlags: FaceQualityReason[];
+  faceSize: number | null;
+  /** See `FaceRecognitionResult.contested`. */
+  contested: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +184,12 @@ export type AggregationDowngrade =
   /** Two or more distinct faces in the SAME capture both named this student.
    * One person is not in one photograph twice; that is the detector or the
    * recogniser confusing people, and it must not read as confident presence. */
-  | "duplicate_within_capture";
+  | "duplicate_within_capture"
+  /** The winning face failed a quality check. */
+  | "low_quality_face"
+  /** The winning face's own best candidate was somebody else, claimed by a
+   * stronger face; this student was its second choice. */
+  | "reassigned_face";
 
 /**
  * One row per enrolled candidate student after cross-image deduplication.
@@ -184,6 +229,8 @@ export interface StudentRecognitionAggregate {
   bestFaceId: string | null;
   /** The `FaceEmbedding` behind the winning score. */
   bestEmbeddingId: string | null;
+  /** Quality flags on the winning face — "Face too small" is read from here. */
+  bestQualityFlags: FaceQualityReason[];
   /** Attendance-vocabulary decision (PRESENT / NEEDS_REVIEW / ABSENT).
    * NEVER PRESENT if the underlying recognition status was UNCERTAIN. */
   advisoryResult: AttendanceResult;
@@ -249,6 +296,32 @@ export interface RecognitionRunSummary {
   /** Students in the candidate pool who had no face above review threshold
    * in any image — the "absent" advisory list. */
   unmatchedStudentIds: string[];
+  /** Faces face-ai detected but could not embed, by reason. Counts only. */
+  rejectedFaces: Partial<Record<RejectedFaceReason, number>>;
+  /** Scored faces carrying at least one quality flag, by flag. A face with two
+   * flags counts under both. */
+  flaggedFaces: Partial<Record<FaceQualityReason, number>>;
+  /** Distinct unknown people across every capture in this run: unknown faces
+   * in different photos that resemble each other above `presentMin` are
+   * counted once. In memory only — nothing about an unknown face is stored. */
+  unknownFacesTotal: number;
+  /** True when a closer or clearer photo would plausibly change the result:
+   * some faces were too small to embed or were flagged too small. */
+  recommendRetake: boolean;
+  /** "gallery" when a provider-held gallery (Azure AI Face) named the
+   * candidates; absent or "embedding" for the vector path. */
+  templateKind?: "embedding" | "gallery";
+  /** Gallery runs: whether the provider allowed identification. Anything
+   * but "enabled" means detection only — the face counts are real, nobody
+   * was compared, and every student is left for the teacher. */
+  identification?: IdentificationStatus;
+  /** Gallery runs: false when the class gallery had nobody in it yet. */
+  galleryReady?: boolean;
+  /** Gallery runs: the students the class gallery could actually name.
+   * A student with an active sample who is not in this class's gallery
+   * (joined the class after enrolling) was never searchable, and must not
+   * be told apart from one who was searched and not found. */
+  comparableStudentIds?: string[];
 }
 
 // ---------------------------------------------------------------------------

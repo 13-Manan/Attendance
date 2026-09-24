@@ -50,7 +50,7 @@ import {
   mergeSessionMetadata,
   upsertAttendanceCandidates,
 } from "./repository";
-import type { AttendanceRecordRow, SessionDetailRow } from "./repository";
+import type { AttendanceCandidateRow, AttendanceRecordRow, SessionDetailRow } from "./repository";
 import type {
   AttendanceCounts,
   AttendanceSuggestion,
@@ -269,6 +269,32 @@ export function initialsFor(firstName: string, lastName: string): string {
  * reviewer can always see what the model thought and a later investigation
  * can tell a human's decision from a machine's.
  */
+/**
+ * Why a matched-but-unconfirmed student needs a person, most specific first.
+ * A confusion between students outranks a poor photograph: the remedy for the
+ * first is to look carefully, for the second to take a closer picture.
+ */
+function reviewReason(agg: {
+  wasAmbiguous: boolean;
+  downgrades?: string[];
+  bestQualityFlags?: string[];
+}): AttendanceReviewReason {
+  const downgrades = agg.downgrades ?? [];
+  if (downgrades.includes("duplicate_within_capture")) return "duplicate_in_capture";
+  if (
+    agg.wasAmbiguous ||
+    downgrades.includes("ambiguous_face") ||
+    downgrades.includes("reassigned_face")
+  ) {
+    return "ambiguous_match";
+  }
+  const flags = agg.bestQualityFlags ?? [];
+  if (downgrades.includes("low_quality_face") || flags.length > 0) {
+    return flags.includes("face_too_small") ? "face_too_small" : "low_quality";
+  }
+  return "low_confidence";
+}
+
 export function decideCandidate(args: {
   aggregate:
     | {
@@ -278,6 +304,8 @@ export function decideCandidate(args: {
         bestFaceId: string | null;
         bestEmbeddingId?: string | null;
         downgrades?: string[];
+        /** Quality problems face-ai flagged on the representative face. */
+        bestQualityFlags?: string[];
         observations?: Array<{
           captureNumber: number;
           faceIndex: number;
@@ -292,9 +320,17 @@ export function decideCandidate(args: {
   /** True when recognition ran but found no face in any capture. Separates
    * "we saw nobody" from "we saw people, none of them you". */
   noFacesDetected?: boolean;
+  /** Set when faces were detected but none could be compared — every one too
+   * small, or otherwise unusable. `"face_too_small"` when that was the cause
+   * of any of them. Separates "the photograph was not good enough" from
+   * "we compared and this student was not there". */
+  noUsableFaces?: "face_too_small" | "low_quality";
   /** True when recognition was attempted and errored. Distinct from never
    * having been attempted. */
   recognitionErrored?: boolean;
+  /** True when the run counted faces but the provider would not identify
+   * them. Nobody was compared, so nobody is matched or ruled out. */
+  identificationUnavailable?: boolean;
 }): {
   aiResult: AttendanceRecordRow["aiResult"];
   aiConfidence: number | null;
@@ -329,6 +365,24 @@ export function decideCandidate(args: {
     };
   }
 
+  // Faces were counted and nobody was compared. Not a match, not a miss: the
+  // teacher decides this student exactly as they would on a roll call.
+  if (args.identificationUnavailable) {
+    return {
+      aiResult: "NOT_EVALUATED",
+      aiConfidence: null,
+      matchedEmbeddingId: null,
+      finalResult: "NEEDS_REVIEW",
+      note: {
+        reason: "identification_unavailable",
+        aiSuggestion: null,
+        wasAmbiguous: false,
+        wasComparable: false,
+        bestFaceId: null,
+      },
+    };
+  }
+
   // Recognition ran but the room yielded no detectable face. Every student is
   // unresolved for the same reason, and that reason is about the photograph.
   if (args.noFacesDetected) {
@@ -342,6 +396,24 @@ export function decideCandidate(args: {
         aiSuggestion: null,
         wasAmbiguous: false,
         wasComparable: args.hasComparableTemplate,
+        bestFaceId: null,
+      },
+    };
+  }
+
+  // Faces were found but none was good enough to compare. Nobody was ruled
+  // out, so nobody is reported as unmatched: the photograph is the problem.
+  if (args.noUsableFaces && args.hasComparableTemplate) {
+    return {
+      aiResult: "NOT_EVALUATED",
+      aiConfidence: null,
+      matchedEmbeddingId: null,
+      finalResult: "NEEDS_REVIEW",
+      note: {
+        reason: args.noUsableFaces,
+        aiSuggestion: null,
+        wasAmbiguous: false,
+        wasComparable: true,
         bestFaceId: null,
       },
     };
@@ -415,11 +487,7 @@ export function decideCandidate(args: {
       matchedEmbeddingId: agg.bestEmbeddingId ?? null,
       finalResult: "NEEDS_REVIEW",
       note: {
-        reason: agg.downgrades?.includes("duplicate_within_capture")
-          ? "duplicate_in_capture"
-          : agg.wasAmbiguous
-            ? "ambiguous_match"
-            : "low_confidence",
+        reason: reviewReason(agg),
         aiSuggestion: null,
         wasAmbiguous: agg.wasAmbiguous,
         wasComparable: true,
@@ -618,11 +686,149 @@ export async function resolveSessionRoster(
 // Attendance candidate generation
 // ---------------------------------------------------------------------------
 
+/**
+ * How strongly a finding places a student in the room. A later photo can only
+ * strengthen what an earlier one found, never weaken it: not being seen in
+ * the second photo says nothing about the first.
+ */
+const FINDING_STRENGTH: Record<string, number> = {
+  PRESENT: 3,
+  NEEDS_REVIEW: 2,
+  ABSENT: 1,
+  NOT_EVALUATED: 0,
+};
+
+/**
+ * One student's register row when a new recognition round is added to an
+ * existing one. Pure, so the merge rules are testable without a database.
+ *
+ *  - A manually corrected row is a person's decision and is never touched.
+ *  - A "two faces in one photo named this student" finding is sticky: it
+ *    means the recogniser confused someone with this student, and a clear
+ *    match in another photo could be that same someone. Whichever round has
+ *    it wins, capped at review.
+ *  - Otherwise the stronger finding wins (PRESENT > review > no match > not
+ *    evaluated), then the higher similarity; ties keep what is there.
+ *
+ * The returned note carries both rounds' observations, with the new round's
+ * capture numbers shifted past the old ones so "photo 4" means the fourth
+ * photo taken, not the first photo of the second round.
+ *
+ * `write` is null when the stored row should be left exactly as it is.
+ */
+export function mergeRoundDecision(
+  previousRow: AttendanceRecordRow | undefined,
+  previousNote: StoredStudentNote | undefined,
+  next: { row: AttendanceCandidateRow; note: StoredStudentNote },
+  captureOffset: number,
+): { write: AttendanceCandidateRow | null; note: StoredStudentNote } {
+  const shifted: StoredStudentNote = {
+    ...next.note,
+    bestFaceId: shiftFaceId(next.note.bestFaceId, captureOffset),
+    observations: next.note.observations?.map((o) => ({
+      ...o,
+      captureNumber: o.captureNumber + captureOffset,
+    })),
+  };
+  if (!previousRow) return { write: next.row, note: shifted };
+  const combinedObservations = (a?: StoredObservation[], b?: StoredObservation[]) =>
+    a || b ? [...(a ?? []), ...(b ?? [])] : undefined;
+
+  const keepPrevious = (): { write: null; note: StoredStudentNote } => ({
+    write: null,
+    note: previousNote
+      ? {
+          ...previousNote,
+          observations: combinedObservations(previousNote.observations, shifted.observations),
+        }
+      : shifted,
+  });
+  const takeNext = (): { write: AttendanceCandidateRow; note: StoredStudentNote } => ({
+    write: next.row,
+    note: {
+      ...shifted,
+      observations: combinedObservations(previousNote?.observations, shifted.observations),
+    },
+  });
+
+  if (previousRow.isManuallyCorrected) return keepPrevious();
+
+  const previousDuplicate = previousNote?.reason === "duplicate_in_capture";
+  const nextDuplicate = next.note.reason === "duplicate_in_capture";
+  if (previousDuplicate !== nextDuplicate) return nextDuplicate ? takeNext() : keepPrevious();
+
+  const before = FINDING_STRENGTH[previousRow.aiResult] ?? 0;
+  const after = FINDING_STRENGTH[next.row.aiResult] ?? 0;
+  if (after !== before) return after > before ? takeNext() : keepPrevious();
+  if ((next.row.aiConfidence ?? -1) > (previousRow.aiConfidence ?? -1)) return takeNext();
+  return keepPrevious();
+}
+
+function shiftFaceId(faceId: string | null, offset: number): string | null {
+  if (!faceId || offset === 0) return faceId;
+  const [capture, index] = faceId.split(":");
+  const n = Number(capture);
+  return Number.isInteger(n) && index !== undefined ? `${n + offset}:${index}` : faceId;
+}
+
+/** Totals for a register built from several rounds. */
+function combineRunMetadata(
+  previous: RecognitionRunMetadata | null,
+  next: RecognitionRunMetadata,
+): RecognitionRunMetadata {
+  if (!previous) return next;
+  return {
+    ...next,
+    candidatePoolSize: Math.max(previous.candidatePoolSize, next.candidatePoolSize),
+    detectedFacesTotal: previous.detectedFacesTotal + next.detectedFacesTotal,
+    scoredFacesTotal: previous.scoredFacesTotal + next.scoredFacesTotal,
+    skippedIncompatibleCandidates: Math.max(
+      previous.skippedIncompatibleCandidates,
+      next.skippedIncompatibleCandidates,
+    ),
+    rounds: (previous.rounds ?? 1) + 1,
+    unknownFacesTotal: Math.max(previous.unknownFacesTotal ?? 0, next.unknownFacesTotal ?? 0),
+    rejectedFacesTotal: (previous.rejectedFacesTotal ?? 0) + (next.rejectedFacesTotal ?? 0),
+    // The latest photo decides whether another one would help.
+    recommendRetake: next.recommendRetake,
+  };
+}
+
+/** The register and notes a merge builds on, or null when there are none. */
+async function loadPreviousRound(
+  sessionId: string,
+  deps: AttendanceReviewDeps,
+): Promise<{
+  rows: Map<string, AttendanceRecordRow>;
+  notes: Record<string, StoredStudentNote>;
+  captureImages: CaptureImageMetadata[];
+  recognition: RecognitionRunMetadata | null;
+} | null> {
+  const listRecords = deps.listAttendanceRecords ?? listAttendanceRecordRowsForSession;
+  const existing = await listRecords(sessionId);
+  if (existing.length === 0) return null;
+  const detail = await (deps.getSessionDetailRow ?? getSessionDetailRow)(sessionId);
+  const stored = readStoredMetadata(detail?.metadata);
+  return {
+    rows: new Map(existing.map((r) => [r.studentId, r] as const)),
+    notes: stored.studentNotes ?? {},
+    captureImages: stored.captureImages ?? [],
+    recognition: stored.recognition ?? null,
+  };
+}
+
 export interface GenerateAttendanceCandidatesInput {
   sessionId: string;
   /** Advisory recognition output. Null means recognition did not run (or
    * failed) and the faculty member is opening a manual roll call. */
   recognition: RecognitionRunSummary | null;
+  /**
+   * Combine this run with the register already written for the session
+   * instead of replacing it — the "add another photo" path from the review
+   * screen. Each student keeps the stronger of the two findings; see
+   * `mergeRoundDecision`. Ignored when recognition did not run.
+   */
+  merge?: boolean;
 }
 
 export interface GenerateAttendanceCandidatesResult {
@@ -664,12 +870,17 @@ export async function generateAttendanceCandidates(
   const studentIds = students.map((s) => s.studentId);
   const listComparable = deps.listComparableTemplates ?? listStudentIdsWithComparableTemplates;
   const listAny = deps.listAnyTemplates ?? listStudentIdsWithAnyTemplate;
+  // A gallery run says exactly who its class gallery could name. A student
+  // holding a sample under the same model who is not in this gallery (joined
+  // the class after enrolling) was never searchable, and "compared and not
+  // found" would be a false statement about them.
   const comparable = recognitionRan
     ? new Set(
-        await listComparable(studentIds, {
-          modelName: recognition.modelName,
-          modelVersion: recognition.modelVersion,
-        }),
+        recognition.comparableStudentIds ??
+          (await listComparable(studentIds, {
+            modelName: recognition.modelName,
+            modelVersion: recognition.modelVersion,
+          })),
       )
     : new Set<string>();
   // Only queried when it changes the message shown to the reviewer.
@@ -682,8 +893,39 @@ export async function generateAttendanceCandidates(
     (recognition?.perStudent ?? []).map((s) => [s.studentId, s] as const),
   );
 
+  const rejectedFacesTotal = recognition
+    ? Object.values(recognition.rejectedFaces ?? {}).reduce((a, b) => a + (b ?? 0), 0)
+    : 0;
+  // Faces were there, but not one of them could be compared: every student is
+  // unresolved because of the photograph, not because anyone was ruled out.
+  const noUsableFaces =
+    recognition &&
+    recognition.scoredFacesTotal === 0 &&
+    recognition.detectedFacesTotal + rejectedFacesTotal > 0
+      ? recognition.recommendRetake
+        ? ("face_too_small" as const)
+        : ("low_quality" as const)
+      : undefined;
+
+  // The previous round, when this run is being added to it.
+  const previous = input.merge && recognition ? await loadPreviousRound(session.id, deps) : null;
+  if (previous?.recognition && recognition) {
+    // Similarities from two different models are not comparable, and the
+    // register would quietly mix them.
+    if (
+      previous.recognition.modelName !== recognition.modelName ||
+      previous.recognition.modelVersion !== recognition.modelVersion
+    ) {
+      throw new Error("merge_model_mismatch");
+    }
+  }
+  const captureOffset = previous
+    ? Math.max(0, ...(previous.captureImages ?? []).map((c) => c.sequenceNumber))
+    : 0;
+
   const notes: Record<string, StoredStudentNote> = {};
-  const rows = students.map((student) => {
+  const rows: AttendanceCandidateRow[] = [];
+  for (const student of students) {
     const decision = decideCandidate({
       aggregate: aggregates.get(student.studentId),
       recognitionRan,
@@ -691,10 +933,15 @@ export async function generateAttendanceCandidates(
       hasAnyTemplate: anyTemplate.has(student.studentId),
       // "We looked and saw nobody" reads very differently from "we saw people
       // and none was you", so the reviewer is told which happened.
-      noFacesDetected: recognitionRan && recognition!.detectedFacesTotal === 0,
+      noFacesDetected:
+        recognitionRan && recognition!.detectedFacesTotal + rejectedFacesTotal === 0,
+      noUsableFaces,
+      identificationUnavailable:
+        recognitionRan &&
+        recognition!.identification !== undefined &&
+        recognition!.identification !== "enabled",
     });
-    notes[student.studentId] = decision.note;
-    return {
+    const row: AttendanceCandidateRow = {
       institutionId: session.institutionId,
       sessionId: session.id,
       studentId: student.studentId,
@@ -703,7 +950,20 @@ export async function generateAttendanceCandidates(
       matchedEmbeddingId: decision.matchedEmbeddingId,
       finalResult: decision.finalResult,
     };
-  });
+    if (!previous) {
+      notes[student.studentId] = decision.note;
+      rows.push(row);
+      continue;
+    }
+    const merged = mergeRoundDecision(
+      previous.rows.get(student.studentId),
+      previous.notes[student.studentId],
+      { row, note: decision.note },
+      captureOffset,
+    );
+    notes[student.studentId] = merged.note;
+    if (merged.write) rows.push(merged.write);
+  }
 
   // Advance the state machine around the write so a reviewer can never land
   // on a REVIEW session whose register has not been written yet.
@@ -713,7 +973,7 @@ export async function generateAttendanceCandidates(
   }
 
   const upsert = deps.upsertCandidates ?? upsertAttendanceCandidates;
-  const written = await upsert(rows);
+  const written = rows.length > 0 ? await upsert(rows) : { created: 0, refreshed: 0 };
 
   const generationSource: AttendanceGenerationSource = recognitionRan ? "recognition" : "manual";
   const nowFn = deps.now ?? (() => new Date());
@@ -722,9 +982,17 @@ export async function generateAttendanceCandidates(
     rosterScope: scope,
     generationSource,
     generatedAt: nowFn().toISOString(),
-    captureImages: recognition ? captureImageMetadataFrom(recognition.perFace) : [],
+    captureImages: [
+      ...(previous?.captureImages ?? []),
+      ...(recognition
+        ? captureImageMetadataFrom(recognition.perFace).map((c) => ({
+            ...c,
+            sequenceNumber: c.sequenceNumber + captureOffset,
+          }))
+        : []),
+    ],
     recognition: recognition
-      ? {
+      ? combineRunMetadata(previous?.recognition ?? null, {
           modelName: recognition.modelName,
           modelVersion: recognition.modelVersion,
           productionEligible: recognition.productionEligible,
@@ -735,7 +1003,13 @@ export async function generateAttendanceCandidates(
           skippedIncompatibleCandidates: recognition.skippedIncompatibleCandidates,
           presentMin: recognition.policy.presentMin,
           reviewMin: recognition.policy.reviewMin,
-        }
+          rounds: 1,
+          unknownFacesTotal: recognition.unknownFacesTotal ?? 0,
+          rejectedFacesTotal,
+          recommendRetake: recognition.recommendRetake ?? false,
+          ...(recognition.templateKind ? { templateKind: recognition.templateKind } : {}),
+          ...(recognition.identification ? { identification: recognition.identification } : {}),
+        })
       : null,
     studentNotes: notes,
   };

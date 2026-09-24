@@ -8,6 +8,12 @@ import type {
   EnrollRequest,
   EnrollResponse,
   FaceAiHealthResponse,
+  GalleryEnrollRequest,
+  GalleryEnrollResponse,
+  GalleryRemoveRequest,
+  GalleryRemoveResponse,
+  IdentifyRequest,
+  IdentifyResponse,
   MatchRequest,
   MatchResponse,
   ModelInfoResponse,
@@ -39,6 +45,36 @@ function serviceHeaders(extra: Record<string, string> = {}): Record<string, stri
     : extra;
 }
 
+/**
+ * A non-2xx from the service. `code` is the service's stable `detail` string
+ * when it sent one (for example "identification_not_approved" or
+ * "azure_face_unavailable"), so a caller can branch on it. The message keeps
+ * the `face-ai <path> failed: <status>` wording operators already know.
+ */
+export class FaceAiRequestError extends Error {
+  constructor(
+    readonly path: string,
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(`face-ai ${path} failed: ${status}${code ? ` ${code}` : ""}`);
+    this.name = "FaceAiRequestError";
+  }
+}
+
+async function errorCode(res: Response): Promise<string | null> {
+  try {
+    const body = (await res.json()) as { detail?: unknown };
+    // Only a short machine code is kept. A validation error's detail is an
+    // array and is not worth carrying.
+    return typeof body.detail === "string" && /^[a-z_]{1,64}$/.test(body.detail)
+      ? body.detail
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 async function postJson<TReq, TRes>(path: string, body: TReq): Promise<TRes> {
   const res = await fetch(`${env.FACE_AI_SERVICE_URL}${path}`, {
     method: "POST",
@@ -47,7 +83,7 @@ async function postJson<TReq, TRes>(path: string, body: TReq): Promise<TRes> {
     cache: "no-store",
   });
   if (!res.ok) {
-    throw new Error(`face-ai ${path} failed: ${res.status}`);
+    throw new FaceAiRequestError(path, res.status, await errorCode(res));
   }
   return (await res.json()) as TRes;
 }
@@ -114,4 +150,22 @@ export function faceEnroll(request: EnrollRequest): Promise<EnrollResponse> {
 
 export function faceMatch(request: MatchRequest): Promise<MatchResponse> {
   return postJson("/v1/match", request);
+}
+
+// -----------------------------------------------------------------------
+// Gallery backend (Azure AI Face). Served only when model-info reports
+// templateKind "gallery". Templates stay with the provider; these calls move
+// ids, never vectors. See docs/AZURE_FACE.md.
+// -----------------------------------------------------------------------
+
+export function galleryEnroll(request: GalleryEnrollRequest): Promise<GalleryEnrollResponse> {
+  return postJson("/v1/gallery/enroll", request);
+}
+
+export function galleryRemove(request: GalleryRemoveRequest): Promise<GalleryRemoveResponse> {
+  return postJson("/v1/gallery/remove", request);
+}
+
+export function identifyFaces(request: IdentifyRequest): Promise<IdentifyResponse> {
+  return postJson("/v1/identify", request);
 }

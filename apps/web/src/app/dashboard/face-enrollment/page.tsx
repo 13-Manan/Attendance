@@ -90,6 +90,15 @@ function ModelProvenance({ model }: { model: ModelInfoResponse | null }) {
         </p>
       ) : null}
 
+      {model.templateKind === "gallery" && model.identification !== "enabled" ? (
+        <p role="alert" className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span className="font-medium">Identification is not enabled yet.</span> This provider
+          detects and counts faces, but may not match them to students until identification is
+          approved for this account. Enrolment is paused, and every register is decided by hand
+          until then. No redeploy is needed once it is approved.
+        </p>
+      ) : null}
+
       <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[max-content_1fr]">
         <dt className="text-neutral-500">Model</dt>
         <dd className="text-neutral-900">{model.modelName}</dd>
@@ -110,6 +119,12 @@ function ModelProvenance({ model }: { model: ModelInfoResponse | null }) {
         <dd className="text-neutral-900">{model.commercialUse}</dd>
         <dt className="text-neutral-500">Production eligible</dt>
         <dd className="text-neutral-900">{model.productionEligible ? "Yes" : "No"}</dd>
+        {model.identification ? (
+          <>
+            <dt className="text-neutral-500">Identification</dt>
+            <dd className="text-neutral-900">{model.identification.replace("_", " ")}</dd>
+          </>
+        ) : null}
       </dl>
 
       <p className="text-xs text-neutral-500">

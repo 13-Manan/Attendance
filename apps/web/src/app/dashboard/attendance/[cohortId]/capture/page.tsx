@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { requireCohortAccess } from "@/modules/authorization/cohort-access";
-import { requireSameInstitution } from "@/modules/authorization/service";
+import { hasPermission, requireSameInstitution } from "@/modules/authorization/service";
 import { getCohortById } from "@/modules/cohorts/repository";
 import { getInstitutionById } from "@/modules/institutions/repository";
 import { resolveAttendanceMode } from "@/modules/institutions/service";
@@ -10,7 +10,7 @@ import { CaptureWizard } from "./capture-client";
 
 interface PageProps {
   params: Promise<{ cohortId: string }>;
-  searchParams: Promise<{ subject?: string }>;
+  searchParams: Promise<{ subject?: string; add?: string }>;
 }
 
 /**
@@ -24,7 +24,7 @@ interface PageProps {
  */
 export default async function AttendanceCapturePage({ params, searchParams }: PageProps) {
   const { cohortId } = await params;
-  const { subject: cohortSubjectId } = await searchParams;
+  const { subject: cohortSubjectId, add } = await searchParams;
 
   const user = await requirePermissionOrRedirect("attendanceSession.capture");
   const cohort = await getCohortById(cohortId);
@@ -88,6 +88,8 @@ export default async function AttendanceCapturePage({ params, searchParams }: Pa
         cohortSubjectId={cohortSubjectId ?? null}
         attendanceMode={mode}
         useFixtureCamera={fixtureCamera}
+        showDiagnostics={hasPermission(user, "faceEmbedding.manage")}
+        addingToRegister={add === "1"}
       />
     </div>
   );

@@ -1,9 +1,33 @@
 """YuNet + SFace, through OpenCV's own implementations.
 
-    image -> YuNet (FaceDetectorYN)   -> boxes + 5 landmarks + scores
-          -> SFace  (alignCrop)       -> 112x112 warped crop
-          -> SFace  (feature)         -> raw 128-d vector
-          -> L2 normalise             -> the template we store and compare
+    image -> YuNetDetector  (FaceDetectorYN)  -> boxes + 5 landmarks + scores
+          -> SFaceAligner   (alignCrop)       -> 112x112 warped crop
+          -> app/quality.py                   -> measurements, flags, score
+          -> SFaceEmbedder  (cv2.dnn, batched) -> raw 128-d vectors
+          -> L2 normalise                     -> the template we store and compare
+
+Each arrow is a stage object implementing a protocol from pipeline.py, so the
+provider is an assembly rather than a monolith, and each stage reports its own
+identity and licensing.
+
+## Batching, and why it changes nothing about the vectors
+
+``FaceRecognizerSF.feature`` embeds one crop per call. For a classroom frame
+that is thirty sequential inferences. The embedder instead runs the same ONNX
+graph through ``cv2.dnn`` with ``blobFromImages``, several crops per forward
+pass, using the preprocessing ``feature`` applies internally (scale 1, no mean,
+BGR->RGB, 112x112). Measured on this artefact the outputs are identical to
+``feature`` (max absolute difference 0.0), so batching is not a preprocessing
+change and stored templates remain comparable. Chunks of eight: the same
+throughput as one batch of forty at under half the peak memory.
+
+## Thread safety
+
+gunicorn runs sync routes on a thread pool, so two requests can reach one
+provider at once. ``FaceDetectorYN.setInputSize`` followed by ``detect`` is a
+read-modify-use sequence on shared state, and a ``cv2.dnn.Net`` holds its
+input blob between ``setInput`` and ``forward``. Each stage serialises its own
+critical section with a lock; different stages still overlap.
 
 ## Why OpenCV rather than ONNX Runtime directly
 
@@ -33,8 +57,8 @@ promises, and refusing to run weights nobody verified.
    run ~2.3-5.1. ``FaceRecognizerSF.match`` normalises internally, which hides
    it from anyone who only ever uses OpenCV end to end. We store vectors in
    pgvector and compare them ourselves, so a raw vector would be correct under
-   cosine distance and quietly wrong under inner-product or L2. ``embed``
-   normalises before returning; a test asserts it.
+   cosine distance and quietly wrong under inner-product or L2.
+   ``_normalise`` runs on every vector before it leaves; a test asserts it.
 
 2. **Landmark order is positional and easy to transpose.** YuNet emits
    right-eye, left-eye, nose, right-mouth, left-mouth. Our contract is *named*.
@@ -48,22 +72,49 @@ from __future__ import annotations
 import base64
 import binascii
 import math
+import threading
+import time
+from pathlib import Path
 
 import numpy as np
 
-from app.models.base import AlignedFace, DetectionResult, FaceModelProvider
+from app.models.base import (
+    AlignedFace,
+    DetectionResult,
+    EnrollmentOutcome,
+    FaceModelProvider,
+    ImageAnalysis,
+)
 from app.models.model_files import SFACE, YUNET, verify_all
+from app.models.pipeline import (
+    AlignedCrop,
+    PipelineTimings,
+    RawDetection,
+    StageDescriptor,
+    StageSet,
+)
+from app.quality import (
+    ENROLLMENT_PROFILE,
+    GROUP_PROFILE,
+    MIN_EMBEDDABLE_FACE_PX,
+    FaceMeasurements,
+    QualityProfile,
+    evaluate,
+    measure,
+    metrics_from,
+)
 from app.schemas import (
     EMBEDDING_DIMENSION,
     BoundingBox,
     DetectedFace,
     DetectedFaceBox,
+    DetectEmbedImageSummary,
     FaceLandmarks,
     FaceQualityAssessment,
-    FaceQualityMetric,
     FaceQualityMetrics,
     FaceQualityReason,
     Point,
+    RejectedFace,
     SessionImageInput,
 )
 
@@ -90,6 +141,277 @@ SFACE_TEMPLATE_112: tuple[tuple[float, float], ...] = (
 
 ALIGNED_SIZE = 112
 
+#: Crops per forward pass. Measured: 8 matches the throughput of one batch of
+#: 40 at under half the peak memory (see the module note).
+EMBED_BATCH_SIZE = 8
+
+_TRAINING_DATA_NOTE = (
+    "Weights licence is permissive, but the training data behind the "
+    "distributed artefact is not licensed for commercial biometric use or is "
+    "undocumented — see models/LICENSING.md. Not production-approved."
+)
+
+
+def _ms_since(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
+
+
+# ===========================================================================
+# Stages
+# ===========================================================================
+
+
+class YuNetDetector:
+    """YuNet via ``cv2.FaceDetectorYN``: boxes, five landmarks and a score."""
+
+    descriptor = StageDescriptor(
+        role="detector",
+        name="yunet",
+        version=YUNET.upstream_release,
+        runtime="opencv-FaceDetectorYN",
+        commercial_use="unclear",
+        capabilities=frozenset({"landmarks5"}),
+        required_assets=(YUNET.filename,),
+        licence_note=(
+            "MIT weights; trained on WIDER FACE, whose annotations are "
+            "CC BY-NC-ND. " + _TRAINING_DATA_NOTE
+        ),
+    )
+
+    def __init__(
+        self,
+        model_path: Path,
+        score_threshold: float,
+        nms_threshold: float,
+        top_k: int,
+        max_detection_edge: int | None = None,
+    ) -> None:
+        self._model_path = model_path
+        self._score_threshold = score_threshold
+        self._nms_threshold = nms_threshold
+        self._top_k = top_k
+        self._max_detection_edge = max_detection_edge
+        self._detector = None
+        self._input_size: tuple[int, int] | None = None
+        self._lock = threading.Lock()
+
+    def load(self) -> None:
+        import cv2
+
+        self._detector = cv2.FaceDetectorYN.create(
+            model=str(self._model_path),
+            config="",
+            # Replaced per image by `setInputSize`. YuNet's anchor grid is
+            # derived from the input size, so it must match the frame actually
+            # being scored; this is only a construction-time placeholder.
+            input_size=(320, 320),
+            score_threshold=self._score_threshold,
+            nms_threshold=self._nms_threshold,
+            top_k=self._top_k,
+        )
+        blank = np.full((ALIGNED_SIZE, ALIGNED_SIZE, 3), 128, dtype=np.uint8)
+        self.rows(blank)
+
+    def rows(self, frame: np.ndarray) -> np.ndarray:
+        """Raw ``[N, 15]`` YuNet rows, in pixels of ``frame``.
+
+        A frame whose longest edge exceeds ``max_detection_edge`` is detected
+        on a downscaled copy and the coordinates scaled back. Detection cost
+        grows with pixel count, and a face big enough to recognise is still
+        big enough to find at 1920px; alignment then crops from the full
+        frame, so no resolution is lost where it matters. The web client
+        already caps captures at 1920px, so this only bounds other callers.
+        """
+        if self._detector is None:
+            raise ModelNotLoadedError("The detector was used before load().")
+        import cv2
+
+        height, width = frame.shape[:2]
+        scale = 1.0
+        target = frame
+        limit = self._max_detection_edge
+        if limit and max(height, width) > limit:
+            scale = limit / float(max(height, width))
+            target = cv2.resize(
+                frame,
+                (max(1, round(width * scale)), max(1, round(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        size = (int(target.shape[1]), int(target.shape[0]))
+        with self._lock:
+            # YuNet builds its anchor grid from the declared input size, so it
+            # must equal the frame being scored or every box lands in the
+            # wrong place. Cached because setInputSize rebuilds that grid, and
+            # a three-capture classroom request is three frames of one size.
+            # Inside the lock: the size and the detect must belong to the
+            # same frame.
+            if self._input_size != size:
+                self._detector.setInputSize(size)
+                self._input_size = size
+            _, faces = self._detector.detect(target)
+
+        if faces is None:
+            return np.empty((0, 15), dtype=np.float32)
+        rows = np.array(faces, dtype=np.float32)
+        if rows.ndim != 2 or rows.shape[1] < 15:
+            # A malformed detector result must not be interpreted. Returning
+            # "no faces" is the conservative answer: it routes every student to
+            # review rather than inventing a match.
+            return np.empty((0, 15), dtype=np.float32)
+        if scale != 1.0:
+            rows[:, :14] /= scale
+        return rows
+
+    def detect_frame(self, frame: np.ndarray) -> list[RawDetection]:
+        height, width = frame.shape[:2]
+        found: list[RawDetection] = []
+        for row in self.rows(frame):
+            box = OpenCVFaceModelProvider._box_from_row(row, width, height)
+            if box is None:
+                continue
+            found.append(
+                RawDetection(
+                    box=box,
+                    score=float(min(max(row[14], 0.0), 1.0)),
+                    landmarks=OpenCVFaceModelProvider._landmarks_from_row(row),
+                )
+            )
+        return found
+
+
+class SFaceAligner:
+    """``FaceRecognizerSF.alignCrop``: the similarity transform SFace expects.
+
+    The recogniser object is held only for its alignment. Its own network is
+    never run (``SFaceEmbedder`` does the inference, batched), so apart from
+    the weights it loads nothing is allocated for it. A numpy re-implementation
+    of the transform was measured at cosine >= 0.999997 against this one —
+    close, but not identical, and "not identical" is a preprocessing change
+    that would orphan every stored template. So the reference implementation
+    stays.
+    """
+
+    descriptor = StageDescriptor(
+        role="aligner",
+        name="sface-aligncrop",
+        version="opencv-" + SFACE.upstream_release,
+        runtime="opencv-FaceRecognizerSF.alignCrop",
+        commercial_use="not-applicable",
+        capabilities=frozenset({"similarity_transform"}),
+        required_assets=(SFACE.filename,),
+        licence_note="OpenCV (Apache-2.0) geometry; no learned weights are used.",
+    )
+    output_size = ALIGNED_SIZE
+
+    def __init__(self, model_path: Path) -> None:
+        self._model_path = model_path
+        self._recognizer = None
+
+    def load(self) -> None:
+        import cv2
+
+        self._recognizer = cv2.FaceRecognizerSF.create(
+            model=str(self._model_path), config=""
+        )
+
+    def align_frame(
+        self,
+        frame: np.ndarray,
+        box: BoundingBox,
+        landmarks: FaceLandmarks | None,
+    ) -> AlignedCrop:
+        import cv2
+
+        if self._recognizer is None:
+            raise ModelNotLoadedError("The aligner was used before load().")
+        if landmarks is not None:
+            row = OpenCVFaceModelProvider._row_for_align(box, landmarks)
+            aligned = self._recognizer.alignCrop(frame, row)
+            if aligned is None or aligned.size == 0:
+                raise ImageDecodeError("Alignment produced an empty crop.")
+            return AlignedCrop(crop=aligned, aligned=True)
+
+        x0 = max(0, int(box.x))
+        y0 = max(0, int(box.y))
+        x1 = min(frame.shape[1], int(box.x + box.width))
+        y1 = min(frame.shape[0], int(box.y + box.height))
+        crop = frame[y0:y1, x0:x1]
+        if crop.size == 0:
+            raise ImageDecodeError("The bounding box does not overlap the image.")
+        resized = cv2.resize(
+            crop, (ALIGNED_SIZE, ALIGNED_SIZE), interpolation=cv2.INTER_LINEAR
+        )
+        return AlignedCrop(crop=resized, aligned=False)
+
+
+class SFaceEmbedder:
+    """SFace through ``cv2.dnn``, several crops per forward pass."""
+
+    descriptor = StageDescriptor(
+        role="embedder",
+        name="sface",
+        version=SFACE.upstream_release,
+        runtime="opencv-dnn",
+        commercial_use="unclear",
+        capabilities=frozenset({"batch"}),
+        required_assets=(SFACE.filename,),
+        embedding_dim=EMBEDDING_DIMENSION,
+        licence_note=(
+            "Apache-2.0 weights; training data undocumented (likely "
+            "CASIA-WebFace / VGGFace2 / MS1M-derived). " + _TRAINING_DATA_NOTE
+        ),
+    )
+
+    def __init__(self, model_path: Path, batch_size: int = EMBED_BATCH_SIZE) -> None:
+        self._model_path = model_path
+        self._batch_size = max(1, batch_size)
+        self._net = None
+        self._lock = threading.Lock()
+
+    def load(self) -> None:
+        import cv2
+
+        self._net = cv2.dnn.readNetFromONNX(str(self._model_path))
+        blank = np.full((ALIGNED_SIZE, ALIGNED_SIZE, 3), 128, dtype=np.uint8)
+        self.embed_crops([blank])
+
+    def embed_crops(self, crops: list[np.ndarray]) -> np.ndarray:
+        """Raw vectors, one row per crop.
+
+        ``blobFromImages(scale 1, size 112, mean 0, swapRB)`` is exactly what
+        ``FaceRecognizerSF.feature`` does internally: raw 0-255 values, no mean
+        subtraction, BGR->RGB. Doing any of it before this point as well would
+        double-apply it, which is why frames stay BGR from decode onward.
+        """
+        import cv2
+
+        if self._net is None:
+            raise ModelNotLoadedError("The embedder was used before load().")
+        if not crops:
+            return np.empty((0, EMBEDDING_DIMENSION), dtype=np.float32)
+        outputs: list[np.ndarray] = []
+        for start in range(0, len(crops), self._batch_size):
+            chunk = crops[start : start + self._batch_size]
+            blob = cv2.dnn.blobFromImages(
+                chunk,
+                scalefactor=1.0,
+                size=(ALIGNED_SIZE, ALIGNED_SIZE),
+                mean=(0, 0, 0),
+                swapRB=True,
+                crop=False,
+            )
+            with self._lock:
+                self._net.setInput(blob)
+                out = self._net.forward()
+            outputs.append(np.asarray(out, dtype=np.float32).reshape(len(chunk), -1))
+        return np.concatenate(outputs, axis=0)
+
+
+# ===========================================================================
+# Provider
+# ===========================================================================
+
 
 class OpenCVFaceModelProvider(FaceModelProvider):
     """Real recognition: YuNet detection, SFace embedding, via OpenCV."""
@@ -102,13 +424,14 @@ class OpenCVFaceModelProvider(FaceModelProvider):
     #: becomes incomparable, and `modelVersion` is what makes that detectable.
     weights_version = f"yunet-{YUNET.upstream_release}+sface-{SFACE.upstream_release}"
     #: Bump on any change to decode, crop, alignment template, resize, channel
-    #: order or normalisation. "1" is this pipeline's first definition.
+    #: order or normalisation. "1" is this pipeline's first definition, and the
+    #: staged/batched pipeline was verified to produce identical vectors.
     preprocessing_version = "1"
     embedding_dim = EMBEDDING_DIMENSION
     runtime = "opencv"
     #: STAYS "unclear". The weight licences are permissive (SFace Apache-2.0,
-    #: YuNet MIT) but the training-data provenance behind the distributed SFace
-    #: artefact is unresolved for commercial biometric use — see LICENSING.md.
+    #: YuNet MIT) but the training-data provenance behind both artefacts is
+    #: unresolved for commercial biometric use — see LICENSING.md.
     #: `config.py` refuses production traffic on anything but "permitted", and a
     #: test asserts no shipped backend claims it.
     commercial_use = "unclear"
@@ -119,33 +442,48 @@ class OpenCVFaceModelProvider(FaceModelProvider):
         score_threshold: float = 0.6,
         nms_threshold: float = 0.3,
         top_k: int = 5000,
-        min_face_pixels: int = 24,
+        min_face_pixels: int | None = None,
+        max_detection_edge: int | None = 1920,
+        enrollment_profile: QualityProfile = ENROLLMENT_PROFILE,
+        group_profile: QualityProfile = GROUP_PROFILE,
     ) -> None:
         self._model_dir = model_dir
         # YuNet's own published defaults. Exposed as configuration rather than
         # constants because a classroom is not the benchmark these were tuned
         # on, and lowering the score threshold to catch a back row is a decision
-        # an operator must be able to make and measure. THEY ARE NOT CALIBRATED
-        # FOR THIS PRODUCT.
+        # an operator must be able to make and measure.
         self._score_threshold = score_threshold
         self._nms_threshold = nms_threshold
         self._top_k = top_k
-        # Faces below this are refused for *enrolment*, where a bad template is
-        # permanent. Detection reports them; it is the enrolment gate that
-        # cares. Configurable for the same reason as above.
-        self._min_face_pixels = min_face_pixels
-        self._detector = None
-        self._recognizer = None
-        self._detector_input_size: tuple[int, int] | None = None
+        self._max_detection_edge = max_detection_edge
+        # An explicit minimum overrides the calibrated enrolment profile's —
+        # an operator decision, and one the profile cannot second-guess.
+        if min_face_pixels is not None:
+            from dataclasses import replace
+
+            enrollment_profile = replace(
+                enrollment_profile,
+                min_face_px=float(min_face_pixels),
+                good_face_px=max(
+                    enrollment_profile.good_face_px, float(min_face_pixels)
+                ),
+            )
+        self.enrollment_profile = enrollment_profile
+        self.group_profile = group_profile
+        self.detector: YuNetDetector | None = None
+        self.aligner: SFaceAligner | None = None
+        self.embedder: SFaceEmbedder | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
     def load(self) -> None:
-        """Verify the artefacts, build both OpenCV models, then warm them.
+        """Verify the artefacts, build every stage, then warm them.
 
         Every failure here is a startup failure, which is the point: a missing
         file, a tampered artefact or a broken OpenCV build must fail the
-        container's health check rather than a student's enrolment.
+        container's health check rather than a student's enrolment. Warming
+        moves lazy allocation off the first classroom capture, where a
+        teacher is standing in front of a room waiting.
         """
         if not self._model_dir:
             raise ModelNotLoadedError(
@@ -159,46 +497,38 @@ class OpenCVFaceModelProvider(FaceModelProvider):
         # OpenCV sees a path, so an unverified file is never opened at all.
         paths = verify_all(self._model_dir)
 
-        import cv2
-
-        self._detector = cv2.FaceDetectorYN.create(
-            model=str(paths["detector"]),
-            config="",
-            # Replaced per image by `setInputSize`. YuNet's anchor grid is
-            # derived from the input size, so it must match the frame actually
-            # being scored; this is only a construction-time placeholder.
-            input_size=(320, 320),
+        detector = YuNetDetector(
+            paths["detector"],
             score_threshold=self._score_threshold,
             nms_threshold=self._nms_threshold,
             top_k=self._top_k,
+            max_detection_edge=self._max_detection_edge,
         )
-        self._recognizer = cv2.FaceRecognizerSF.create(
-            model=str(paths["recognizer"]),
-            config="",
-        )
-        self._warmup()
-
-    def _warmup(self) -> None:
-        """Run one inference of each network on a synthetic frame.
-
-        The first ``detect``/``feature`` call pays lazy allocation and graph
-        setup. Doing it here moves that cost off the first classroom capture,
-        where a teacher is standing in front of a room waiting.
-
-        A flat grey frame, not a face: this is about allocating buffers, and the
-        result is discarded.
-        """
-        blank = np.full((ALIGNED_SIZE, ALIGNED_SIZE, 3), 128, dtype=np.uint8)
-        assert self._detector is not None and self._recognizer is not None
-        self._detector.setInputSize((ALIGNED_SIZE, ALIGNED_SIZE))
-        self._detector.detect(blank)
-        self._detector_input_size = (ALIGNED_SIZE, ALIGNED_SIZE)
-        self._recognizer.feature(blank)
+        aligner = SFaceAligner(paths["recognizer"])
+        embedder = SFaceEmbedder(paths["recognizer"])
+        for stage in (detector, aligner, embedder):
+            stage.load()
+        self.detector, self.aligner, self.embedder = detector, aligner, embedder
 
     def unload(self) -> None:
-        self._detector = None
-        self._recognizer = None
-        self._detector_input_size = None
+        self.detector = None
+        self.aligner = None
+        self.embedder = None
+
+    def stages(self) -> StageSet:
+        detector, aligner, embedder = self._require_loaded()
+        return StageSet(detector=detector, aligner=aligner, embedder=embedder)
+
+    def stage_descriptors(self) -> tuple[StageDescriptor, ...]:
+        # Static, so model-info can describe the pipeline even before load.
+        from app.models.pipeline import COSINE_MATCHER
+
+        return (
+            YuNetDetector.descriptor,
+            SFaceAligner.descriptor,
+            SFaceEmbedder.descriptor,
+            COSINE_MATCHER,
+        )
 
     # -- decoding -----------------------------------------------------------
 
@@ -207,9 +537,9 @@ class OpenCVFaceModelProvider(FaceModelProvider):
         """base64 -> BGR uint8 array.
 
         BGR because that is what OpenCV produces and what both models expect
-        (SFace's own preprocessing does the BGR->RGB swap internally, inside
-        ``feature``). Converting here would double-swap and degrade every
-        embedding in a way nothing would report.
+        (SFace's preprocessing does the BGR->RGB swap itself). Converting here
+        would double-swap and degrade every embedding in a way nothing would
+        report.
         """
         if not image_base64:
             raise ImageDecodeError("No image data was supplied.")
@@ -235,12 +565,12 @@ class OpenCVFaceModelProvider(FaceModelProvider):
             )
         return image
 
-    def _require_loaded(self):
-        if self._detector is None or self._recognizer is None:
+    def _require_loaded(self) -> tuple[YuNetDetector, SFaceAligner, SFaceEmbedder]:
+        if self.detector is None or self.aligner is None or self.embedder is None:
             raise ModelNotLoadedError(
                 "The opencv backend was used before load() completed."
             )
-        return self._detector, self._recognizer
+        return self.detector, self.aligner, self.embedder
 
     # -- detection ----------------------------------------------------------
 
@@ -264,50 +594,25 @@ class OpenCVFaceModelProvider(FaceModelProvider):
 
     def _detect_rows(self, image: np.ndarray) -> np.ndarray:
         """Raw ``[N, 15]`` detections for one decoded frame."""
-        detector, _ = self._require_loaded()
-        height, width = image.shape[:2]
-        size = (int(width), int(height))
-        # YuNet builds its anchor grid from the declared input size, so it must
-        # equal the frame being scored or every box lands in the wrong place.
-        # Cached because setInputSize rebuilds that grid, and a three-capture
-        # classroom request is three frames of identical size.
-        if self._detector_input_size != size:
-            detector.setInputSize(size)
-            self._detector_input_size = size
-
-        _, faces = detector.detect(image)
-        if faces is None:
-            return np.empty((0, 15), dtype=np.float32)
-        rows = np.asarray(faces, dtype=np.float32)
-        if rows.ndim != 2 or rows.shape[1] < 15:
-            # A malformed detector result must not be interpreted. Returning
-            # "no faces" is the conservative answer: it routes every student to
-            # review rather than inventing a match.
-            return np.empty((0, 15), dtype=np.float32)
-        return rows
+        detector, _, _ = self._require_loaded()
+        return detector.rows(image)
 
     def detect(self, image_base64: str) -> DetectionResult:
         image = self._decode(image_base64)
-        rows = self._detect_rows(image)
+        detector, _, _ = self._require_loaded()
         height, width = image.shape[:2]
-
-        faces: list[DetectedFaceBox] = []
-        for index, row in enumerate(rows):
-            box = self._box_from_row(row, width, height)
-            if box is None:
-                continue
-            faces.append(
-                DetectedFaceBox(
-                    faceId=index,
-                    boundingBox=box,
-                    # Clamped: the contract promises [0, 1], and a detector that
-                    # returns a hair over 1.0 must not leak that upward into a
-                    # confidence the rest of the system compares against a
-                    # threshold.
-                    detectionConfidence=float(min(max(row[14], 0.0), 1.0)),
-                    landmarks=self._landmarks_from_row(row),
-                )
+        faces = [
+            DetectedFaceBox(
+                faceId=index,
+                boundingBox=found.box,
+                # Clamped in detect_frame: the contract promises [0, 1], and a
+                # detector that returns a hair over 1.0 must not leak that into
+                # a confidence the rest of the system compares to a threshold.
+                detectionConfidence=found.score,
+                landmarks=found.landmarks,
             )
+            for index, found in enumerate(detector.detect_frame(image))
+        ]
         return DetectionResult(
             faces=faces, image_width=int(width), image_height=int(height)
         )
@@ -335,129 +640,124 @@ class OpenCVFaceModelProvider(FaceModelProvider):
 
     # -- quality ------------------------------------------------------------
 
-    def assess_quality(self, image_base64: str) -> FaceQualityAssessment:
-        """Judge a single-subject image for enrolment.
-
-        Only what is actually measured is reported. Blur (variance of the
-        Laplacian), brightness (mean luminance) and face size are computed here;
-        pose and occlusion are not, and are reported ``unavailable`` rather than
-        given a plausible number an operator might tune against.
-
-        The two thresholds that reject — minimum face pixels, and the blur and
-        brightness bounds — are conservative and configurable. They are NOT
-        calibrated against classroom data.
-        """
-        import cv2
-
-        try:
-            image = self._decode(image_base64)
-        except ImageDecodeError as error:
-            return FaceQualityAssessment(
-                reason="low_quality",
-                qualityScore=0.0,
-                faceCount=0,
-                metrics=FaceQualityMetrics.all_unavailable(),
-                detail=str(error),
-            )
-
-        rows = self._detect_rows(image)
-        face_count = int(rows.shape[0])
-
-        if face_count == 0:
-            return self._quality(
-                "no_face", 0.0, 0, None, None, None, "No face was found in the image."
-            )
-        if face_count > 1:
-            return self._quality(
-                "multiple_faces",
-                0.0,
-                face_count,
-                None,
-                None,
-                None,
-                f"{face_count} faces were found; enrolment needs exactly one.",
-            )
-
-        row = rows[0]
-        box = self._box_from_row(row, image.shape[1], image.shape[0])
-        if box is None:
-            return self._quality(
-                "low_quality", 0.0, 1, None, None, None,
-                "The detected face has no usable area.",
-            )
-
-        face_pixels = float(min(box.width, box.height))
-        crop = image[
-            int(box.y) : int(box.y + box.height), int(box.x) : int(box.x + box.width)
-        ]
-        grey = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.size else None
-        blur = float(cv2.Laplacian(grey, cv2.CV_64F).var()) if grey is not None else 0.0
-        brightness = float(grey.mean()) if grey is not None else 0.0
-        confidence = float(min(max(row[14], 0.0), 1.0))
-
-        if face_pixels < self._min_face_pixels:
-            return self._quality(
-                "face_too_small",
-                confidence,
-                1,
-                blur,
-                brightness,
-                face_pixels,
-                f"The face is {face_pixels:.0f}px across; at least "
-                f"{self._min_face_pixels}px is required for a usable template.",
-            )
-        # Deliberately loose. These reject images that are obviously unusable —
-        # a lens cap, a dark room — not images that are merely imperfect. A
-        # tighter gate would refuse enrolments that would have worked, and the
-        # numbers to set it correctly do not exist yet.
-        if brightness < 25.0:
-            return self._quality(
-                "too_dark", confidence, 1, blur, brightness, face_pixels,
-                "The face is too dark to enrol. Add light and retake.",
-            )
-        if blur < 10.0:
-            return self._quality(
-                "blurred", confidence, 1, blur, brightness, face_pixels,
-                "The face is too blurred to enrol. Hold still and retake.",
-            )
-
-        return self._quality("ok", confidence, 1, blur, brightness, face_pixels, None)
-
     @staticmethod
-    def _quality(
-        reason: FaceQualityReason,
+    def _assessment(
+        reasons: list[FaceQualityReason],
         score: float,
         face_count: int,
-        blur: float | None,
-        brightness: float | None,
-        face_pixels: float | None,
+        metrics: FaceQualityMetrics,
         detail: str | None,
     ) -> FaceQualityAssessment:
         return FaceQualityAssessment(
-            reason=reason,
+            reason=reasons[0] if reasons else "ok",
+            reasons=reasons,
             qualityScore=score,
             faceCount=face_count,
-            metrics=FaceQualityMetrics(
-                blur=(
-                    FaceQualityMetric.measured(blur, "laplacian_variance")
-                    if blur is not None
-                    else FaceQualityMetric.unavailable()
-                ),
-                brightness=(
-                    FaceQualityMetric.measured(brightness, "mean_luminance_0_255")
-                    if brightness is not None
-                    else FaceQualityMetric.unavailable()
-                ),
-                faceSize=(
-                    FaceQualityMetric.measured(face_pixels, "pixels")
-                    if face_pixels is not None
-                    else FaceQualityMetric.unavailable()
-                ),
-                # Not measured. Reporting a number here would be inventing one.
-                pose=FaceQualityMetric.unavailable(),
-                occlusion=FaceQualityMetric.unavailable(),
-            ),
+            metrics=metrics,
             detail=detail,
+        )
+
+    def _single_subject(
+        self, image: np.ndarray
+    ) -> tuple[FaceQualityAssessment, RawDetection | None, AlignedCrop | None]:
+        """The enrolment gate, on an already-decoded frame.
+
+        Exactly one face, then every check in the enrolment profile. Returns
+        the detection and aligned crop too, so the caller that goes on to embed
+        does not detect or align a second time.
+        """
+        detector, aligner, _ = self._require_loaded()
+        found = detector.detect_frame(image)
+
+        if not found:
+            return (
+                self._assessment(
+                    ["no_face"], 0.0, 0, FaceQualityMetrics.all_unavailable(),
+                    "No face was found in the image.",
+                ),
+                None,
+                None,
+            )
+        if len(found) > 1:
+            return (
+                self._assessment(
+                    ["multiple_faces"], 0.0, len(found),
+                    FaceQualityMetrics.all_unavailable(),
+                    f"{len(found)} faces were found; enrolment needs exactly one.",
+                ),
+                None,
+                None,
+            )
+
+        face = found[0]
+        crop: AlignedCrop | None = None
+        try:
+            crop = aligner.align_frame(image, face.box, face.landmarks)
+        except ImageDecodeError:
+            crop = None
+        measurements = measure(
+            face.score, face.box, face.landmarks, crop.crop if crop else None
+        )
+        verdict = evaluate(measurements, self.enrollment_profile)
+        reasons = list(verdict.reasons)
+        if crop is None and "low_quality" not in reasons:
+            reasons.append("low_quality")
+        return (
+            self._assessment(
+                reasons,
+                verdict.score if reasons == verdict.reasons else 0.0,
+                1,
+                metrics_from(measurements),
+                _describe(reasons, measurements, self.enrollment_profile),
+            ),
+            face,
+            crop,
+        )
+
+    def assess_quality(self, image_base64: str) -> FaceQualityAssessment:
+        """Judge a single-subject image for enrolment.
+
+        Every check in ``ENROLLMENT_PROFILE`` runs and every failure is
+        reported, most actionable first — "move closer" before "hold still",
+        because a small face also looks blurred. Pose is estimated from the
+        landmarks; occlusion is not measured and says so.
+        """
+        try:
+            image = self._decode(image_base64)
+        except ImageDecodeError as error:
+            return self._assessment(
+                ["low_quality"], 0.0, 0, FaceQualityMetrics.all_unavailable(),
+                str(error),
+            )
+        assessment, _, _ = self._single_subject(image)
+        return assessment
+
+    def enroll_image(self, image_base64: str) -> EnrollmentOutcome:
+        """One decode, one detection, one alignment, then the embedding.
+
+        The generic path in base.py decodes the image four times and detects
+        twice; for a 1280px capture that is most of the request.
+        """
+        try:
+            image = self._decode(image_base64)
+        except ImageDecodeError as error:
+            return EnrollmentOutcome(
+                assessment=self._assessment(
+                    ["low_quality"], 0.0, 0, FaceQualityMetrics.all_unavailable(),
+                    str(error),
+                ),
+                embedding=None,
+                aligned=False,
+            )
+        assessment, _, crop = self._single_subject(image)
+        if assessment.reason != "ok" or crop is None:
+            return EnrollmentOutcome(
+                assessment=assessment, embedding=None, aligned=False
+            )
+        return EnrollmentOutcome(
+            assessment=assessment,
+            embedding=self._embed_crop(crop.crop),
+            aligned=crop.aligned,
         )
 
     # -- alignment ----------------------------------------------------------
@@ -509,36 +809,17 @@ class OpenCVFaceModelProvider(FaceModelProvider):
         """
         import cv2
 
-        _, recognizer = self._require_loaded()
+        detector, aligner, _ = self._require_loaded()
 
         if landmarks is None or bounding_box is None:
-            rows = self._detect_rows(image)
-            if rows.shape[0] > 0:
-                row = rows[0]
-                found_box = self._box_from_row(row, image.shape[1], image.shape[0])
-                if found_box is not None:
-                    landmarks = landmarks or self._landmarks_from_row(row)
-                    bounding_box = bounding_box or found_box
-
-        if landmarks is not None and bounding_box is not None:
-            row = self._row_for_align(bounding_box, landmarks)
-            aligned = recognizer.alignCrop(image, row)
-            if aligned is None or aligned.size == 0:
-                raise ImageDecodeError("Alignment produced an empty crop.")
-            return aligned, True
+            found = detector.detect_frame(image)
+            if found:
+                landmarks = landmarks or found[0].landmarks
+                bounding_box = bounding_box or found[0].box
 
         if bounding_box is not None:
-            x0 = max(0, int(bounding_box.x))
-            y0 = max(0, int(bounding_box.y))
-            x1 = min(image.shape[1], int(bounding_box.x + bounding_box.width))
-            y1 = min(image.shape[0], int(bounding_box.y + bounding_box.height))
-            crop = image[y0:y1, x0:x1]
-            if crop.size == 0:
-                raise ImageDecodeError("The bounding box does not overlap the image.")
-            resized = cv2.resize(
-                crop, (ALIGNED_SIZE, ALIGNED_SIZE), interpolation=cv2.INTER_LINEAR
-            )
-            return resized, False
+            result = aligner.align_frame(image, bounding_box, landmarks)
+            return result.crop, result.aligned
 
         # Nothing found and nothing supplied: the whole frame, resized. Honest
         # rather than useful — `aligned=False` says so.
@@ -569,19 +850,15 @@ class OpenCVFaceModelProvider(FaceModelProvider):
 
     # -- embedding ----------------------------------------------------------
 
-    def _embed_crop(self, crop: np.ndarray) -> list[float]:
-        """One 112x112 BGR crop -> one L2-normalised 128-d vector.
+    def _normalise(self, raw: np.ndarray) -> list[float]:
+        """One raw vector -> the L2-normalised template, or a refusal.
 
-        ``feature`` performs SFace's own preprocessing internally —
-        ``blobFromImage(crop, scalefactor=1, size=(112,112), mean=(0,0,0),
-        swapRB=true, crop=false)``. That is: raw 0-255 values, no mean
-        subtraction, BGR->RGB. Doing any of it here as well would double-apply
-        it; this is why ``_decode`` keeps the image in BGR.
+        SFace does NOT emit unit vectors — measured norms on this artefact run
+        ~2.3-5.1. The contract in base.py promises normalised embeddings, and
+        pgvector stores what we give it, so this is the line that makes a
+        stored template comparable under cosine similarity.
         """
-        _, recognizer = self._require_loaded()
-        raw = recognizer.feature(crop)
         vector = np.asarray(raw, dtype=np.float64).reshape(-1)
-
         if vector.shape[0] != self.embedding_dim:
             raise ModelNotLoadedError(
                 f"The recogniser returned {vector.shape[0]} dimensions; "
@@ -592,18 +869,21 @@ class OpenCVFaceModelProvider(FaceModelProvider):
             raise ImageDecodeError(
                 "The recogniser produced a non-finite embedding for this crop."
             )
-
         norm = float(np.linalg.norm(vector))
         if norm == 0.0:
             raise ImageDecodeError(
                 "The recogniser produced a zero-length embedding, which has no "
                 "direction and could not be compared against anything."
             )
-        # SFace does NOT emit unit vectors — measured norms on this artefact run
-        # ~2.3-5.1. The contract in base.py promises normalised embeddings, and
-        # pgvector stores what we give it, so this is the line that makes a
-        # stored template comparable under cosine similarity.
         return (vector / norm).tolist()
+
+    def _embed_crop(self, crop: np.ndarray) -> list[float]:
+        """One 112x112 BGR crop -> one L2-normalised 128-d vector."""
+        _, _, embedder = self._require_loaded()
+        raw = embedder.embed_crops([crop])
+        if raw.shape[0] != 1:
+            raise ModelNotLoadedError("The embedder returned the wrong number of rows.")
+        return self._normalise(raw[0])
 
     def embed(
         self,
@@ -615,47 +895,145 @@ class OpenCVFaceModelProvider(FaceModelProvider):
         crop, _ = self._aligned_crop(image, bounding_box, landmarks)
         return self._embed_crop(crop)
 
-    def detect_and_embed(self, image: SessionImageInput) -> list[DetectedFace]:
-        """The classroom path: every face in one frame, each embedded.
+    # -- the classroom path -------------------------------------------------
 
-        Faces are embedded independently and keep their own box, landmarks and
-        confidence. No cross-face or cross-image reasoning happens here —
-        deduplicating a student seen in two captures belongs to
-        ``modules/recognition-engine`` in apps/web, which has the cohort and the
-        policy. This service stays stateless.
+    def analyze_image(self, image: SessionImageInput) -> ImageAnalysis:
+        """Every face in one frame: detected, quality-checked, embedded.
+
+        Faces are embedded independently and keep their own box, landmarks,
+        confidence and quality flags. No cross-face or cross-image reasoning
+        happens here — deciding who is who, deduplicating a student seen in
+        two captures and routing doubt to a human belong to
+        ``modules/recognition-engine`` in apps/web, which has the cohort and
+        the policy. This service stays stateless.
+
+        A face that cannot be embedded is reported in ``rejected`` rather than
+        dropped. The one that matters most in practice is a face too small to
+        identify: the teacher can fix that with a closer photo, but only if
+        somebody tells them it happened.
         """
+        timings = PipelineTimings()
+        started = time.perf_counter()
         frame = self._decode(image.image_base64)
-        rows = self._detect_rows(frame)
+        timings.decode_ms = _ms_since(started)
+        detector, aligner, embedder = self._require_loaded()
         height, width = frame.shape[:2]
 
-        faces: list[DetectedFace] = []
-        for row in rows:
-            box = self._box_from_row(row, width, height)
-            if box is None:
+        started = time.perf_counter()
+        found = detector.detect_frame(frame)
+        timings.detect_ms = _ms_since(started)
+
+        rejected: list[RejectedFace] = []
+        pending: list[tuple[RawDetection, AlignedCrop, FaceMeasurements]] = []
+
+        for face in found:
+            face_px = float(min(face.box.width, face.box.height))
+            if face_px < MIN_EMBEDDABLE_FACE_PX:
+                rejected.append(_rejected(image, face, "face_too_small"))
                 continue
-            landmarks = self._landmarks_from_row(row)
+            started = time.perf_counter()
             try:
-                crop, aligned = self._aligned_crop(frame, box, landmarks)
-                embedding = self._embed_crop(crop)
-            except (ImageDecodeError, ModelNotLoadedError):
-                # One unusable face must not fail a whole classroom capture.
-                # Dropping it means that student is not recognised and lands in
-                # review — which is the safe direction. Marking them present is
-                # the outcome that would be unacceptable.
+                crop = aligner.align_frame(frame, face.box, face.landmarks)
+            except ImageDecodeError:
+                rejected.append(_rejected(image, face, "alignment_failed"))
                 continue
+            finally:
+                timings.align_ms += _ms_since(started)
+            started = time.perf_counter()
+            measurements = measure(face.score, face.box, face.landmarks, crop.crop)
+            timings.quality_ms += _ms_since(started)
+            pending.append((face, crop, measurements))
+
+        started = time.perf_counter()
+        raw = embedder.embed_crops([crop.crop for _, crop, _ in pending])
+        timings.embed_ms = _ms_since(started)
+
+        faces: list[DetectedFace] = []
+        for (face, crop, measurements), vector in zip(pending, raw, strict=True):
+            try:
+                embedding = self._normalise(vector)
+            except ImageDecodeError:
+                # One unusable face must not fail a whole classroom capture.
+                # Reported, so the count of faces the teacher sees is honest;
+                # that student lands in review, which is the safe direction.
+                rejected.append(_rejected(image, face, "embedding_failed"))
+                continue
+            verdict = evaluate(measurements, self.group_profile)
             faces.append(
                 DetectedFace(
                     sequenceNumber=image.sequence_number,
-                    boundingBox=box,
+                    boundingBox=face.box,
                     embedding=embedding,
-                    detectionConfidence=float(min(max(row[14], 0.0), 1.0)),
-                    # Detector confidence, reported as the per-face quality
-                    # score. The contract requires a number here; this is a
-                    # real measurement rather than an invented one, and the
-                    # richer per-metric detail lives on `assess_quality`.
-                    qualityScore=float(min(max(row[14], 0.0), 1.0)),
-                    landmarks=landmarks,
-                    aligned=aligned,
+                    detectionConfidence=face.score,
+                    qualityScore=verdict.score,
+                    landmarks=face.landmarks,
+                    aligned=crop.aligned,
+                    qualityFlags=verdict.reasons,
+                    faceSize=measurements.face_size_px,
                 )
             )
-        return faces
+
+        return ImageAnalysis(
+            faces=faces,
+            rejected=rejected,
+            summary=DetectEmbedImageSummary(
+                sequenceNumber=image.sequence_number,
+                imageWidth=int(width),
+                imageHeight=int(height),
+                detectedFaces=len(found),
+                embeddedFaces=len(faces),
+                rejectedFaces=len(rejected),
+            ),
+            timings=timings,
+        )
+
+    def detect_and_embed(self, image: SessionImageInput) -> list[DetectedFace]:
+        return self.analyze_image(image).faces
+
+
+def _rejected(
+    image: SessionImageInput, face: RawDetection, reason: str
+) -> RejectedFace:
+    return RejectedFace(
+        sequenceNumber=image.sequence_number,
+        boundingBox=face.box,
+        detectionConfidence=face.score,
+        reason=reason,
+        faceSize=float(min(face.box.width, face.box.height)),
+    )
+
+
+def _describe(
+    reasons: list[FaceQualityReason],
+    m: FaceMeasurements,
+    profile: QualityProfile,
+) -> str | None:
+    """Operator-facing detail. Debug only — apps/web shows its own wording."""
+    if not reasons:
+        return None
+    parts: list[str] = []
+    for reason in reasons:
+        if reason == "face_too_small":
+            parts.append(
+                f"face is {m.face_size_px:.0f}px; {profile.min_face_px:.0f}px needed"
+            )
+        elif reason == "blurred" and m.sharpness is not None:
+            parts.append(f"sharpness {m.sharpness:.0f} < {profile.min_sharpness:.0f}")
+        elif reason in ("too_dark", "too_bright") and m.brightness is not None:
+            parts.append(f"brightness {m.brightness:.0f}")
+        elif (
+            reason == "bad_angle"
+            and m.yaw_deg is not None
+            and m.pitch_deg is not None
+        ):
+            parts.append(
+                f"yaw {m.yaw_deg:+.0f}°, pitch {m.pitch_deg:+.0f}° (estimated)"
+            )
+        elif reason == "occluded":
+            parts.append(
+                f"detector confidence {m.detection_confidence:.2f} "
+                f"< {profile.min_detection_confidence:.2f}"
+            )
+        else:
+            parts.append(reason)
+    return "; ".join(parts)

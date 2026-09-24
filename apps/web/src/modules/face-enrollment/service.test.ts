@@ -16,7 +16,15 @@ import type { Institution } from "../institutions/types.ts";
 import type { Student } from "../students/types.ts";
 import type { RecordAuditLogInput } from "../audit/types.ts";
 import type { InsertFaceEmbeddingInput, NearestTemplateRow } from "./repository.ts";
-import type { EnrollResponse, FaceQualityReason, ModelInfoResponse } from "@attendance/shared-types";
+import type {
+  EnrollResponse,
+  FaceQualityReason,
+  GalleryEnrollRequest,
+  GalleryEnrollResponse,
+  GalleryRemoveRequest,
+  ModelInfoResponse,
+} from "@attendance/shared-types";
+import type { InsertGallerySampleInput } from "../face-gallery/repository.ts";
 import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
 
 /**
@@ -147,6 +155,8 @@ interface Harness {
   scopes: string[];
   /** The probe vectors the duplicate scan was given. */
   scans: Array<{ institutionId: string; model: { modelName: string; modelVersion: string } }>;
+  /** Every own-sample consistency query, with what it was scoped to. */
+  ownScans: Array<{ institutionId: string; studentId: string }>;
 }
 
 function harness(options: {
@@ -156,7 +166,9 @@ function harness(options: {
   storedModels?: Array<{ modelName: string; modelVersion: string }>;
   neighbours?: NearestTemplateRow[];
   owner?: { studentId: string; institutionId: string } | null;
+  ownSimilarities?: NearestTemplateRow[];
   scanThrows?: boolean;
+  ownScanThrows?: boolean;
   enrollThrows?: boolean;
 } = {}): Harness {
   const students = options.students ?? [student()];
@@ -168,6 +180,7 @@ function harness(options: {
     retired: [],
     scopes: [],
     scans: [],
+    ownScans: [],
   };
 
   h.deps = {
@@ -191,6 +204,12 @@ function harness(options: {
       h.scans.push({ institutionId, model });
       return options.neighbours ?? [];
     },
+    findOwnTemplateSimilarities: async (institutionId, studentId) => {
+      if (options.ownScanThrows) throw new Error("pgvector unavailable");
+      h.scopes.push(institutionId);
+      h.ownScans.push({ institutionId, studentId });
+      return options.ownSimilarities ?? [];
+    },
     insertFaceEmbedding: async (input) => {
       h.inserted.push(input);
       return { id: `emb-${h.inserted.length}` };
@@ -209,6 +228,7 @@ function harness(options: {
     recordAuditLog: async (input) => {
       h.audits.push(input);
     },
+    releaseGalleryFaces: async () => ({ removed: 0, pending: 0 }),
   };
 
   return h;
@@ -627,6 +647,134 @@ test("a collision is audited with both student ids and no vector", async () => {
   assert.equal(auditText(h).includes(String(UNIT_VECTOR[0])), false, "no vector in the log");
 });
 
+// ---------------------------------------------------------------------------
+// Consistency with the student's own samples
+// ---------------------------------------------------------------------------
+
+test("a photograph of somebody else entirely is refused, even when nobody is enrolled with it", async () => {
+  // The defect this check exists for: the neighbour scan is silent because the
+  // person in the photograph has no template anywhere, so without a comparison
+  // against this student's *own* samples the face is stored under their name
+  // and that person is marked present as them.
+  const h = harness({
+    storedModels: [MODEL],
+    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.19 }],
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "does_not_match_student");
+  assert.equal(h.inserted.length, 0);
+});
+
+test("the mismatch refusal is retryable, because the next photograph may be the right one", async () => {
+  const h = harness({
+    storedModels: [MODEL],
+    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.19 }],
+  });
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+  assert.equal(result.ok === false && result.retryable, true);
+});
+
+test("a mismatch is audited with no second student and no vector", async () => {
+  // There is no other student to name — that is the whole point of this
+  // refusal — so the row carries only the score and how many templates it lost
+  // to.
+  const h = harness({
+    storedModels: [MODEL],
+    ownSimilarities: [
+      { embeddingId: "emb-own", studentId: "student-1", similarity: 0.19 },
+      { embeddingId: "emb-own-2", studentId: "student-1", similarity: 0.11 },
+    ],
+  });
+
+  await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+
+  assert.equal(h.audits.length, 1);
+  const payload = h.audits[0].afterJson as Record<string, unknown>;
+  assert.equal(payload.refusal, "does_not_match_student");
+  assert.equal(payload.similarity, 0.19);
+  assert.equal(payload.comparedWith, 2);
+  assert.equal(payload.collidedWithStudentId, undefined);
+  assert.equal(auditText(h).includes(String(UNIT_VECTOR[0])), false, "no vector in the log");
+});
+
+test("the own-sample query is scoped to one student at one institution", async () => {
+  const h = harness({ storedModels: [MODEL] });
+  await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+
+  assert.deepEqual(h.ownScans, [{ institutionId: "inst-A", studentId: "student-1" }]);
+});
+
+test("a staff mismatch says whose photograph to check; a student's does not name anyone", async () => {
+  const mismatch = {
+    storedModels: [MODEL],
+    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.19 }],
+  };
+  const staff = harness(mismatch);
+  const staffResult = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    staff.deps,
+  );
+  assert.match(staffResult.message, /photograph/i);
+
+  const own = harness({ ...mismatch, institution: institution({ type: "COLLEGE" }) });
+  const ownResult = await enrollOwnFaceRequest(studentUser(), CAMERA, own.deps);
+  assert.equal(ownResult.ok === false && ownResult.reason, "does_not_match_student");
+  assert.doesNotMatch(ownResult.message, /student-1/);
+});
+
+test("a student with no samples yet is not asked to match samples that do not exist", async () => {
+  const h = harness({ ownSimilarities: [] });
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+  assert.equal(result.ok, true);
+});
+
+test("a failed own-sample query does not fail the enrollment", async () => {
+  // Same posture as the neighbour scan: a safety query that could not run is
+  // not evidence of a problem, and making enrollment depend on pgvector being
+  // reachable would take the whole feature down with it.
+  const h = harness({ storedModels: [MODEL], ownScanThrows: true });
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+  assert.equal(result.ok, true);
+});
+
+test("a replacement is not checked against the templates it is about to retire", async () => {
+  // Re-enrolment from scratch is the intended answer when a student no longer
+  // resembles their old templates — a child who has grown, a new model. If the
+  // check ran here, that student would have no way back in.
+  const h = harness({
+    storedModels: [MODEL],
+    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.05 }],
+  });
+
+  const result = await replaceFaceEnrollmentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(h.ownScans, [], "and the query is not even made");
+});
+
 test("re-submitting the same photograph is reported, not stored twice", async () => {
   const h = harness({
     neighbours: [{ embeddingId: "emb-own", studentId: "student-1", similarity: 0.999 }],
@@ -1034,4 +1182,223 @@ test("the portal reports the policy so it can explain a closed door", async () =
 test("reading your own status requires the self-enrollment permission", async () => {
   const h = harness();
   await assert.rejects(() => getOwnFaceEnrollment(staffAdmin(), h.deps), ForbiddenError);
+});
+
+// ---------------------------------------------------------------------------
+// Gallery providers (Azure AI Face). Every provider answer is a fixture.
+// ---------------------------------------------------------------------------
+
+const GALLERY_MODEL_INFO: ModelInfoResponse = {
+  ...MODEL_INFO,
+  modelName: "azure-face",
+  modelVersion: "detection_03+recognition_04",
+  embeddingDim: 0,
+  commercialUse: "permitted",
+  productionEligible: true,
+  templateKind: "gallery",
+  identification: "enabled",
+};
+
+function galleryResponse(
+  overrides: Partial<GalleryEnrollResponse> = {},
+): GalleryEnrollResponse {
+  return {
+    outcome: "accepted",
+    assessment: { reason: "ok", qualityScore: 0.92, faceCount: 1 },
+    placements: [
+      { galleryId: "att-co1", personId: "person-1", persistedFaceId: "face-1", personCreated: true },
+    ],
+    collision: null,
+    ownConfidence: null,
+    modelName: GALLERY_MODEL_INFO.modelName,
+    modelVersion: GALLERY_MODEL_INFO.modelVersion,
+    ...overrides,
+  };
+}
+
+function galleryHarness(options: {
+  identification?: ModelInfoResponse["identification"];
+  cohorts?: string[];
+  persons?: Map<string, string>;
+  response?: GalleryEnrollResponse | Error;
+  insertThrows?: boolean;
+  collisionOwner?: string | null;
+  students?: Student[];
+} = {}) {
+  const base = harness({ students: options.students });
+  const g = {
+    enrollRequests: [] as GalleryEnrollRequest[],
+    removals: [] as GalleryRemoveRequest[],
+    inserted: [] as InsertGallerySampleInput[],
+    replacedWith: [] as InsertGallerySampleInput[],
+    released: 0,
+    faceEnrollCalls: 0,
+  };
+  base.deps = {
+    ...base.deps,
+    faceModelInfo: async () => ({
+      ...GALLERY_MODEL_INFO,
+      identification: options.identification ?? "enabled",
+    }),
+    faceEnroll: async () => {
+      g.faceEnrollCalls++;
+      throw new Error("the vector path must not run for a gallery model");
+    },
+    listActiveCohortIdsForStudent: async () => options.cohorts ?? ["co1"],
+    listActiveGalleryPersons: async () => options.persons ?? new Map(),
+    findStudentForGalleryPerson: async () =>
+      options.collisionOwner === undefined ? "student-2" : options.collisionOwner,
+    galleryEnroll: async (request) => {
+      g.enrollRequests.push(request);
+      const r = options.response ?? galleryResponse();
+      if (r instanceof Error) throw r;
+      return r;
+    },
+    galleryRemove: async (request) => {
+      g.removals.push(request);
+      return { removed: request.removals.length };
+    },
+    insertGallerySample: async (input) => {
+      if (options.insertThrows) throw new Error("db down");
+      g.inserted.push(input);
+      return { id: "fe-gallery-1" };
+    },
+    replaceWithGallerySample: async (input) => {
+      g.replacedWith.push(input);
+      return { id: "fe-gallery-2", retired: 2 };
+    },
+    releaseGalleryFaces: async () => {
+      g.released++;
+      return { removed: 0, pending: 0 };
+    },
+  };
+  return { h: base, g };
+}
+
+test("gallery: identification not approved refuses before the image is sent", async () => {
+  const { h, g } = galleryHarness({ identification: "not_approved" });
+  const result = await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+  assert.equal(result.ok === false && result.reason, "recognition_not_enabled");
+  assert.equal(result.ok === false && result.retryable, false);
+  assert.equal(g.enrollRequests.length, 0);
+  assert.equal(g.faceEnrollCalls, 0);
+});
+
+test("gallery: a provider 409 identification_not_approved is the same refusal", async () => {
+  const error = Object.assign(new Error("face_ai_request_failed"), { code: "identification_not_approved" });
+  const { h, g } = galleryHarness({ response: error });
+  const result = await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+  assert.equal(result.ok === false && result.reason, "recognition_not_enabled");
+  assert.equal(g.inserted.length, 0);
+});
+
+test("gallery: a student in no class is refused before the image is sent", async () => {
+  const { h, g } = galleryHarness({ cohorts: [] });
+  const result = await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+  assert.equal(result.ok === false && result.reason, "no_active_class");
+  assert.equal(g.enrollRequests.length, 0);
+});
+
+test("gallery: an accepted sample is placed in one gallery per class and stored without a vector", async () => {
+  const persons = new Map([["att-co1", "person-existing"]]);
+  const { h, g } = galleryHarness({
+    cohorts: ["co1", "co2"],
+    persons,
+    response: galleryResponse({
+      placements: [
+        { galleryId: "att-co1", personId: "person-existing", persistedFaceId: "f1", personCreated: false },
+        { galleryId: "att-co2", personId: "person-new", persistedFaceId: "f2", personCreated: true },
+      ],
+      ownConfidence: 0.9,
+    }),
+  });
+  const result = await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+  assert.equal(result.ok, true);
+  const request = g.enrollRequests[0];
+  assert.deepEqual(request.targets, [
+    { galleryId: "att-co1", personId: "person-existing", personName: "student-1" },
+    { galleryId: "att-co2", personId: null, personName: "student-1" },
+  ]);
+  assert.equal(request.otherPersonMinConfidence, 0.7);
+  assert.equal(request.ownPersonMinConfidence, 0.5);
+  assert.equal(g.inserted.length, 1);
+  assert.equal(g.inserted[0].modelName, "azure-face");
+  assert.equal(g.inserted[0].cohortOfGallery.get("att-co2"), "co2");
+  assert.equal(h.inserted.length, 0, "no vector row is written");
+  const audit = h.audits.find((a) => a.action === "face_enrollment.created");
+  assert.ok(audit);
+  assert.doesNotMatch(JSON.stringify(audit), /person-|"f1"|"f2"|AAAA/);
+});
+
+test("gallery: a collision with another student is refused and names them to staff", async () => {
+  const other = student({ id: "student-2", studentCode: "S-002", firstName: "Arjun", lastName: "Mehta", userId: null });
+  const { h, g } = galleryHarness({
+    students: [student(), other],
+    response: galleryResponse({
+      outcome: "collision",
+      placements: [],
+      collision: { galleryId: "att-co1", personId: "person-9", confidence: 0.88 },
+    }),
+  });
+  const result = await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+  assert.equal(result.ok === false && result.reason, "duplicate_identity");
+  assert.match(result.ok === false ? result.message : "", /Arjun Mehta/);
+  assert.equal(g.inserted.length, 0);
+  assert.ok(h.audits.some((a) => a.action === "face_enrollment.refused"));
+});
+
+test("gallery: a face that does not verify against the student's own samples is refused", async () => {
+  const { h, g } = galleryHarness({
+    persons: new Map([["att-co1", "person-1"]]),
+    response: galleryResponse({ outcome: "own_mismatch", placements: [], ownConfidence: 0.2 }),
+  });
+  const result = await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+  assert.equal(result.ok === false && result.reason, "does_not_match_student");
+  assert.equal(g.inserted.length, 0);
+});
+
+test("gallery: a quality rejection is reported as itself and stores nothing", async () => {
+  const { h, g } = galleryHarness({
+    response: galleryResponse({
+      outcome: "rejected",
+      placements: [],
+      assessment: { reason: "blurred", qualityScore: 0.2, faceCount: 1 },
+    }),
+  });
+  const result = await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+  assert.equal(result.ok, false);
+  assert.equal(result.ok === false && result.retryable, true);
+  assert.equal(g.inserted.length, 0);
+});
+
+test("gallery: a failed database write removes what the provider just stored", async () => {
+  const { h, g } = galleryHarness({
+    insertThrows: true,
+    response: galleryResponse({
+      placements: [
+        { galleryId: "att-co1", personId: "person-old", persistedFaceId: "f1", personCreated: false },
+        { galleryId: "att-co2", personId: "person-new", persistedFaceId: "f2", personCreated: true },
+      ],
+    }),
+    cohorts: ["co1", "co2"],
+  });
+  await assert.rejects(
+    enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps),
+    /db down/,
+  );
+  assert.deepEqual(g.removals[0].removals, [
+    { galleryId: "att-co1", personId: "person-old", persistedFaceId: "f1" },
+    { galleryId: "att-co2", personId: "person-new", persistedFaceId: null },
+  ]);
+});
+
+test("gallery: replace skips the own-person check, retires old samples and releases their faces", async () => {
+  const { h, g } = galleryHarness({ persons: new Map([["att-co1", "person-1"]]) });
+  const result = await replaceFaceEnrollmentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.ok && result.replaced, 2);
+  assert.equal(g.enrollRequests[0].ownPersonMinConfidence, 0);
+  assert.equal(g.replacedWith.length, 1);
+  // Once before sending (stale faces), once after retiring.
+  assert.equal(g.released, 2);
 });

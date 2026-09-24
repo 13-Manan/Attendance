@@ -112,7 +112,9 @@ export async function deleteTemplates(
       data: { matchedEmbeddingId: null },
     }),
     prisma.faceEmbedding.deleteMany({
-      where: { id: { in: ids }, institutionId },
+      // A gallery-backed row whose provider-side faces are still there is
+      // kept: its placements are the only record of where they are.
+      where: { id: { in: ids }, institutionId, galleryPlacements: { none: {} } },
     }),
   ]);
   return deleted.count;

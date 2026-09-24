@@ -31,7 +31,9 @@ cannot verify them:
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 
+from app.models.pipeline import PipelineTimings, StageDescriptor
 from app.schemas import (
     EMBEDDING_DIMENSION,
     FACE_AI_CONTRACT_VERSION,
@@ -39,11 +41,29 @@ from app.schemas import (
     CommercialUseStatus,
     DetectedFace,
     DetectedFaceBox,
+    DetectEmbedImageSummary,
     FaceLandmarks,
     FaceModelInfo,
     FaceQualityAssessment,
+    GalleryEnrollResponse,
+    GalleryRemoval,
+    GalleryTarget,
+    IdentificationStatus,
+    IdentifyResponse,
+    RejectedFace,
     SessionImageInput,
+    TemplateKind,
 )
+
+
+class ProviderCapabilityError(RuntimeError):
+    """The running backend cannot do what the route asked.
+
+    A gallery backend has no vector to return from ``/v1/embed``, and an
+    embedding backend has no gallery to enroll into. Either way this is a 409
+    naming the route to use, not a 500. The request was well-formed; it was
+    sent to the wrong kind of backend.
+    """
 
 
 class DetectionResult:
@@ -83,6 +103,34 @@ class AlignedFace:
         self.aligned = aligned
 
 
+@dataclass
+class ImageAnalysis:
+    """Everything the classroom path learned about one image.
+
+    ``faces`` is what ``detect_and_embed`` has always returned. ``rejected``
+    is every detected face that produced no embedding, with a reason — so a
+    face that was too small to identify is reported instead of vanishing.
+    """
+
+    faces: list[DetectedFace]
+    rejected: list[RejectedFace]
+    summary: DetectEmbedImageSummary
+    timings: PipelineTimings = field(default_factory=PipelineTimings)
+
+
+@dataclass
+class EnrollmentOutcome:
+    """The result of the enrolment path for one image.
+
+    ``embedding`` is None whenever ``assessment.reason != "ok"``: a refused
+    image has no vector, so a caller cannot store one by mistake.
+    """
+
+    assessment: FaceQualityAssessment
+    embedding: list[float] | None
+    aligned: bool
+
+
 class FaceModelProvider(ABC):
     """Interface every face-recognition backend implements."""
 
@@ -94,8 +142,9 @@ class FaceModelProvider(ABC):
     #: order or normalisation changes — any of which invalidates every
     #: previously stored embedding just as surely as new weights would.
     preprocessing_version: str
-    #: Fixed by the contract; a backend with a different native dimension
-    #: must project into this before returning.
+    #: Fixed by the contract. A backend with a different native dimension is
+    #: a contract change (EMBEDDING_DIMENSION, the pgvector column and every
+    #: stored template), not something an adapter papers over by projecting.
     embedding_dim: int = EMBEDDING_DIMENSION
     #: Inference runtime actually in use, for observability only.
     runtime: str = "python"
@@ -103,6 +152,13 @@ class FaceModelProvider(ABC):
     #: models/LICENSING.md; config.py refuses to serve production traffic on
     #: anything that is not "permitted".
     commercial_use: CommercialUseStatus = "unclear"
+    #: Where templates live. See ``TemplateKind`` in app/schemas.py.
+    template_kind: TemplateKind = "embedding"
+
+    def identification_status(self) -> IdentificationStatus:
+        """Whether this backend can identify people right now. Embedding
+        backends leave identification to apps/web."""
+        return "not_applicable"
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -131,6 +187,19 @@ class FaceModelProvider(ABC):
         """
         return f"{self.weights_version}+pp{self.preprocessing_version}"
 
+    def stage_descriptors(self) -> tuple[StageDescriptor, ...]:
+        """The stages this provider is built from. A composed provider
+        overrides this; a monolithic one (the mock) reports none."""
+        return ()
+
+    @property
+    def production_eligible(self) -> bool:
+        """Every part must be cleared, not just the headline status."""
+        return self.commercial_use == "permitted" and all(
+            stage.production_ready or stage.commercial_use == "not-applicable"
+            for stage in self.stage_descriptors()
+        )
+
     def model_info(self) -> FaceModelInfo:
         """Full provenance record. Concrete on purpose: every backend must
         report provenance the same way, so this is not an adapter's choice."""
@@ -143,8 +212,11 @@ class FaceModelProvider(ABC):
             embeddingNormalized=True,
             runtime=self.runtime,
             commercialUse=self.commercial_use,
-            productionEligible=self.commercial_use == "permitted",
+            productionEligible=self.production_eligible,
             contractVersion=FACE_AI_CONTRACT_VERSION,
+            stages=[stage.to_info() for stage in self.stage_descriptors()],
+            templateKind=self.template_kind,
+            identification=self.identification_status(),
         )
 
     # -- pipeline stages ----------------------------------------------------
@@ -192,6 +264,54 @@ class FaceModelProvider(ABC):
         backend should batch their crops through one inference call.
         """
 
+    def analyze_image(self, image: SessionImageInput) -> ImageAnalysis:
+        """``detect_and_embed`` plus what it could not embed, and why.
+
+        The default reports no rejections, which is true of a backend whose
+        ``detect_and_embed`` embeds everything it detects. A backend that
+        drops faces must override this so the drops are visible.
+        """
+        faces = self.detect_and_embed(image)
+        detection = self.detect(image.image_base64)
+        return ImageAnalysis(
+            faces=faces,
+            rejected=[],
+            summary=DetectEmbedImageSummary(
+                sequenceNumber=image.sequence_number,
+                imageWidth=detection.image_width,
+                imageHeight=detection.image_height,
+                detectedFaces=len(detection.faces),
+                embeddedFaces=len(faces),
+                rejectedFaces=0,
+            ),
+        )
+
+    def enroll_image(self, image_base64: str) -> EnrollmentOutcome:
+        """Quality gate, then detect, align and embed the single subject.
+
+        The default composes the public stages, as ``/v1/enroll`` always has.
+        A backend that can do it from one decode should override it.
+        """
+        assessment = self.assess_quality(image_base64)
+        if assessment.reason != "ok":
+            return EnrollmentOutcome(
+                assessment=assessment, embedding=None, aligned=False
+            )
+
+        # An `ok` assessment means exactly one face, so the first is the
+        # subject. A backend that disagrees with itself here (quality says one
+        # face, detection finds none) degrades to an unaligned crop rather
+        # than failing an enrolment somebody is standing in front of.
+        detection = self.detect(image_base64)
+        face = detection.faces[0] if detection.faces else None
+        bounding_box = face.bounding_box if face else None
+        landmarks = face.landmarks if face else None
+        aligned = self.align(image_base64, bounding_box, landmarks)
+        embedding = self.embed(image_base64, bounding_box, landmarks)
+        return EnrollmentOutcome(
+            assessment=assessment, embedding=embedding, aligned=aligned.aligned
+        )
+
     # -- comparison ---------------------------------------------------------
 
     def compare_embeddings(self, a: list[float], b: list[float]) -> float:
@@ -200,6 +320,43 @@ class FaceModelProvider(ABC):
         from app.matching import cosine_similarity
 
         return cosine_similarity(a, b)
+
+
+class GalleryIdentificationProvider(ABC):
+    """What a ``template_kind == "gallery"`` backend adds.
+
+    The backend keeps templates in a store it manages (for Azure Face, one
+    LargePersonGroup per class). apps/web holds the mapping from a person in a
+    gallery to a student, and chooses the gallery for every call. That keeps
+    each Identify scoped to one class, and it keeps this service
+    database-free.
+    """
+
+    @abstractmethod
+    def gallery_enroll(
+        self,
+        image_base64: str,
+        targets: list[GalleryTarget],
+        other_person_min_confidence: float,
+        own_person_min_confidence: float,
+    ) -> GalleryEnrollResponse:
+        """Quality gate, then add the one face to every target gallery."""
+
+    @abstractmethod
+    def gallery_remove(self, removals: list[GalleryRemoval]) -> int:
+        """Delete faces or whole persons. Missing ones count as removed."""
+
+    @abstractmethod
+    def identify(
+        self,
+        gallery_id: str,
+        images: list[SessionImageInput],
+        max_candidates: int,
+        confidence_threshold: float,
+    ) -> IdentifyResponse:
+        """Detect every face in every image and identify them against one
+        gallery. Without identification approval this degrades to detection
+        only, and every candidate list is empty."""
 
 
 # Backwards-compatible alias. The interface was called EmbeddingModel when it

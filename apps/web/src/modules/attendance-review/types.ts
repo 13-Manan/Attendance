@@ -1,4 +1,4 @@
-import type { AttendanceCounts } from "@attendance/shared-types";
+import type { AttendanceCounts, IdentificationStatus } from "@attendance/shared-types";
 import type { AttendanceResult, CorrectionSource } from "@/modules/attendance/types";
 import type { AttendanceMode } from "@/modules/institutions/types";
 import type { SessionStatus } from "@/modules/sessions/types";
@@ -39,9 +39,17 @@ export type AttendanceReviewReason =
   /** Faces were detected but the captures were too poor to compare against.
    * A property of the photograph, not of the student. */
   | "low_quality"
+  /** Like `low_quality`, for the most common and most fixable cause: the face
+   * was too few pixels across to compare reliably. The remedy is a closer
+   * photograph, so the reviewer is told that specifically. */
+  | "face_too_small"
   | "no_face_template"
   | "incompatible_face_template"
   | "recognition_unavailable"
+  /** Recognition ran and faces were counted, but the provider does not allow
+   * identification (Azure Face Limited Access not granted). Nobody was
+   * compared, so this is neither a match nor evidence of absence. */
+  | "identification_unavailable"
   /** Recognition was attempted and failed outright. Distinct from
    * `recognition_unavailable`, which means it was never attempted. */
   | "recognition_error"
@@ -124,6 +132,24 @@ export interface RecognitionRunMetadata {
   skippedIncompatibleCandidates: number;
   presentMin: number;
   reviewMin: number;
+  /** How many recognition passes the register combines: 1, plus one for each
+   * photo the teacher added from the review screen. Absent on older rows. */
+  rounds?: number;
+  /** Distinct faces that resembled nobody in the class. Across several rounds
+   * this is the largest single round's count — the same stranger in two
+   * photos cannot be told apart from two strangers once the vectors are
+   * gone, so the smaller, certain number is reported. */
+  unknownFacesTotal?: number;
+  /** Faces found but too small or unusable to compare at all. */
+  rejectedFacesTotal?: number;
+  /** Some faces were too small to compare reliably; a closer photo would help. */
+  recommendRetake?: boolean;
+  /** "gallery" for a provider-held gallery (Azure AI Face). Absent on older
+   * rows, which are all "embedding". */
+  templateKind?: "embedding" | "gallery";
+  /** Gallery runs: whether identification was allowed. Anything but
+   * "enabled" means the run counted faces and compared nobody. */
+  identification?: IdentificationStatus;
 }
 
 /**

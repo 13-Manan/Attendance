@@ -63,13 +63,19 @@ param faceAiImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 @description('Pass 2 switch — see header. Requires roles to be assigned first.')
 param enableKeyVaultSecretRefs bool = false
 
-@description('''Face AI model backend. Only "mock" ships today; "onnx" is a
-scaffold with no licence-cleared weights (ADR-0006).''')
+@description('''Face AI model backend. "mock" has no weights; "onnx" is a
+scaffold with no licence-cleared weights (ADR-0006); "azure" is Azure AI Face
+(docs/AZURE_FACE.md), whose key must come from Key Vault — pass 2 only.''')
 @allowed([
   'mock'
   'onnx'
+  'azure'
 ])
 param faceModelBackend string = 'mock'
+
+@description('''Azure AI Face endpoint, used when faceModelBackend is "azure". Set
+on face-ai only — never on the web app. Not a secret; the key is.''')
+param azureFaceEndpoint string = ''
 
 @description('''Refuse to start on a backend whose weights are not cleared for
 commercial use. MUST stay false while faceModelBackend is "mock", or the
@@ -106,13 +112,21 @@ var webSecrets = enableKeyVaultSecretRefs ? [
   }
 ] : []
 
-var faceAiSecrets = enableKeyVaultSecretRefs ? [
+var useAzureFace = enableKeyVaultSecretRefs && faceModelBackend == 'azure'
+
+var faceAiSecrets = concat(enableKeyVaultSecretRefs ? [
   {
     name: 'face-ai-auth-token'
     keyVaultUrl: '${keyVaultUri}secrets/FACE-AI-SERVICE-TOKEN'
     identity: 'system'
   }
-] : []
+] : [], useAzureFace ? [
+  {
+    name: 'azure-face-key'
+    keyVaultUrl: '${keyVaultUri}secrets/AZURE-FACE-KEY'
+    identity: 'system'
+  }
+] : [])
 
 var webSecretEnv = enableKeyVaultSecretRefs ? [
   {
@@ -133,12 +147,21 @@ var webSecretEnv = enableKeyVaultSecretRefs ? [
   }
 ] : []
 
-var faceAiSecretEnv = enableKeyVaultSecretRefs ? [
+var faceAiSecretEnv = concat(enableKeyVaultSecretRefs ? [
   {
     name: 'FACE_AI_AUTH_TOKEN'
     secretRef: 'face-ai-auth-token'
   }
-] : []
+] : [], useAzureFace ? [
+  {
+    name: 'AZURE_FACE_ENDPOINT'
+    value: azureFaceEndpoint
+  }
+  {
+    name: 'AZURE_FACE_KEY'
+    secretRef: 'azure-face-key'
+  }
+] : [])
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: environmentName

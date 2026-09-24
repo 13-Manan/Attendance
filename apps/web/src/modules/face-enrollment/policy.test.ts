@@ -6,6 +6,7 @@ import {
   MAX_SAMPLES_PER_STUDENT,
   SAME_TEMPLATE_SIMILARITY,
   classifyEnrollmentCollision,
+  classifyOwnSampleMismatch,
   defaultSelfEnrollmentEnabled,
   inspectEmbedding,
   resolveSelfEnrollmentEnabled,
@@ -71,8 +72,8 @@ test("a NaN is caught before it reaches the database", () => {
   assert.equal(check.ok === false && check.problem, "not_finite");
 });
 
-test("float error accumulated over 512 components is tolerated", () => {
-  // A backend doing everything right cannot return an exact 1.0: summing 512
+test("float error accumulated over every component is tolerated", () => {
+  // A backend doing everything right cannot return an exact 1.0: summing 128
   // squared float32 values drifts. A check that demanded equality would refuse
   // every honest enrollment.
   const drifted = unitVector().map((value, index) => (index === 0 ? value * (1 + 5e-5) : value));
@@ -235,6 +236,59 @@ test("an institution that has lowered its thresholds gets a stricter duplicate c
   assert.equal(
     classifyEnrollmentCollision([neighbour("other", 0.45)], "target", THRESHOLDS).kind,
     "ambiguous_with_other_student",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Consistency with the student's own samples
+// ---------------------------------------------------------------------------
+
+test("a sample that resembles none of the student's own templates is refused", () => {
+  // The mis-filed photograph: a face nobody else is enrolled with, so the
+  // neighbour scan says nothing, stored against a name it does not belong to.
+  // Whoever is in it would then be marked present as that student.
+  const collision = classifyOwnSampleMismatch([{ similarity: 0.21 }, { similarity: 0.18 }], THRESHOLDS);
+  assert.equal(collision.kind, "does_not_match_own_samples");
+  assert.equal(collision.kind === "does_not_match_own_samples" && collision.similarity, 0.21);
+  assert.equal(collision.kind === "does_not_match_own_samples" && collision.comparedWith, 2);
+});
+
+test("the best of the student's own samples decides, not the worst", () => {
+  // One bad early template must not condemn a good new sample. If any stored
+  // template would recognise this face, the set is consistent.
+  assert.equal(
+    classifyOwnSampleMismatch([{ similarity: 0.12 }, { similarity: 0.77 }], THRESHOLDS).kind,
+    "none",
+  );
+});
+
+test("the first sample of a student is never a mismatch", () => {
+  // Nothing to be consistent with. Treating an empty set as suspicious would
+  // make the feature impossible to start using — same reasoning as the empty
+  // neighbourhood above.
+  assert.equal(classifyOwnSampleMismatch([], THRESHOLDS).kind, "none");
+});
+
+test("the own-sample floor is reviewMin, so anything recognition could match survives", () => {
+  // Deliberately the *lower* of the two thresholds. A sample at 0.45 would
+  // reach the review band against its own student, which is a weak but real
+  // match; refusing it would reject genuine poor-light captures. Below it the
+  // pipeline would never connect this face to this name at all, so storing it
+  // can only mislead. Every one of the 61 genuine pairs in the calibration
+  // corpus scored at or above 0.45 (docs/FACE_RECOGNITION_CALIBRATION.md §3).
+  assert.equal(classifyOwnSampleMismatch([{ similarity: 0.45 }], THRESHOLDS).kind, "none");
+  assert.equal(
+    classifyOwnSampleMismatch([{ similarity: 0.4499 }], THRESHOLDS).kind,
+    "does_not_match_own_samples",
+  );
+});
+
+test("an institution that lowered its thresholds lowers this floor with them", () => {
+  // Same principle as the collision check: the question is what this
+  // institution's pipeline would do, not what a fixed number says.
+  assert.equal(
+    classifyOwnSampleMismatch([{ similarity: 0.3 }], { reviewMin: 0.25 }).kind,
+    "none",
   );
 });
 

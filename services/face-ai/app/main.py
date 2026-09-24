@@ -5,9 +5,18 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.auth import check_startup_auth, require_service_auth
+from app.azure_face import (
+    AzureFaceAuthError,
+    AzureFaceBadImageError,
+    AzureFaceError,
+    AzureFaceGalleryNotReadyError,
+    AzureFaceNotApprovedError,
+    AzureFaceNotFoundError,
+)
 from app.config import get_model, get_settings
+from app.models.base import ProviderCapabilityError
 from app.models.opencv_provider import ImageDecodeError
-from app.routers import enrollment, health, process
+from app.routers import enrollment, gallery, health, process
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +89,7 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(process.router, dependencies=[Depends(require_service_auth)])
 app.include_router(enrollment.router, dependencies=[Depends(require_service_auth)])
+app.include_router(gallery.router, dependencies=[Depends(require_service_auth)])
 
 
 @app.exception_handler(ImageDecodeError)
@@ -98,3 +108,40 @@ async def handle_image_decode_error(_request: Request, error: ImageDecodeError):
     and no embedding — only the reason.
     """
     return JSONResponse(status_code=400, content={"detail": str(error)})
+
+
+@app.exception_handler(ProviderCapabilityError)
+async def handle_capability_error(_request: Request, error: ProviderCapabilityError):
+    """The request was sent to the wrong kind of backend. Not an outage."""
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "unsupported_by_backend", "message": str(error)},
+    )
+
+
+@app.exception_handler(AzureFaceError)
+async def handle_azure_face_error(_request: Request, error: AzureFaceError):
+    """Azure Face failures, as a stable code the caller can branch on.
+
+    The body is the code only. It never carries the Azure response body, the
+    endpoint or the key. The log line has the code and Azure's own error code
+    and nothing else.
+    """
+    if isinstance(error, AzureFaceNotApprovedError | AzureFaceGalleryNotReadyError):
+        status = 409
+    elif isinstance(error, AzureFaceBadImageError):
+        status = 400
+    elif isinstance(error, AzureFaceNotFoundError):
+        status = 404
+    elif isinstance(error, AzureFaceAuthError):
+        # Our credential, not the caller's. A gateway failure, not a 401.
+        status = 502
+    else:
+        status = 503
+    logger.warning(
+        "azure-face request failed: code=%s azure_code=%s status=%s",
+        error.code,
+        error.azure_code,
+        error.status,
+    )
+    return JSONResponse(status_code=status, content={"detail": error.code})

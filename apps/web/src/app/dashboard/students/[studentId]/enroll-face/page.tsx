@@ -91,6 +91,10 @@ export default async function StaffEnrollFacePage({
 
   const { status, samples, runningModel } = await getStudentFaceEnrollment(user, student.id);
   const productionReady = runningModel?.productionEligible ?? false;
+  // A gallery provider (Azure AI Face) that may detect but not yet identify:
+  // enrollment is refused before any image leaves, so say so up front.
+  const identificationPending =
+    runningModel?.templateKind === "gallery" && runningModel.identification !== "enabled";
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
@@ -126,6 +130,17 @@ export default async function StaffEnrollFacePage({
             ? "This backend is a development stub: enrollment works and the whole pipeline is exercised, but it matches nobody."
             : "Recognition does run — captures are compared against enrolled templates and can be matched. What is missing is licence clearance, not capability."}{" "}
           Do not rely on automatic attendance until a licence-verified model is deployed.
+        </p>
+      ) : null}
+
+      {identificationPending ? (
+        <p
+          role="status"
+          className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+        >
+          <span className="font-medium">Face enrolment is paused.</span> The face service can
+          detect faces but is not yet allowed to identify them, so new samples cannot be added.
+          Existing samples are unaffected, and attendance can still be taken by hand.
         </p>
       ) : null}
       {!runningModel ? (

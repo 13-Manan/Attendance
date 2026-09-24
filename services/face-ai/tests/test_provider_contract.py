@@ -260,15 +260,38 @@ def test_every_registry_entry_declares_a_commercial_use_status():
         assert registration.licence_note.strip(), f"{name} has no licence note"
 
 
+#: Backends whose "permitted" status is recorded in models/LICENSING.md's
+#: backend log. Adding a name here is the deliberate, reviewed act; flipping a
+#: registry flag on its own is not enough to pass this test.
+#:
+#: ``azure`` ships no weights: it calls Microsoft's managed Azure AI Face
+#: service under the subscription's product terms. Its separate Limited Access
+#: gate on identification is enforced at runtime, not by this flag.
+LICENCE_VERIFIED_BACKENDS = frozenset({"azure"})
+
+
 def test_no_shipped_backend_claims_commercial_clearance_it_does_not_have():
     # Guards against a future contributor flipping a status to 'permitted' to
     # silence the startup guard without recording a verified licence.
     for name, registration in MODEL_REGISTRY.items():
+        if name in LICENCE_VERIFIED_BACKENDS:
+            continue
         assert registration.commercial_use != "permitted", (
             f"Backend '{name}' claims commercial clearance. Update "
             f"models/LICENSING.md's backend log and this test together, "
             f"only after a licence has actually been verified."
         )
+
+
+def test_every_self_hosted_backend_stays_out_of_production():
+    # Every backend that runs weights in this container is still unverified.
+    # Only the managed service is cleared.
+    permitted = {
+        name
+        for name, registration in MODEL_REGISTRY.items()
+        if registration.commercial_use == "permitted"
+    }
+    assert permitted == LICENCE_VERIFIED_BACKENDS
 
 
 def test_startup_refuses_a_non_production_backend_when_production_required():

@@ -42,6 +42,28 @@ def test_model_info_exposes_full_provenance(client):
         "commercialUse": "not-applicable",
         "productionEligible": False,
         "contractVersion": FACE_AI_CONTRACT_VERSION,
+        # An embedding backend: apps/web stores and compares the vectors.
+        "templateKind": "embedding",
+        "identification": "not_applicable",
+        # The mock describes itself as what it is: a hash, not a recogniser.
+        "stages": [
+            {
+                "role": "embedder",
+                "name": "sha256-bytes-hash",
+                "version": "0.1.0",
+                "runtime": "numpy-hash-stub",
+                "commercialUse": "not-applicable",
+                "productionReady": False,
+                "capabilities": [],
+                "requiredAssets": [],
+                "embeddingDim": EMBEDDING_DIMENSION,
+                "licenceNote": (
+                    "No model and no weights. Vectors are a hash of the image "
+                    "bytes and cannot identify anyone. Never a production "
+                    "recogniser."
+                ),
+            }
+        ],
     }
 
 
@@ -125,7 +147,19 @@ def test_enroll_reports_the_provenance_a_model_swap_needs(client):
 def test_quality_reports_unimplemented_metrics_as_unavailable(client):
     body = client.post("/v1/quality", json={"imageBase64": "good"}).json()
     metrics = body["assessment"]["metrics"]
-    assert set(metrics) == {"blur", "brightness", "faceSize", "pose", "occlusion"}
+    assert set(metrics) == {
+        "blur",
+        "brightness",
+        "faceSize",
+        "pose",
+        "occlusion",
+        "yaw",
+        "pitch",
+        "underexposure",
+        "overexposure",
+        "detectionConfidence",
+        "interEyeDistance",
+    }
     for name, metric in metrics.items():
         # The mock measures nothing; it must say so rather than invent a
         # number an operator might tune thresholds against.

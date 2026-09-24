@@ -25,6 +25,10 @@ import {
 import type { GenerateAttendanceCandidatesResult } from "@/modules/attendance-review/service";
 import type { RecognitionRunSummary } from "@/modules/recognition-engine/types";
 import type { AttendanceMode } from "@/modules/institutions/types";
+import {
+  describeRecognitionAvailability,
+  recognitionCountLabels,
+} from "@/modules/recognition-engine/wording";
 
 /**
  * The classroom capture wizard.
@@ -80,6 +84,15 @@ interface Props {
    * `NEXT_PUBLIC_` flag that no deployment sets.
    */
   useFixtureCamera?: boolean;
+  /**
+   * Whether to show which recognition provider and model build ran. Admins
+   * (`faceEmbedding.manage`) only: a teacher is told whether recognition is
+   * available and what that means for them, not which backend is loaded.
+   */
+  showDiagnostics?: boolean;
+  /** Arrived from a register's "Add another photo". Changes the briefing
+   * copy only; whether a run merges is decided by the session's own state. */
+  addingToRegister?: boolean;
 }
 
 const CAPTURE_TIPS = [
@@ -227,6 +240,8 @@ export function CaptureWizard({
   cohortSubjectId,
   attendanceMode,
   useFixtureCamera = false,
+  showDiagnostics = false,
+  addingToRegister = false,
 }: Props) {
   const router = useRouter();
   const [step, setStep] = useState<WizardStep>("briefing");
@@ -445,6 +460,10 @@ export function CaptureWizard({
           sequenceNumber: s.sequenceNumber,
           imageBase64: s.imageBase64,
         })),
+        // A session that was already in review when this wizard opened has a
+        // register. These photos are added to it: a student found earlier is
+        // not un-found, and a teacher's decision is not overwritten.
+        merge: started.session.status === "REVIEW",
       });
       setProcessingStage("Building the attendance register");
       setProcessingPercent(75);
@@ -499,7 +518,18 @@ export function CaptureWizard({
     }
   }, [openReview, started]);
 
+  /** This wizard is adding photos to a register already under review. */
+  const addingToExisting = started?.session.status === "REVIEW";
+
   const discard = useCallback(async () => {
+    // Leaving an add-photo round must not cancel the register it was adding
+    // to: that register holds suggestions and decisions. Only the new,
+    // never-sent photos are dropped, and they were only ever in memory.
+    if (started && started.session.status === "REVIEW") {
+      camera.stop();
+      router.push(`/dashboard/attendance/${cohortId}/review/${started.session.id}`);
+      return;
+    }
     if (started) {
       try {
         await cancelCaptureSessionAction({ sessionId: started.session.id });
@@ -545,7 +575,15 @@ export function CaptureWizard({
       <div className="flex flex-col gap-6">
         {banner}
         <section className="rounded-md border border-neutral-200 p-6">
-          <h2 className="text-base font-semibold text-neutral-900">Before you capture</h2>
+          <h2 className="text-base font-semibold text-neutral-900">
+            {addingToRegister ? "Add photos to this register" : "Before you capture"}
+          </h2>
+          {addingToRegister && (
+            <p className="mt-1 text-sm text-neutral-600">
+              New photos are added to the register you were reviewing. A student
+              already found stays found, and any decision you have made is kept.
+            </p>
+          )}
           <p className="mt-1 text-sm text-neutral-600">
             You can take up to {MAX_CAPTURES_PER_SESSION} photos. One is enough for a
             small class; add a second or third from another angle when students are
@@ -674,7 +712,7 @@ export function CaptureWizard({
             </Button>
           )}
           <Button variant="secondary" onClick={discard}>
-            Discard session
+            {addingToExisting ? "Cancel — keep the register" : "Discard session"}
           </Button>
         </div>
 
@@ -808,7 +846,7 @@ export function CaptureWizard({
             </Button>
           )}
           <Button variant="secondary" onClick={discard}>
-            Discard session
+            {addingToExisting ? "Cancel — keep the register" : "Discard session"}
           </Button>
         </div>
         {!canProcess && shots.length > 0 && (
@@ -869,6 +907,20 @@ export function CaptureWizard({
   const noFacesAtAll = recognition !== null && recognition.detectedFacesTotal === 0;
   const facesButNoMatches =
     recognition !== null && recognition.detectedFacesTotal > 0 && perStudent.length === 0;
+  // The recognition run reads the service's own model report, so it is the
+  // better source; the capture analyses are the fallback when it did not run.
+  const modelState = recognition ?? summary;
+  const availability = modelState
+    ? describeRecognitionAvailability(modelState, { showDiagnostics })
+    : null;
+  const counts = recognition
+    ? recognitionCountLabels({
+        present: presentCount,
+        review: reviewCount,
+        notDetected: recognition.unmatchedStudentIds.length,
+        unknownFaces: recognition.unknownFacesTotal,
+      })
+    : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -877,18 +929,21 @@ export function CaptureWizard({
         {generation ? "Session ready for review" : "Captures processed"}
       </h2>
 
-      {summary && !summary.productionEligible && (
+      {availability && (
         <div
-          role="alert"
-          className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+          role={availability.availability === "ready" ? "status" : "alert"}
+          className={
+            availability.availability === "ready"
+              ? "rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-700"
+              : "rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+          }
         >
-          The recognition model currently loaded is{" "}
-          <strong>not cleared for production use</strong> (backend: {summary.modelName} ·{" "}
-          {summary.modelVersion}).{" "}
-          {summary.modelName === "mock"
-            ? "It is a test stub that cannot recognise a real face: face counts below describe the pipeline, not real identification."
-            : "Recognition does run and the matches below are real comparisons, but the model's licence is not cleared for production, so treat every match as a suggestion."}{" "}
-          Confirm every student yourself.
+          <strong>{availability.headline}.</strong> {availability.detail}
+          {availability.diagnostics && (
+            <span className="mt-1 block font-mono text-[11px] text-neutral-500">
+              {availability.diagnostics}
+            </span>
+          )}
         </div>
       )}
 
@@ -931,7 +986,7 @@ export function CaptureWizard({
       )}
 
       {summary && (
-        <dl className="grid grid-cols-2 gap-4 rounded-md border border-neutral-200 p-4 text-sm sm:grid-cols-4">
+        <dl className="grid grid-cols-3 gap-4 rounded-md border border-neutral-200 p-4 text-sm">
           <div>
             <dt className="text-xs text-neutral-500">Photos captured</dt>
             <dd className="text-lg font-semibold text-neutral-900">{summary.captureCount}</dd>
@@ -946,15 +1001,6 @@ export function CaptureWizard({
             <dt className="text-xs text-neutral-500">Enrolled students</dt>
             <dd className="text-lg font-semibold text-neutral-900">
               {summary.enrolledStudentCount}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-neutral-500">Model</dt>
-            <dd
-              className="truncate text-sm text-neutral-700"
-              title={`${summary.modelName} · ${summary.modelVersion}`}
-            >
-              {summary.modelName}
             </dd>
           </div>
         </dl>
@@ -977,8 +1023,8 @@ export function CaptureWizard({
           </strong>{" "}
           {recognition?.candidatePoolSize === 0
             ? "No student in this class has a face enrollment for the recognition model now running. Samples taken under an earlier model are kept but never compared — those students must be re-enrolled."
-            : recognition?.modelName === "mock"
-              ? "The recognition service is running its mock test backend, which cannot recognise a real face, so no capture will match. This is a configuration issue, not a problem with the enrollments."
+            : availability?.availability === "unavailable"
+              ? "Real face identification is not available on this system, so no capture can match a student. This is a system setting, not a problem with the enrollments or the photos."
               : "None of the enrolled students scored high enough to suggest — they may be out of frame, facing away, or poorly lit."}{" "}
           Every student is waiting for your decision rather than being marked absent.
         </div>
@@ -995,22 +1041,38 @@ export function CaptureWizard({
             </span>
           </div>
 
-          <dl className="grid grid-cols-3 gap-4 text-sm">
-            <div>
-              <dt className="text-xs text-neutral-500">Suggested present</dt>
-              <dd className="text-lg font-semibold text-emerald-700">{presentCount}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-neutral-500">Needs review</dt>
-              <dd className="text-lg font-semibold text-amber-700">{reviewCount}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-neutral-500">No match found</dt>
-              <dd className="text-lg font-semibold text-neutral-700">
-                {recognition.unmatchedStudentIds.length}
-              </dd>
-            </div>
-          </dl>
+          {counts && (
+            <ul className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+              <li className="rounded-md bg-emerald-50 px-3 py-2 font-medium text-emerald-800">
+                {counts.present}
+              </li>
+              <li className="rounded-md bg-amber-50 px-3 py-2 font-medium text-amber-800">
+                {counts.review}
+              </li>
+              <li className="rounded-md bg-neutral-100 px-3 py-2 font-medium text-neutral-700">
+                {counts.notDetected}
+              </li>
+              <li className="rounded-md bg-neutral-100 px-3 py-2 font-medium text-neutral-700">
+                {counts.unknownFaces}
+              </li>
+            </ul>
+          )}
+
+          {recognition.unknownFacesTotal > 0 && (
+            <p className="text-xs text-neutral-600">
+              {recognition.unknownFacesTotal === 1
+                ? "One face did not match any enrolled student in this class. It has not been assigned to anyone."
+                : `${recognition.unknownFacesTotal} faces did not match any enrolled student in this class. None has been assigned to anyone.`}
+            </p>
+          )}
+
+          {recognition.recommendRetake && (
+            <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              <strong>Some faces were too small to identify reliably.</strong> Those
+              students are waiting for your decision. A closer photo of the back rows
+              usually fixes this — you can add one from the register.
+            </p>
+          )}
 
           {ambiguousCount > 0 && (
             <p className="text-xs text-amber-800">
@@ -1094,7 +1156,7 @@ export function CaptureWizard({
         </Button>
         {!generation && (
           <Button variant="secondary" onClick={discard}>
-            Discard session
+            {addingToExisting ? "Cancel — keep the register" : "Discard session"}
           </Button>
         )}
       </div>

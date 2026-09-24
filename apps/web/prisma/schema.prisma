@@ -633,7 +633,13 @@ model FaceEmbedding {
   // Postgres rejects a wrong-length insert outright, which is why the
   // enrollment repository's own length check is a better error message rather
   // than the actual guarantee.
-  embedding      Unsupported("vector(128)")
+  //
+  // Null for a gallery-backed sample (templateKind "gallery", e.g. Azure AI
+  // Face): the template then lives at the provider, and where is recorded in
+  // FaceGalleryPlacement. The pair is enforced by the CHECK constraint
+  // "FaceEmbedding_template_present" in migration
+  // 20260924120000_face_gallery_placement, not by Prisma.
+  embedding      Unsupported("vector(128)")?
   modelName      String
   modelVersion   String
   // The two halves of `modelVersion`, stored separately as well as composed.
@@ -671,7 +677,8 @@ model FaceEmbedding {
   retiredBy        User?                       @relation("FaceRetiredBy", fields: [retiredByUserId], references: [id])
   retirementReason FaceSampleRetirementReason?
 
-  matchedRecords AttendanceRecord[] @relation("MatchedEmbedding")
+  matchedRecords    AttendanceRecord[]     @relation("MatchedEmbedding")
+  galleryPlacements FaceGalleryPlacement[]
 
   @@index([institutionId])
   @@index([studentId])
@@ -682,6 +689,35 @@ model FaceEmbedding {
   // Postgres does not index a foreign key on its own.
   @@index([enrolledByUserId])
   @@index([retiredByUserId])
+}
+
+// Where one gallery-backed sample lives at the recognition provider.
+//
+// A gallery provider (Azure AI Face) keeps the template itself; this row is
+// the pointer: one per (sample, class gallery). A student in two classes has
+// the same photograph added to both galleries, so one FaceEmbedding row can
+// own several placements. Ids only — nothing here is biometric on its own.
+//
+// Deleted when the provider-side face is deleted. A row whose sample is no
+// longer active is a removal that has not succeeded yet, and the next
+// retirement for the same student retries it.
+model FaceGalleryPlacement {
+  id              String        @id @default(cuid())
+  institutionId   String
+  faceEmbeddingId String
+  faceEmbedding   FaceEmbedding @relation(fields: [faceEmbeddingId], references: [id], onDelete: Cascade)
+  studentId       String
+  cohortId        String
+  galleryId       String
+  personId        String
+  persistedFaceId String
+  createdAt       DateTime      @default(now())
+
+  @@unique([galleryId, persistedFaceId])
+  @@index([faceEmbeddingId])
+  // Recognition resolves a class gallery's person ids back to students.
+  @@index([galleryId, personId])
+  @@index([studentId])
 }
 
 // aiResult/aiConfidence are advisory and written once by the recognition

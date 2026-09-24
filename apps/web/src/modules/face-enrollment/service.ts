@@ -8,11 +8,27 @@ import type { Institution } from "@/modules/institutions/types";
 import { getStudentById } from "@/modules/students/repository";
 import { studentDisplayName } from "@/modules/students/types";
 import type { Student } from "@/modules/students/types";
-import type { EnrollResponse, ModelInfoResponse } from "@attendance/shared-types";
+import type {
+  EnrollResponse,
+  GalleryEnrollRequest,
+  GalleryEnrollResponse,
+  GalleryRemoveRequest,
+  GalleryRemoveResponse,
+  ModelInfoResponse,
+} from "@attendance/shared-types";
+import {
+  GALLERY_ENROLLMENT_THRESHOLDS,
+  galleryIdForCohort,
+  identificationEnabled,
+  isGalleryModel,
+} from "@/modules/face-gallery/policy";
+import * as galleryRepo from "@/modules/face-gallery/repository";
+import { releaseGalleryFaces, type GalleryReleaseResult } from "@/modules/face-gallery/service";
 import * as repo from "./repository";
 import {
   MAX_SAMPLES_PER_STUDENT,
   classifyEnrollmentCollision,
+  classifyOwnSampleMismatch,
   inspectEmbedding,
   resolveSelfEnrollmentEnabled,
   summariseEnrollmentStatus,
@@ -93,6 +109,12 @@ export interface FaceEnrollmentDeps {
     model: TemplateModel,
     limit: number,
   ) => Promise<repo.NearestTemplateRow[]>;
+  findOwnTemplateSimilarities?: (
+    institutionId: string,
+    studentId: string,
+    probe: readonly number[],
+    model: TemplateModel,
+  ) => Promise<repo.NearestTemplateRow[]>;
   insertFaceEmbedding?: (input: repo.InsertFaceEmbeddingInput) => Promise<{ id: string }>;
   replaceTemplates?: (
     input: repo.InsertFaceEmbeddingInput,
@@ -108,6 +130,29 @@ export interface FaceEnrollmentDeps {
   ) => Promise<{ studentId: string; institutionId: string } | null>;
   listSampleHistoryForStudent?: (studentId: string) => Promise<FaceSampleRecord[]>;
   recordAuditLog?: (input: RecordAuditLogInput) => Promise<void>;
+  // Gallery backends (templateKind "gallery" — Azure AI Face). See
+  // `performGalleryEnrollment`.
+  galleryEnroll?: (request: GalleryEnrollRequest) => Promise<GalleryEnrollResponse>;
+  galleryRemove?: (request: GalleryRemoveRequest) => Promise<GalleryRemoveResponse>;
+  listActiveCohortIdsForStudent?: (studentId: string) => Promise<string[]>;
+  listActiveGalleryPersons?: (
+    studentId: string,
+    model: TemplateModel,
+  ) => Promise<Map<string, string>>;
+  findStudentForGalleryPerson?: (
+    institutionId: string,
+    galleryId: string,
+    personId: string,
+  ) => Promise<string | null>;
+  insertGallerySample?: (
+    input: galleryRepo.InsertGallerySampleInput,
+  ) => Promise<{ id: string }>;
+  replaceWithGallerySample?: (
+    input: galleryRepo.InsertGallerySampleInput,
+    retiredByUserId: string | null,
+  ) => Promise<{ id: string; retired: number }>;
+  /** Deletes provider-side faces of this student's retired samples. */
+  releaseGalleryFaces?: (institutionId: string, studentId: string) => Promise<GalleryReleaseResult>;
 }
 
 /**
@@ -140,6 +185,7 @@ function defaults() {
     },
     listActiveTemplateModelsForStudent: repo.listActiveTemplateModelsForStudent,
     findNearestTemplates: repo.findNearestTemplatesInInstitution,
+    findOwnTemplateSimilarities: repo.findOwnTemplateSimilarities,
     insertFaceEmbedding: (input: repo.InsertFaceEmbeddingInput) => repo.insertFaceEmbedding(input),
     replaceTemplates: async (
       input: repo.InsertFaceEmbeddingInput,
@@ -164,6 +210,36 @@ function defaults() {
     getTemplateOwner: repo.getTemplateOwner,
     listSampleHistoryForStudent: repo.listSampleHistoryForStudent,
     recordAuditLog: (input: RecordAuditLogInput) => defaultRecordAuditLog(input),
+    galleryEnroll: async (request: GalleryEnrollRequest) => {
+      const { galleryEnroll } = await import("@/lib/face-ai-client");
+      return galleryEnroll(request);
+    },
+    galleryRemove: async (request: GalleryRemoveRequest) => {
+      const { galleryRemove } = await import("@/lib/face-ai-client");
+      return galleryRemove(request);
+    },
+    listActiveCohortIdsForStudent: galleryRepo.listActiveCohortIdsForStudent,
+    listActiveGalleryPersons: galleryRepo.listActivePersonsForStudent,
+    findStudentForGalleryPerson: galleryRepo.findStudentForPerson,
+    insertGallerySample: (input: galleryRepo.InsertGallerySampleInput) =>
+      galleryRepo.insertGallerySample(input),
+    replaceWithGallerySample: async (
+      input: galleryRepo.InsertGallerySampleInput,
+      retiredByUserId: string | null,
+    ) =>
+      // One transaction for the same reason as `replaceTemplates`.
+      repo.inTransaction(async (tx) => {
+        const retired = await repo.retireActiveTemplatesForStudent(
+          input.studentId,
+          input.institutionId,
+          { retiredByUserId, reason: "REPLACED" },
+          tx,
+        );
+        const inserted = await galleryRepo.insertGallerySample(input, tx);
+        return { id: inserted.id, retired };
+      }),
+    releaseGalleryFaces: (institutionId: string, studentId: string) =>
+      releaseGalleryFaces(institutionId, [studentId], { includeActive: false }),
   };
 }
 
@@ -344,6 +420,15 @@ async function performEnrollment(
     return refuse("sample_limit", channel, statusBeforeModelKnown);
   }
 
+  // A gallery backend keeps the template itself, so the rest of this
+  // pipeline — a vector, a pgvector duplicate scan — does not apply. Asked
+  // before the image goes anywhere. A model-info failure falls through to the
+  // embedding path, whose own call then fails or succeeds on its merits.
+  const modelInfo = await d.faceModelInfo().catch(() => null);
+  if (modelInfo && isGalleryModel(modelInfo)) {
+    return performGalleryEnrollment(actor, student, input, channel, options, modelInfo, storedModels, d);
+  }
+
   // -- 6. Model -----------------------------------------------------------
   let response: EnrollResponse;
   try {
@@ -426,6 +511,10 @@ async function performEnrollment(
   const written = options.replace
     ? await d.replaceTemplates(row, actor.userId)
     : { ...(await d.insertFaceEmbedding(row)), retired: 0 };
+  if (written.retired > 0) {
+    // The retired set may include samples enrolled under a gallery backend.
+    await d.releaseGalleryFaces(institutionId, student.id).catch(() => null);
+  }
 
   await d.recordAuditLog({
     action: options.replace ? "face_enrollment.replaced" : "face_enrollment.created",
@@ -464,6 +553,214 @@ async function performEnrollment(
       ? `Enrolled. ${written.retired === 0 ? "There were no earlier samples to retire." : `${written.retired} earlier sample${written.retired === 1 ? "" : "s"} retired.`}`
       : HUMAN_REASON.ok,
     status: after,
+    replaced: written.retired,
+  };
+}
+
+/**
+ * Enrollment against a gallery provider (Azure AI Face).
+ *
+ * Same seven steps; steps 6 and 7 happen inside the provider. face-ai detects
+ * the face with the strict enrollment gates, checks every target gallery for a
+ * different person who already looks like this face, verifies it against the
+ * student's own person, and only then adds it — to one gallery per class the
+ * student is in, so a group photo is only ever searched against that class.
+ *
+ * What is stored here is a sample row with no vector and one placement per
+ * gallery: pointers, not a template. If that write fails the provider-side
+ * faces are removed again, so the provider never holds a face this database
+ * has no record of.
+ */
+async function performGalleryEnrollment(
+  actor: SessionUser,
+  student: Student,
+  input: EnrollFaceInput,
+  channel: FaceEnrollmentChannel,
+  options: { replace: boolean },
+  modelInfo: ModelInfoResponse,
+  storedModels: TemplateModel[],
+  d: ResolvedDeps,
+): Promise<FaceEnrollmentResult> {
+  const institutionId = student.institutionId;
+  const runningModel: TemplateModel = {
+    modelName: modelInfo.modelName,
+    modelVersion: modelInfo.modelVersion,
+  };
+  const status = summariseEnrollmentStatus(storedModels, runningModel);
+
+  // Limited Access: without Microsoft's approval Azure refuses to identify, so
+  // a stored face could never be used. Refused before the image is sent.
+  if (!identificationEnabled(modelInfo.identification)) {
+    return refuse("recognition_not_enabled", channel, status);
+  }
+
+  const cohortIds = await d.listActiveCohortIdsForStudent(student.id);
+  if (cohortIds.length === 0) return refuse("no_active_class", channel, status);
+
+  // A retired sample's face may still be at the provider if an earlier
+  // removal failed. Clearing it first keeps it from reading as "another
+  // person" to the collision check below.
+  await d.releaseGalleryFaces(institutionId, student.id).catch(() => null);
+
+  const persons = await d.listActiveGalleryPersons(student.id, runningModel);
+  const cohortOfGallery = new Map<string, string>();
+  const targets = cohortIds.map((cohortId) => {
+    const galleryId = galleryIdForCohort(cohortId);
+    cohortOfGallery.set(galleryId, cohortId);
+    // The provider-side person name is the student id: opaque, and never a
+    // real name.
+    return { galleryId, personId: persons.get(galleryId) ?? null, personName: student.id };
+  });
+
+  let response: GalleryEnrollResponse;
+  try {
+    response = await d.galleryEnroll({
+      imageBase64: input.imageBase64,
+      targets,
+      otherPersonMinConfidence: GALLERY_ENROLLMENT_THRESHOLDS.otherPersonMin,
+      // A replacement exists for a student who no longer resembles their old
+      // samples, so it is not checked against them — the same rule as
+      // `detectCollision`. Checks against other students still apply.
+      ownPersonMinConfidence: options.replace ? 0 : GALLERY_ENROLLMENT_THRESHOLDS.ownPersonMin,
+    });
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === "identification_not_approved") {
+      return refuse("recognition_not_enabled", channel, status);
+    }
+    return refuse("service_error", channel, status);
+  }
+
+  if (response.outcome === "rejected") {
+    return refuse(qualityRefusalOf(response.assessment.reason), channel, status);
+  }
+
+  if (response.outcome === "own_mismatch") {
+    await d.recordAuditLog({
+      action: "face_enrollment.refused",
+      entityType: "Student",
+      entityId: student.id,
+      institutionId,
+      actorUserId: actor.userId,
+      afterJson: {
+        refusal: "does_not_match_student",
+        similarity: response.ownConfidence,
+        modelName: response.modelName,
+        modelVersion: response.modelVersion,
+        channel,
+      },
+    });
+    return refuse("does_not_match_student", channel, status);
+  }
+
+  if (response.outcome === "collision") {
+    const collision = response.collision;
+    const otherId = collision
+      ? await d
+          .findStudentForGalleryPerson(institutionId, collision.galleryId, collision.personId)
+          .catch(() => null)
+      : null;
+    if (otherId === student.id) {
+      // Their own leftover person, whose removal is still pending. Nothing is
+      // wrong with the photograph; the retry clears it.
+      return refuse("service_error", channel, status);
+    }
+    let otherLabel: string | null = null;
+    if (channel === "STAFF" && otherId) {
+      const other = await d.getStudentById(otherId);
+      if (other && other.institutionId === institutionId) {
+        otherLabel = `${studentDisplayName(other)} (${other.studentCode})`;
+      }
+    }
+    await d.recordAuditLog({
+      action: "face_enrollment.refused",
+      entityType: "Student",
+      entityId: student.id,
+      institutionId,
+      actorUserId: actor.userId,
+      afterJson: {
+        refusal: "duplicate_identity",
+        collidedWithStudentId: otherId,
+        similarity: collision?.confidence ?? null,
+        modelName: response.modelName,
+        modelVersion: response.modelVersion,
+        channel,
+      },
+    });
+    return refuse("duplicate_identity", channel, status, otherLabel);
+  }
+
+  // -- Write --------------------------------------------------------------
+  const row: galleryRepo.InsertGallerySampleInput = {
+    institutionId,
+    studentId: student.id,
+    modelName: response.modelName,
+    modelVersion: response.modelVersion,
+    qualityScore: response.assessment.qualityScore,
+    captureSource: input.captureSource,
+    channel,
+    enrolledByUserId: actor.userId,
+    cohortOfGallery,
+    placements: response.placements,
+  };
+
+  let written: { id: string; retired: number };
+  try {
+    written = options.replace
+      ? await d.replaceWithGallerySample(row, actor.userId)
+      : { ...(await d.insertGallerySample(row)), retired: 0 };
+  } catch (error) {
+    // Undo the provider side. A person this request created goes entirely;
+    // an existing person only loses the face that was just added.
+    await d
+      .galleryRemove({
+        removals: response.placements.map((p) => ({
+          galleryId: p.galleryId,
+          personId: p.personId,
+          persistedFaceId: p.personCreated ? null : p.persistedFaceId,
+        })),
+      })
+      .catch(() => null);
+    throw error;
+  }
+
+  // The replaced samples' faces. Best effort: they already cannot match
+  // anybody, because recognition only resolves a person through an active
+  // sample.
+  if (written.retired > 0) {
+    await d.releaseGalleryFaces(institutionId, student.id).catch(() => null);
+  }
+
+  await d.recordAuditLog({
+    action: options.replace ? "face_enrollment.replaced" : "face_enrollment.created",
+    entityType: "FaceEmbedding",
+    entityId: written.id,
+    institutionId,
+    actorUserId: actor.userId,
+    // Metadata only: the model, the score and how many class galleries the
+    // sample went into. Provider ids stay in FaceGalleryPlacement.
+    afterJson: {
+      studentId: student.id,
+      modelName: response.modelName,
+      modelVersion: response.modelVersion,
+      qualityScore: response.assessment.qualityScore,
+      captureSource: input.captureSource,
+      channel,
+      galleries: response.placements.length,
+      ownConfidence: response.ownConfidence,
+      ...(options.replace ? { retiredTemplates: written.retired } : {}),
+    },
+  });
+
+  const survivingModels = options.replace ? [] : storedModels;
+  return {
+    ok: true,
+    embeddingId: written.id,
+    qualityScore: response.assessment.qualityScore,
+    message: options.replace
+      ? `Enrolled. ${written.retired === 0 ? "There were no earlier samples to retire." : `${written.retired} earlier sample${written.retired === 1 ? "" : "s"} retired.`}`
+      : HUMAN_REASON.ok,
+    status: summariseEnrollmentStatus([...survivingModels, runningModel], runningModel),
     replaced: written.retired,
   };
 }
@@ -508,7 +805,30 @@ async function detectCollision(
   if (isReplacement && collision.kind === "already_enrolled") {
     return { kind: "none" };
   }
-  return collision;
+  if (collision.kind !== "none") return collision;
+
+  // A replacement retires the whole set, so there is nothing for the new
+  // sample to be consistent *with* — and re-enrolling from scratch is the
+  // intended answer when a student no longer resembles their old templates.
+  // Checking here would leave that student with no way back in.
+  if (isReplacement) return { kind: "none" };
+
+  let own: repo.NearestTemplateRow[];
+  try {
+    own = await d.findOwnTemplateSimilarities(
+      institution.id,
+      student.id,
+      embedding,
+      model,
+    );
+  } catch {
+    // Same posture as the neighbour scan above: a failed safety query must not
+    // become a failed enrollment. It means the check did not run, not that it
+    // passed — which is why the query is not a filter over an optional list.
+    return { kind: "none" };
+  }
+
+  return classifyOwnSampleMismatch(own, thresholds);
 }
 
 /**
@@ -528,6 +848,30 @@ async function refuseCollision(
     // Nothing is wrong and nobody needs to know about it later: the same
     // photograph was submitted twice. Not audited.
     return refuse("already_enrolled", channel, status);
+  }
+
+  if (collision.kind === "does_not_match_own_samples") {
+    // No other student is involved, so there is nobody to name and no second
+    // id to record: the row says how far the sample fell from this student's
+    // own set and how many templates it was compared against. Enough to tell a
+    // mis-filed photograph from a template set that has genuinely gone stale.
+    await d.recordAuditLog({
+      action: "face_enrollment.refused",
+      entityType: "Student",
+      entityId: student.id,
+      institutionId: student.institutionId,
+      actorUserId: actor.userId,
+      afterJson: {
+        refusal: "does_not_match_student",
+        similarity: Number(collision.similarity.toFixed(4)),
+        comparedWith: collision.comparedWith,
+        modelName: response.modelName,
+        modelVersion: response.modelVersion,
+        channel,
+      },
+    });
+
+    return refuse("does_not_match_student", channel, status);
   }
 
   const reason: FaceEnrollmentRefusal =
@@ -607,6 +951,10 @@ export async function deactivateFaceEmbeddingRequest(
     // button — but there is nothing to record.
     return;
   }
+
+  // A gallery-backed sample also has faces at the provider. Best effort — see
+  // modules/face-gallery/service.ts for why a failure here is safe.
+  await d.releaseGalleryFaces(owner.institutionId, owner.studentId).catch(() => null);
 
   await d.recordAuditLog({
     action: "face_enrollment.deactivated",

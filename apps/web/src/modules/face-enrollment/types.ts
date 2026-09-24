@@ -43,10 +43,18 @@ export type FaceEnrollmentRefusal =
   | "duplicate_identity"
   /** Recognition could not tell this student from another one. */
   | "ambiguous_identity"
+  /** The face does not match any sample already stored for this student. */
+  | "does_not_match_student"
   /** The model returned a vector that breaks the embedding contract. */
   | "invalid_embedding"
   /** The face service could not be reached, or refused the request. */
-  | "service_error";
+  | "service_error"
+  /** A gallery provider whose identification feature is not enabled (Azure
+   * Face Limited Access pending). Nothing was sent to it. */
+  | "recognition_not_enabled"
+  /** A gallery provider keeps one gallery per class, and this student is in
+   * no class to add them to. */
+  | "no_active_class";
 
 /**
  * The externally-safe shape returned to a caller (Server Action, Route
@@ -118,6 +126,7 @@ export const HUMAN_REASON: Record<FaceQualityReason, string> = {
   face_too_small: "Face is too small in the frame. Move closer to the camera.",
   blurred: "Image is too blurred. Hold the camera steady.",
   too_dark: "Image is too dark. Move to a well-lit area.",
+  too_bright: "Image is too bright. Move out of direct light or away from a window.",
   occluded: "Face is partially covered. Remove any mask, hair, or object blocking the face.",
   bad_angle: "Face is at a poor angle. Look straight at the camera.",
   low_quality: "Image quality is too low. Recapture in better conditions.",
@@ -138,6 +147,8 @@ const TERMINAL_REFUSALS: ReadonlySet<FaceEnrollmentRefusal> = new Set<FaceEnroll
   "duplicate_identity",
   "ambiguous_identity",
   "invalid_embedding",
+  "recognition_not_enabled",
+  "no_active_class",
 ]);
 
 export function isRetryable(reason: FaceEnrollmentRefusal): boolean {
@@ -219,6 +230,11 @@ export function describeRefusal(
           : "This face is close enough to another student's that recognition could not reliably tell them apart. Enrol a clearer, straight-on photograph."
         : "That photograph could not be saved. Please speak to your institution's office — they can sort this out.";
 
+    case "does_not_match_student":
+      return staff
+        ? "This face does not match any sample already stored for this student, so it was not added — the likeliest explanation is that it is a photograph of somebody else. Check you have the right student, then try a clearer, straight-on photograph. If their appearance has genuinely changed, replace the whole set instead of adding to it."
+        : "That photograph did not match the face already saved for you, so it was not added. Try again looking straight at the camera in good light — if it still will not save, ask your institution's office.";
+
     case "invalid_embedding":
       return staff
         ? "The face service returned a template that does not meet the expected format, so nothing was stored. This is a problem with the deployment rather than with the photograph — report it before enrolling anyone else."
@@ -226,6 +242,16 @@ export function describeRefusal(
 
     case "service_error":
       return "The face recognition service is temporarily unavailable. Please try again in a moment.";
+
+    case "recognition_not_enabled":
+      return staff
+        ? "Face enrolment is paused: the face recognition provider has not enabled identification for this system yet. The photograph was not sent anywhere and nothing was stored. Attendance can still be taken by hand."
+        : "Face enrolment is not available yet. Nothing was saved. Your institution will let you know when it opens.";
+
+    case "no_active_class":
+      return staff
+        ? "This student is not in any class yet. Faces are enrolled per class, so add the student to their class first, then capture again."
+        : "You are not in any class yet, so your face cannot be saved. Please ask your institution's office.";
 
     default: {
       // Exhaustiveness: a reason added to the union without a sentence here

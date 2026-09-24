@@ -11,8 +11,10 @@ that selects the backend.
 from dataclasses import dataclass
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
+from app.models.azure_provider import AzureFaceModelProvider
 from app.models.base import FaceModelProvider
 from app.models.mock_model import MockEmbeddingModel
 from app.models.onnx_provider import OnnxFaceModelProvider
@@ -78,6 +80,21 @@ MODEL_REGISTRY: dict[str, BackendRegistration] = {
             "models/LICENSING.md. Real recognition, local evaluation only."
         ),
     ),
+    "azure": BackendRegistration(
+        provider_cls=AzureFaceModelProvider,
+        # No weights are shipped or run here: Microsoft operates the model
+        # under the subscription's product terms. Identification and
+        # verification are additionally Limited Access features. That gate is
+        # checked live and reported as ``identification`` on model-info, not
+        # folded into this flag, because detection is usable without it.
+        commercial_use="permitted",
+        licence_note=(
+            "Azure AI Face (managed service, Microsoft Product Terms). "
+            "Identification/Verification need Microsoft's Limited Access "
+            "approval (https://aka.ms/facerecognition); without it the "
+            "backend detects faces and identifies nobody."
+        ),
+    ),
 }
 
 
@@ -104,12 +121,19 @@ class Settings(BaseSettings):
     face_detector_nms_threshold: float = 0.3
     face_detector_top_k: int = 5000
 
-    #: Smallest face, in pixels on its shorter side, that may produce an
-    #: *enrolment* template. A bad template is permanent and silently degrades
-    #: every future match, so enrolment is gated where detection is not.
-    #: Conservative and configurable rather than tuned; no classroom data
-    #: exists to tune it against.
-    face_min_enrolment_face_pixels: int = 24
+    #: Override for the smallest face, in pixels on its shorter side, that may
+    #: produce an *enrolment* template. Unset (the default) uses the calibrated
+    #: enrolment profile in app/quality.py — see
+    #: docs/FACE_RECOGNITION_CALIBRATION.md for how it was measured. Set it
+    #: only to be stricter or looser deliberately; the override replaces the
+    #: profile's minimum, it does not stack with it.
+    face_min_enrolment_face_pixels: int | None = None
+
+    #: Frames whose longest edge exceeds this are detected on a downscaled
+    #: copy (alignment still crops from the full frame). Bounds detection cost
+    #: for callers that send larger images than the web client's 1920px cap.
+    #: 0 disables the downscale.
+    face_max_detection_edge: int = 1920
 
     #: ONNX Runtime execution providers, highest priority first, comma
     #: separated. CPU-only deployments need no change; a GPU deployment sets
@@ -123,7 +147,7 @@ class Settings(BaseSettings):
     #: Shared secret the caller must present as ``Authorization: Bearer <token>``
     #: on every inference endpoint.
     #:
-    #: This service turns a photograph into a 512-float biometric template. An
+    #: This service turns a photograph into a 128-float biometric template. An
     #: unauthenticated ``/v1/enroll`` is an oracle that converts anybody's face
     #: into the exact value stored against a student, so reachability is the
     #: whole of the access control unless something checks a credential. It is
@@ -154,6 +178,23 @@ class Settings(BaseSettings):
     #: Largest accepted ``candidates`` array on ``/v1/match``. A classroom pool;
     #: an unbounded list is a way to make one request cost minutes of CPU.
     face_ai_max_match_candidates: int = 2000
+
+    #: Azure AI Face resource endpoint, e.g.
+    #: https://<resource>.cognitiveservices.azure.com/. Server-side only: it
+    #: is set on this container and never on apps/web.
+    azure_face_endpoint: str | None = None
+
+    #: Azure AI Face resource key. A secret: in production it is a Container
+    #: Apps secret backed by Key Vault, never a plain env value, and it is
+    #: never logged, returned or echoed in an error. SecretStr so that a repr
+    #: of these settings shows asterisks.
+    azure_face_key: SecretStr | None = None
+
+    #: Per-request timeout for calls to Azure, in seconds.
+    azure_face_timeout_s: float = 15.0
+
+    #: Retries for 429s and, on idempotent calls only, 5xx and timeouts.
+    azure_face_max_retries: int = 2
 
     @property
     def execution_provider_list(self) -> list[str]:
@@ -209,6 +250,18 @@ def build_provider(settings: Settings) -> FaceModelProvider:
             nms_threshold=settings.face_detector_nms_threshold,
             top_k=settings.face_detector_top_k,
             min_face_pixels=settings.face_min_enrolment_face_pixels,
+            max_detection_edge=settings.face_max_detection_edge or None,
+        )
+    if registration.provider_cls is AzureFaceModelProvider:
+        return AzureFaceModelProvider(
+            endpoint=settings.azure_face_endpoint,
+            key=(
+                settings.azure_face_key.get_secret_value()
+                if settings.azure_face_key is not None
+                else None
+            ),
+            timeout_s=settings.azure_face_timeout_s,
+            max_retries=settings.azure_face_max_retries,
         )
     return registration.provider_cls()
 

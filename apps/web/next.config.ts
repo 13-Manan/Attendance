@@ -50,6 +50,20 @@ const nextConfig: NextConfig = {
      * on this flag.
      */
     useOffline: true,
+
+    /**
+     * The classroom process action carries up to `MAX_CAPTURES_PER_SESSION`
+     * (3) photographs as base64 in one request. Each is encoded at 1920 px,
+     * JPEG 0.82 (attendance-capture/camera.ts); a busy classroom frame at that
+     * setting measured ~620 KB of base64, so three are ~1.9 MB — over the
+     * 1 MB default, which would fail the whole register, not one photo.
+     *
+     * 6 MB is three photos at roughly twice that measurement. It stays under
+     * `proxyClientMaxBodySize` (10 MB default; src/proxy.ts matches
+     * /dashboard). The per-image ceiling is still enforced server-side by
+     * `MAX_IMAGE_BASE64_CHARS`; this only decides when Next refuses to read.
+     */
+    serverActions: { bodySizeLimit: "6mb" },
   },
 
   /**

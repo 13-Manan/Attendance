@@ -394,6 +394,11 @@ function evaluate(
         qualityScore: face.qualityScore,
         decision: "UNMATCHED",
         dropReason: "low_detection_confidence",
+        qualityFlags: [],
+        faceSize: null,
+        demotions: [],
+        contested: false,
+        unknown: false,
       });
       continue;
     }
@@ -420,6 +425,11 @@ function evaluate(
       qualityScore: face.qualityScore,
       decision: r.decision,
       dropReason: null,
+      qualityFlags: [],
+      faceSize: null,
+      demotions: [],
+      contested: false,
+      unknown: false,
     });
   }
 

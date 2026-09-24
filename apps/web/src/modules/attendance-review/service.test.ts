@@ -152,6 +152,10 @@ function runSummary(perStudent: StudentRecognitionAggregate[]): RecognitionRunSu
     ] as RecognitionRunSummary["perFace"],
     perStudent,
     unmatchedStudentIds: [],
+    rejectedFaces: {},
+    flaggedFaces: {},
+    unknownFacesTotal: 0,
+    recommendRetake: false,
   };
 }
 

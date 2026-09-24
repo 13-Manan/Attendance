@@ -138,6 +138,7 @@ function makeStore(): Store {
       return ids.length;
     },
     getStudentById: async () => store.student,
+    releaseGalleryFaces: async () => ({ removed: 0, pending: 0 }),
     audit: async (input) => {
       store.audits.push({
         action: input.action,
@@ -372,6 +373,24 @@ test("erasing a student's face data removes every template, active or not", asyn
   assert.equal(summary.deletedTemplates, 2);
   // The other student's template is untouched.
   assert.deepEqual(store.templates.map((row) => row.id), ["c"]);
+});
+
+test("erasure is refused, and deletes nothing, while the provider still holds a face", async () => {
+  const store = makeStore();
+  store.templates = [
+    { id: "a", studentId: "stu-1", isActive: true, createdAt: daysAgo(1), studentStatus: "ACTIVE" },
+  ];
+  const calls: Array<{ studentIds: readonly string[]; includeActive: boolean }> = [];
+  const deps: PrivacyDeps = {
+    ...store.deps,
+    releaseGalleryFaces: async (_institutionId, studentIds, options) => {
+      calls.push({ studentIds, includeActive: options.includeActive });
+      return { removed: 1, pending: 2 };
+    },
+  };
+  await assert.rejects(() => deleteStudentFaceData(makeUser(), "stu-1", deps), RetentionPolicyError);
+  assert.deepEqual(calls, [{ studentIds: ["stu-1"], includeActive: true }]);
+  assert.deepEqual(store.templates.map((row) => row.id), ["a"]);
 });
 
 test("erasure is recorded even when the student had no templates to erase", async () => {

@@ -31,6 +31,9 @@ const processSchema = z.object({
     )
     .min(1)
     .max(3),
+  /** Add these photos to the register already under review instead of
+   * replacing it. */
+  merge: z.boolean().optional(),
 });
 
 export interface ProcessSessionAttendanceResult {
@@ -54,10 +57,14 @@ export async function processSessionAttendanceAction(
   const actor = await requireUser();
   const parsed = processSchema.parse(input);
 
-  const recognition = await runRecognitionForSession(actor, parsed);
+  const recognition = await runRecognitionForSession(actor, {
+    sessionId: parsed.sessionId,
+    images: parsed.images,
+  });
   const generation = await generateAttendanceCandidates(actor, {
     sessionId: parsed.sessionId,
     recognition,
+    merge: parsed.merge,
   });
   return { recognition, generation };
 }

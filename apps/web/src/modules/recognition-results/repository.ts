@@ -107,6 +107,9 @@ export async function findCandidateEmbeddingsWithVectorsForCohort(
      AND en."cohortId" = ${cohortId}
      AND en.status = 'ACTIVE'
     WHERE fe."isActive" = TRUE
+      -- Gallery samples (Azure) carry no vector and are matched by the
+      -- provider, never here. The model filter already excludes them.
+      AND fe.embedding IS NOT NULL
       AND (${model?.modelName ?? null}::text IS NULL OR fe."modelName" = ${model?.modelName ?? null})
       AND (${model?.modelVersion ?? null}::text IS NULL OR fe."modelVersion" = ${model?.modelVersion ?? null})
   `;
@@ -176,6 +179,9 @@ export async function findCandidateEmbeddingsWithVectorsForCohortSubject(
      AND en."cohortId" = cs."cohortId"
      AND en.status = 'ACTIVE'
     WHERE fe."isActive" = TRUE
+      -- Gallery samples (Azure) carry no vector and are matched by the
+      -- provider, never here. The model filter already excludes them.
+      AND fe.embedding IS NOT NULL
       AND (${model?.modelName ?? null}::text IS NULL OR fe."modelName" = ${model?.modelName ?? null})
       AND (${model?.modelVersion ?? null}::text IS NULL OR fe."modelVersion" = ${model?.modelVersion ?? null})
   `;

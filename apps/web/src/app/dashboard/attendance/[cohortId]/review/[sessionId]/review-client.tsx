@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,6 +16,10 @@ import type {
 } from "@/modules/attendance-review/types";
 import type { AttendanceRealtimeEvent } from "@/modules/realtime/types";
 import { useLiveStream } from "@/modules/realtime/use-live-stream";
+import {
+  describeRecognitionAvailability,
+  studentResultLabel,
+} from "@/modules/recognition-engine/wording";
 
 /**
  * Phase 6 faculty review board.
@@ -35,6 +40,12 @@ import { useLiveStream } from "@/modules/realtime/use-live-stream";
 
 interface Props {
   initialBoard: AttendanceReviewBoard;
+  /** Admins (`faceEmbedding.manage`) see which provider and model build
+   * produced the suggestions; teachers see what it means for them. */
+  showDiagnostics?: boolean;
+  /** Where "Add another photo" goes, or null when the caller cannot capture
+   * for this session. Built on the server, which knows the permission. */
+  addPhotoHref?: string | null;
 }
 
 type DecisionResult = "PRESENT" | "ABSENT" | "NEEDS_REVIEW";
@@ -84,6 +95,8 @@ function reasonText(student: AttendanceReviewStudent): string {
       return "No face was detected in any capture, so nobody could be compared. This is about the photograph, not the student.";
     case "low_quality":
       return "The captures were too poor to compare against. Retaking may resolve it.";
+    case "face_too_small":
+      return "A face that may be this student's was too small in the photo to identify reliably. A closer photo usually resolves it.";
     case "recognition_error":
       return "Recognition failed for this session. Decide each student by calling the roll.";
     case "no_face_template":
@@ -92,6 +105,8 @@ function reasonText(student: AttendanceReviewStudent): string {
       return "Enrolled face data was captured with a different model version and could not be compared. Not evidence of absence.";
     case "recognition_unavailable":
       return "Recognition did not run for this session. Call the roll and decide each student.";
+    case "identification_unavailable":
+      return "Faces were counted, but face matching is not switched on yet, so nobody was compared. Decide this student yourself.";
     case "manually_corrected":
       return "Set by a faculty member.";
     default:
@@ -106,6 +121,20 @@ function reasonText(student: AttendanceReviewStudent): string {
 function confidenceLabel(value: number | null, reason: AttendanceReviewReason): string {
   if (value === null) return reason === "no_match" ? "no match" : "not compared";
   return `${Math.round(value * 100)}% match`;
+}
+
+/** "Present — 91%", "Needs review — 58%", "Face too small", "No reliable
+ * match" where recognition has something to say; the older short label
+ * otherwise. */
+function resultLabel(student: AttendanceReviewStudent): string {
+  return (
+    studentResultLabel({
+      suggestion: student.aiSuggestion,
+      aiResult: student.aiResult,
+      aiConfidence: student.aiConfidence,
+      reason: student.reason,
+    }) ?? confidenceLabel(student.aiConfidence, student.reason)
+  );
 }
 
 function confidenceToneClasses(value: number | null, presentMin: number | null): string {
@@ -220,7 +249,11 @@ function CountCard({
 
 // ---------------------------------------------------------------------------
 
-export function ReviewBoard({ initialBoard }: Props) {
+export function ReviewBoard({
+  initialBoard,
+  showDiagnostics = false,
+  addPhotoHref = null,
+}: Props) {
   const router = useRouter();
   const [board, setBoard] = useState(initialBoard);
   const [pending, setPending] = useState<Record<string, boolean>>({});
@@ -398,10 +431,18 @@ export function ReviewBoard({ initialBoard }: Props) {
     if (s.generationSource === "manual") {
       bits.push("Built by manual roll call — recognition did not contribute");
     } else if (s.recognition) {
-      bits.push(`${s.recognition.modelName} ${s.recognition.modelVersion}`);
+      if (showDiagnostics) {
+        bits.push(`${s.recognition.modelName} ${s.recognition.modelVersion}`);
+      }
       bits.push(
         `${s.recognition.scoredFacesTotal}/${s.recognition.detectedFacesTotal} faces scored against ${s.recognition.candidatePoolSize} students`,
       );
+      const unknown = s.recognition.unknownFacesTotal ?? 0;
+      if (unknown > 0) {
+        bits.push(`${unknown} unknown face${unknown === 1 ? "" : "s"}, assigned to nobody`);
+      }
+      const rounds = s.recognition.rounds ?? 1;
+      if (rounds > 1) bits.push(`${rounds} rounds of photos merged`);
     }
     if (s.captureImages.length > 0) {
       bits.push(
@@ -409,7 +450,11 @@ export function ReviewBoard({ initialBoard }: Props) {
       );
     }
     return bits.join(" · ");
-  }, [board.session]);
+  }, [board.session, showDiagnostics]);
+
+  const availability = board.session.recognition
+    ? describeRecognitionAvailability(board.session.recognition, { showDiagnostics })
+    : null;
 
   return (
     <div className="flex flex-col gap-5">
@@ -417,14 +462,36 @@ export function ReviewBoard({ initialBoard }: Props) {
         {liveMessage}
       </p>
 
-      {board.session.recognition && !board.session.recognition.productionEligible && (
+      {availability && availability.availability !== "ready" && (
         <div
           role="alert"
           className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
         >
-          The recognition model that produced these suggestions is{" "}
-          <strong>not cleared for production use</strong>. Treat every row below as
-          unverified and confirm each student yourself.
+          <strong>{availability.headline}.</strong> {availability.detail}
+          {availability.diagnostics && (
+            <span className="mt-1 block font-mono text-[11px] text-neutral-500">
+              {availability.diagnostics}
+            </span>
+          )}
+        </div>
+      )}
+      {availability?.availability === "ready" && availability.diagnostics && (
+        <p className="font-mono text-[11px] text-neutral-500">{availability.diagnostics}</p>
+      )}
+
+      {!isFinalized && addPhotoHref && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-neutral-200 px-3 py-2 text-xs text-neutral-700">
+          <span className="min-w-0 flex-1">
+            {board.session.recognition?.recommendRetake
+              ? "Some faces were too small to identify. A closer photo of those rows can resolve them."
+              : "Missed someone? Add another photo — it is merged into this register without undoing anything already decided."}
+          </span>
+          <Link
+            href={addPhotoHref}
+            className="rounded-md border border-neutral-300 bg-white px-3 py-1.5 font-medium text-neutral-900 hover:bg-neutral-50"
+          >
+            Add another photo
+          </Link>
         </div>
       )}
 
@@ -561,7 +628,7 @@ export function ReviewBoard({ initialBoard }: Props) {
                 <span
                   className={`rounded-full px-2 py-0.5 font-medium ${confidenceToneClasses(student.aiConfidence, presentMin)}`}
                 >
-                  {confidenceLabel(student.aiConfidence, student.reason)}
+                  {resultLabel(student)}
                 </span>
                 {student.bestFaceId && (
                   <span className="text-neutral-500">
@@ -675,7 +742,7 @@ export function ReviewBoard({ initialBoard }: Props) {
                 >
                   {student.isManuallyCorrected
                     ? "marked by faculty"
-                    : confidenceLabel(student.aiConfidence, student.reason)}
+                    : resultLabel(student)}
                 </span>
                 {suggested && (
                   <Button

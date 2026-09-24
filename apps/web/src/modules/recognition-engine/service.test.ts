@@ -2,7 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   aggregateByStudent,
+  assignFacesOneToOne,
   buildRecognitionPolicyForInstitution,
+  countDistinctUnknownFaces,
   classifyBySimilarity,
   cosineSimilarity,
   runRecognitionForSession,
@@ -82,6 +84,11 @@ function faceResult(overrides: Partial<FaceRecognitionResult> = {}): FaceRecogni
     qualityScore: 0.8,
     decision: "MATCHED",
     dropReason: null,
+    qualityFlags: [],
+    faceSize: null,
+    demotions: [],
+    contested: false,
+    unknown: false,
     ...overrides,
   };
 }
@@ -220,6 +227,7 @@ function harness(opts: {
   pool?: CandidateEmbeddingWithVector[];
   subjectPool?: CandidateEmbeddingWithVector[];
   faces?: DetectEmbedResponse["faces"];
+  rejectedFaces?: DetectEmbedResponse["rejectedFaces"];
   modelInfo?: ModelInfoResponse;
   /** What `/v1/detect-embed` claims produced its embeddings. Defaults to the
    * model-info answer, as it does when nothing changes between the calls. */
@@ -259,6 +267,7 @@ function harness(opts: {
         calls.detectEmbed.push(req);
         return {
           faces: opts.faces ?? [],
+          rejectedFaces: opts.rejectedFaces,
           modelName: opts.responseModel?.modelName ?? modelInfo.modelName,
           modelVersion: opts.responseModel?.modelVersion ?? modelInfo.modelVersion,
         } as DetectEmbedResponse;
@@ -1206,4 +1215,320 @@ test("a student holding several templates counts once in the pool and once as un
   assert.equal(summary.candidatePoolSize, 2);
   assert.deepEqual(summary.unmatchedStudentIds, ["stu-a"]);
   assert.equal(summary.perStudent[0].studentId, "stu-b");
+});
+
+// ===========================================================================
+// Group photographs
+//
+// A class photo is many faces scored against many students at once, so the
+// 2-D angle fixtures above are not enough: here every student's template is
+// its own axis, and a face is built as a weighted mix of axes. The weight on a
+// student's axis *is* the face's cosine similarity to that student; whatever
+// weight is left over goes on an axis private to the face, so it resembles
+// nobody else by accident. All synthetic — no photograph is involved.
+// ===========================================================================
+
+const NOISE_AXIS_BASE = 64;
+let noiseAxis = NOISE_AXIS_BASE;
+
+function axis(i: number): number[] {
+  const v = new Array<number>(DIM).fill(0);
+  v[i] = 1;
+  return v;
+}
+
+/** A unit face with the given similarity to each student axis. */
+function faceMix(weights: Record<number, number>): number[] {
+  const v = new Array<number>(DIM).fill(0);
+  let used = 0;
+  for (const [i, w] of Object.entries(weights)) {
+    v[Number(i)] = w;
+    used += w * w;
+  }
+  assert.ok(used <= 1 + 1e-9, "weights must fit in a unit vector");
+  if (noiseAxis >= DIM) noiseAxis = NOISE_AXIS_BASE;
+  v[noiseAxis++] = Math.sqrt(Math.max(0, 1 - used));
+  return v;
+}
+
+function studentRow(index: number, opts: { sample?: string; modelVersion?: string } = {}) {
+  const studentId = `stu-${index}`;
+  return {
+    id: `emb-${studentId}-${opts.sample ?? "a"}`,
+    studentId,
+    modelName: "mock",
+    modelVersion: opts.modelVersion ?? "0.1.0+pp1",
+    embeddingDim: DIM,
+    embedding: axis(index),
+  } satisfies CandidateEmbeddingWithVector;
+}
+
+function flaggedFace(
+  sequenceNumber: 1 | 2 | 3,
+  embedding: number[],
+  qualityFlags: string[],
+): DetectEmbedResponse["faces"][number] {
+  return { ...detectedFace(sequenceNumber, embedding), qualityFlags, faceSize: 30 } as DetectEmbedResponse["faces"][number];
+}
+
+
+function byStudent(summary: { perStudent: Array<{ studentId: string }> }) {
+  return new Map(summary.perStudent.map((s) => [s.studentId, s as (typeof summary.perStudent)[number] & Record<string, unknown>]));
+}
+
+test("group photo: every student in a 40-face photo is suggested once, and only once", async () => {
+  const n = 40;
+  const pool = Array.from({ length: n }, (_, i) => studentRow(i));
+  const faces = Array.from({ length: n }, (_, i) => detectedFace(1, faceMix({ [i]: 0.8 })));
+  const h = harness({ pool, faces });
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps);
+  assert.equal(summary.detectedFacesTotal, n);
+  assert.equal(summary.perStudent.length, n);
+  assert.ok(summary.perStudent.every((s) => s.advisoryResult === "PRESENT"));
+  assert.equal(new Set(summary.perFace.map((f) => f.candidateStudentId)).size, n);
+  assert.equal(summary.unknownFacesTotal, 0);
+  assert.deepEqual(summary.unmatchedStudentIds, []);
+});
+
+test("group photo: a face that resembles nobody is an unknown face, never a student", async () => {
+  const pool = [studentRow(0), studentRow(1)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.9 })), detectedFace(1, faceMix({ 1: 0.3 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  const stranger = summary.perFace[1];
+  assert.equal(stranger.unknown, true);
+  assert.equal(stranger.candidateStudentId, null);
+  assert.equal(stranger.decision, "UNMATCHED");
+  assert.equal(summary.unknownFacesTotal, 1);
+  assert.deepEqual(summary.perStudent.map((s) => s.studentId), ["stu-0"]);
+  assert.deepEqual(summary.unmatchedStudentIds, ["stu-1"]);
+});
+
+test("group photo: one student cannot be claimed by two faces in the same photo", async () => {
+  // Both faces look most like stu-0. The clearer one keeps her; the other
+  // resembles nobody else, so it is an unknown face — not a second stu-0.
+  const pool = [studentRow(0), studentRow(1)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.92 })), detectedFace(1, faceMix({ 0: 0.7 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  assert.equal(summary.perFace.filter((f) => f.candidateStudentId === "stu-0").length, 1);
+  assert.equal(summary.perFace[0].candidateStudentId, "stu-0", "the clearer face wins");
+  assert.equal(summary.perFace[1].unknown, true);
+  const stu0 = summary.perStudent.find((s) => s.studentId === "stu-0")!;
+  // Something else in the room looks like her, so she goes to a person.
+  assert.equal(stu0.advisoryResult, "NEEDS_REVIEW");
+  assert.ok(stu0.downgrades.includes("duplicate_within_capture"));
+  assert.equal(summary.unknownFacesTotal, 1);
+});
+
+test("group photo: a face given its second choice is never a confident match", async () => {
+  // Face 2 is most like stu-0 (0.75) but stu-0 went to a clearer face; its
+  // next-best, stu-1 at 0.65, clears the present bar on its own — and is
+  // still only a review, because it is a second choice.
+  const pool = [studentRow(0), studentRow(1)];
+  const faces = [
+    detectedFace(1, faceMix({ 0: 0.95 })),
+    detectedFace(1, faceMix({ 0: 0.75, 1: 0.65 })),
+  ];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  const second = summary.perFace[1];
+  assert.equal(second.candidateStudentId, "stu-1");
+  assert.deepEqual(second.demotions, ["reassigned"]);
+  assert.equal(second.decision, "UNCERTAIN");
+  assert.equal(second.runnerUpStudentId, "stu-0", "the lost first choice stays visible");
+  const stu1 = summary.perStudent.find((s) => s.studentId === "stu-1")!;
+  assert.equal(stu1.advisoryResult, "NEEDS_REVIEW");
+  assert.ok(stu1.downgrades.includes("reassigned_face"));
+});
+
+test("group photo: two similar-looking students both go to review", async () => {
+  const pool = [studentRow(0), studentRow(1)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.7, 1: 0.68 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  assert.equal(summary.perStudent.length, 1);
+  assert.equal(summary.perStudent[0].advisoryResult, "NEEDS_REVIEW");
+  assert.equal(summary.perStudent[0].wasAmbiguous, true);
+  assert.deepEqual(summary.perFace[0].demotions, ["ambiguous"]);
+});
+
+test("group photo: a face too small to trust is capped at review however well it scores", async () => {
+  const pool = [studentRow(0)];
+  const faces = [flaggedFace(1, faceMix({ 0: 0.95 }), ["face_too_small"])];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  const stu0 = summary.perStudent[0];
+  assert.equal(stu0.advisoryResult, "NEEDS_REVIEW");
+  assert.deepEqual(stu0.downgrades, ["low_quality_face"]);
+  assert.deepEqual(stu0.bestQualityFlags, ["face_too_small"]);
+  assert.equal(stu0.wasAmbiguous, false, "a poor photo is not a confusion between students");
+  assert.deepEqual(summary.flaggedFaces, { face_too_small: 1 });
+  assert.equal(summary.recommendRetake, true);
+});
+
+test("group photo: a flagged face that scores in the review band is not demoted twice", async () => {
+  const pool = [studentRow(0)];
+  const faces = [flaggedFace(1, faceMix({ 0: 0.5 }), ["blurred"])];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  assert.equal(summary.perStudent[0].advisoryResult, "NEEDS_REVIEW");
+  assert.deepEqual(summary.perFace[0].demotions, []);
+  assert.equal(summary.recommendRetake, false, "blur is not a reason to stand closer");
+});
+
+test("group photo: faces too small to embed are counted, and a closer photo is recommended", async () => {
+  const pool = [studentRow(0)];
+  const rejected = [
+    { sequenceNumber: 1, boundingBox: { x: 0, y: 0, width: 12, height: 12 }, detectionConfidence: 0.8, reason: "face_too_small", faceSize: 12 },
+    { sequenceNumber: 1, boundingBox: { x: 40, y: 0, width: 14, height: 14 }, detectionConfidence: 0.8, reason: "face_too_small", faceSize: 14 },
+  ] as DetectEmbedResponse["rejectedFaces"];
+  const summary = await runRecognitionForSession(
+    makeUser(),
+    ONE_IMAGE,
+    harness({ pool, faces: [detectedFace(1, faceMix({ 0: 0.9 }))], rejectedFaces: rejected }).deps,
+  );
+  assert.deepEqual(summary.rejectedFaces, { face_too_small: 2 });
+  assert.equal(summary.recommendRetake, true);
+  assert.equal(summary.perStudent[0].advisoryResult, "PRESENT", "the usable face is unaffected");
+});
+
+test("group photo: the same student in three photos is one student, with three observations", async () => {
+  const pool = [studentRow(0), studentRow(1)];
+  const faces = [
+    detectedFace(1, faceMix({ 0: 0.8 })),
+    detectedFace(2, faceMix({ 0: 0.85 })),
+    detectedFace(3, faceMix({ 0: 0.9 })),
+    detectedFace(2, faceMix({ 1: 0.8 })),
+  ];
+  const summary = await runRecognitionForSession(makeUser(), THREE_IMAGES, harness({ pool, faces }).deps);
+  const students = byStudent(summary);
+  assert.equal(students.size, 2);
+  const stu0 = summary.perStudent.find((s) => s.studentId === "stu-0")!;
+  assert.equal(stu0.advisoryResult, "PRESENT");
+  assert.equal(stu0.observations.length, 3);
+  assert.ok(Math.abs((stu0.bestSimilarity ?? 0) - 0.9) < 1e-9, "the strongest evidence is kept");
+  assert.equal(stu0.bestFaceId, "3:0");
+  assert.deepEqual(stu0.downgrades, []);
+});
+
+test("group photo: a student with several templates yields one result", async () => {
+  const pool = [studentRow(0, { sample: "a" }), studentRow(0, { sample: "b" }), studentRow(0, { sample: "c" })];
+  const faces = [detectedFace(1, faceMix({ 0: 0.8 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  assert.equal(summary.perStudent.length, 1);
+  assert.equal(summary.perStudent[0].advisoryResult, "PRESENT");
+  assert.equal(summary.candidatePoolSize, 1, "one student, not three");
+});
+
+test("group photo: a template from an older model build is never compared", async () => {
+  // Would be a perfect match — and must not count, because a vector from a
+  // different model build lives in a different space.
+  const pool = [studentRow(0, { modelVersion: "0.0.9+pp1" }), studentRow(1)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.99 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  assert.equal(summary.skippedIncompatibleCandidates, 1);
+  assert.equal(summary.perStudent.length, 0);
+  assert.equal(summary.perFace[0].unknown, true);
+});
+
+test("group photo: only the session's own cohort is ever searched", async () => {
+  const h = harness({ pool: [studentRow(0)], faces: [detectedFace(1, faceMix({ 0: 0.9 }))] });
+  await runRecognitionForSession(makeUser(), ONE_IMAGE, h.deps);
+  assert.equal(h.calls.loadCandidates.length, 1);
+  assert.equal(h.calls.loadCandidates[0][0], "co-1");
+  assert.equal(h.calls.loadSubjectCandidates.length, 0);
+});
+
+test("group photo: an empty class makes every face an unknown face", async () => {
+  const faces = [detectedFace(1, faceMix({ 0: 0.9 })), detectedFace(1, faceMix({ 1: 0.9 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool: [], faces }).deps);
+  assert.equal(summary.candidatePoolSize, 0);
+  assert.equal(summary.perStudent.length, 0);
+  assert.equal(summary.unknownFacesTotal, 2);
+  assert.ok(summary.perFace.every((f) => f.unknown && f.candidateStudentId === null));
+});
+
+test("group photo: no faces at all reports no faces, no strangers and no retake advice", async () => {
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool: [studentRow(0)], faces: [] }).deps);
+  assert.equal(summary.detectedFacesTotal, 0);
+  assert.equal(summary.unknownFacesTotal, 0);
+  assert.equal(summary.recommendRetake, false);
+  assert.deepEqual(summary.rejectedFaces, {});
+  assert.deepEqual(summary.unmatchedStudentIds, ["stu-0"]);
+});
+
+test("group photo: the same stranger in two photos is counted once", async () => {
+  const stranger = faceMix({ 5: 0.2 });
+  const faces = [detectedFace(1, stranger), detectedFace(2, stranger), detectedFace(2, faceMix({ 6: 0.2 }))];
+  const summary = await runRecognitionForSession(makeUser(), THREE_IMAGES, harness({ pool: [studentRow(0)], faces }).deps);
+  assert.equal(summary.unknownFacesTotal, 2);
+});
+
+test("group photo: the summary carries no embedding, even for unknown faces", async () => {
+  const faces = [detectedFace(1, faceMix({ 0: 0.9 })), detectedFace(1, faceMix({ 1: 0.1 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool: [studentRow(0)], faces }).deps);
+  const json = JSON.stringify(summary);
+  assert.ok(!json.includes("embedding\""), "no embedding field");
+  // No array anywhere in the summary is as wide as a face vector.
+  const wide = (v: unknown): boolean =>
+    Array.isArray(v) ? v.length >= DIM || v.some(wide) : v !== null && typeof v === "object" ? Object.values(v).some(wide) : false;
+  assert.equal(wide(summary), false);
+});
+
+// ---------------------------------------------------------------------------
+// The assignment and clustering primitives, directly
+// ---------------------------------------------------------------------------
+
+function scored(studentId: string, similarity: number) {
+  return { studentId, embeddingId: `emb-${studentId}`, similarity };
+}
+
+test("assignFacesOneToOne gives each student to the face that resembles them most", () => {
+  const { assignments, contested } = assignFacesOneToOne(
+    [
+      { faceIndex: 0, byStudent: [scored("a", 0.7), scored("b", 0.6)] },
+      { faceIndex: 1, byStudent: [scored("a", 0.9), scored("c", 0.5)] },
+    ],
+    policy(),
+  );
+  assert.equal(assignments[1].assigned?.studentId, "a");
+  assert.equal(assignments[1].reassigned, false);
+  assert.equal(assignments[0].assigned?.studentId, "b");
+  assert.equal(assignments[0].reassigned, true);
+  assert.equal(assignments[0].topChoice?.studentId, "a");
+  assert.deepEqual([...contested], ["a"]);
+});
+
+test("assignFacesOneToOne never assigns below the review floor", () => {
+  const { assignments } = assignFacesOneToOne(
+    [{ faceIndex: 0, byStudent: [scored("a", 0.44)] }],
+    policy(),
+  );
+  assert.equal(assignments[0].assigned, null);
+  assert.equal(assignments[0].topChoice, null);
+});
+
+test("assignFacesOneToOne is independent of the order faces arrive in", () => {
+  const faces = [
+    { faceIndex: 0, byStudent: [scored("a", 0.8), scored("b", 0.79)] },
+    { faceIndex: 1, byStudent: [scored("b", 0.8), scored("a", 0.79)] },
+    { faceIndex: 2, byStudent: [scored("a", 0.8)] },
+  ];
+  const forward = assignFacesOneToOne(faces, policy()).assignments.map((a) => a.assigned?.studentId ?? null);
+  const reversed = assignFacesOneToOne([...faces].reverse(), policy())
+    .assignments.reverse()
+    .map((a) => a.assigned?.studentId ?? null);
+  assert.deepEqual(forward, reversed);
+  // A tie on similarity goes to the lower face index, deterministically.
+  assert.deepEqual(forward, ["a", "b", null]);
+});
+
+test("countDistinctUnknownFaces never merges two faces from the same photo", () => {
+  const v = faceMix({ 7: 0.1 });
+  assert.equal(
+    countDistinctUnknownFaces(
+      [
+        { captureNumber: 1, embedding: v },
+        { captureNumber: 1, embedding: v },
+      ],
+      0.62,
+    ),
+    2,
+  );
+  assert.equal(countDistinctUnknownFaces([], 0.62), 0);
 });

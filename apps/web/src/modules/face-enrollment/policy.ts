@@ -40,7 +40,7 @@ export const MAX_SAMPLES_PER_STUDENT = 5;
 /**
  * How far from unit length a vector may be and still be called normalised.
  *
- * Summing 512 squared float32 values accumulates error, so an exact `=== 1` is
+ * Summing 128 squared float32 values accumulates error, so an exact `=== 1` is
  * not achievable even from a backend doing everything right. 1e-3 is orders of
  * magnitude above that accumulation and orders of magnitude below any real
  * mistake — a backend that forgot to normalise returns a norm in the tens or
@@ -66,7 +66,7 @@ export type EmbeddingRejection =
  *
  * Checked here rather than trusted because the contract is enforced on the
  * other side of an HTTP boundary, by code that a future model swap replaces.
- * The cost is one pass over 512 floats at enrollment time; the failure it
+ * The cost is one pass over 128 floats at enrollment time; the failure it
  * catches is silent, permanent and affects every register taken afterwards.
  */
 export function inspectEmbedding(embedding: readonly number[]): EmbeddingRejection {
@@ -154,7 +154,9 @@ export type EnrollmentCollision =
   /** Recognition would confidently call this face a different student. */
   | { kind: "belongs_to_other_student"; studentId: string; embeddingId: string; similarity: number }
   /** Recognition would not be sure which of the two students this is. */
-  | { kind: "ambiguous_with_other_student"; studentId: string; embeddingId: string; similarity: number };
+  | { kind: "ambiguous_with_other_student"; studentId: string; embeddingId: string; similarity: number }
+  /** Recognition would not call this face this student at all. */
+  | { kind: "does_not_match_own_samples"; similarity: number; comparedWith: number };
 
 /**
  * Decides whether a new template may be stored against a student.
@@ -236,6 +238,69 @@ export function classifyEnrollmentCollision(
   }
 
   return { kind: "none" };
+}
+
+/**
+ * Decides whether a new sample belongs to the same person as the samples
+ * already stored for this student.
+ *
+ * ## The mistake this catches
+ *
+ * Nothing above answers "is this even the right student". The scan against
+ * *other* students only refuses a face that some other record already holds,
+ * so a photograph of somebody who is not enrolled anywhere — the sibling who
+ * came to collect them, the next file in a folder of class photographs, the
+ * wrong row in a spreadsheet import — is accepted without comment as a second
+ * sample. From then on the student's template set matches two different
+ * people, and the other one is marked present in their name. It is a filing
+ * error, so it is likeliest exactly where it matters least to be noticed:
+ * bulk enrollment by staff who are not looking at the screen.
+ *
+ * ## Why `reviewMin`, and why that is not an arbitrary number
+ *
+ * The same reasoning as the collision checks above: the threshold that
+ * matters is the one the attendance pipeline itself uses. Below `reviewMin`
+ * the engine does not consider the two faces a match at all — not even one
+ * worth a human glance. A sample the engine would never connect to this
+ * student's other samples cannot help recognise them, and the likeliest
+ * reason for it is that it is not them.
+ *
+ * Measured against the calibration corpus (docs/FACE_RECOGNITION_CALIBRATION.md):
+ * every one of 61 genuine pairs — two photographs of one person, often years
+ * apart — scored at or above `reviewMin` 0.45, and none of 9,089 impostor
+ * comparisons reached it. That is adults only, so the margin for a child
+ * photographed a year later is not established, and a false refusal remains
+ * possible.
+ *
+ * ## Why it refuses rather than flags
+ *
+ * The harm is in the storing. A flagged template is still compared every
+ * morning. Refusal is also recoverable in a way a stored mistake is not: the
+ * sample is simply not added, and a student whose appearance really has
+ * changed that much is served by replacing the set (which skips this check by
+ * design) rather than appending to it.
+ *
+ * ## What it deliberately does not do
+ *
+ * Compare against templates from another model — the caller's query filters
+ * those out, so after a model change the first new sample is unconstrained
+ * and the set is rebuilt from scratch. And it never runs on a first sample:
+ * with nothing to compare against there is no evidence either way.
+ */
+export function classifyOwnSampleMismatch(
+  ownSimilarities: readonly { similarity: number }[],
+  thresholds: { reviewMin: number },
+): EnrollmentCollision {
+  if (ownSimilarities.length === 0) return { kind: "none" };
+
+  const best = Math.max(...ownSimilarities.map((row) => row.similarity));
+  if (best >= thresholds.reviewMin) return { kind: "none" };
+
+  return {
+    kind: "does_not_match_own_samples",
+    similarity: best,
+    comparedWith: ownSimilarities.length,
+  };
 }
 
 // ---------------------------------------------------------------------------

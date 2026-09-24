@@ -10,27 +10,41 @@ same vector and two different images essentially never match. That is enough
 to drive the plumbing and is deliberately useless for recognising anyone.
 
 Quality outcomes are simulated from well-known ``imageBase64`` prefixes
-("NO_FACE:", "MULTI:", "BLUR:", "DARK:", "SMALL:", "OCCLUDED:", "ANGLE:",
+("NO_FACE:", "MULTI:", "BLUR:", "DARK:", "BRIGHT:", "SMALL:", "OCCLUDED:", "ANGLE:",
 "LOW:") so every rejection branch has a reproducible trigger. A real backend
 replaces this with actual scoring while keeping the same
 ``FaceQualityAssessment`` vocabulary.
+
+On the classroom path the same prefixes drive the group-photo outcomes:
+"SMALL:" reports the face as detected but too small to embed (a
+``rejectedFaces`` entry), and the other quality prefixes attach the matching
+``qualityFlags`` to an otherwise normal face. That is plumbing for the web
+tier's "Face too small" and "needs review" paths — not a measurement.
 """
 
 import hashlib
 
 import numpy as np
 
-from app.models.base import AlignedFace, DetectionResult, FaceModelProvider
+from app.models.base import (
+    AlignedFace,
+    DetectionResult,
+    FaceModelProvider,
+    ImageAnalysis,
+)
+from app.models.pipeline import StageDescriptor
 from app.schemas import (
     EMBEDDING_DIMENSION,
     BoundingBox,
     DetectedFace,
     DetectedFaceBox,
+    DetectEmbedImageSummary,
     FaceLandmarks,
     FaceQualityAssessment,
     FaceQualityMetrics,
     FaceQualityReason,
     Point,
+    RejectedFace,
     SessionImageInput,
 )
 
@@ -47,6 +61,7 @@ _REASON_PREFIXES: dict[str, FaceQualityReason] = {
     "SMALL:": "face_too_small",
     "BLUR:": "blurred",
     "DARK:": "too_dark",
+    "BRIGHT:": "too_bright",
     "OCCLUDED:": "occluded",
     "ANGLE:": "bad_angle",
     "LOW:": "low_quality",
@@ -94,6 +109,29 @@ def _landmarks_for(box: BoundingBox) -> FaceLandmarks:
     )
 
 
+#: The mock's one "stage". Named for what it is — a hash of the image bytes —
+#: so model-info can never be read as describing a recogniser.
+_MOCK_STAGE = StageDescriptor(
+    role="embedder",
+    name="sha256-bytes-hash",
+    version="0.1.0",
+    runtime="numpy-hash-stub",
+    commercial_use="not-applicable",
+    embedding_dim=EMBEDDING_DIM,
+    licence_note=(
+        "No model and no weights. Vectors are a hash of the image bytes and "
+        "cannot identify anyone. Never a production recogniser."
+    ),
+)
+
+#: Quality reasons that describe a detected, embeddable face on the classroom
+#: path. The rest either mean "no face" / "several faces" (meaningless for a
+#: group photo) or, for face_too_small, a face that is not embedded at all.
+_GROUP_FLAG_REASONS: frozenset[FaceQualityReason] = frozenset(
+    {"blurred", "too_dark", "too_bright", "occluded", "bad_angle", "low_quality"}
+)
+
+
 class MockEmbeddingModel(FaceModelProvider):
     name = "mock"
     weights_version = "0.1.0"
@@ -139,6 +177,7 @@ class MockEmbeddingModel(FaceModelProvider):
             reason=reason,
             qualityScore=quality_score,
             faceCount=face_count,
+            reasons=[] if reason == "ok" else [reason],
             # The mock measures nothing. Reporting every metric as
             # unavailable is the honest answer and is exactly what a real
             # backend must do for metrics it has not implemented.
@@ -166,8 +205,52 @@ class MockEmbeddingModel(FaceModelProvider):
         # hash seed already stabilises the vector across calls.
         return _embed_from_bytes(image_base64)
 
-    def detect_and_embed(self, image: SessionImageInput) -> list[DetectedFace]:
+    def stage_descriptors(self) -> tuple[StageDescriptor, ...]:
+        return (_MOCK_STAGE,)
+
+    def analyze_image(self, image: SessionImageInput) -> ImageAnalysis:
+        reason, _, quality_score = _classify(image.image_base64)
         detection = self.detect(image.image_base64)
+        faces: list[DetectedFace] = []
+        rejected: list[RejectedFace] = []
+        for face in self._faces(image, detection):
+            if reason == "face_too_small":
+                rejected.append(
+                    RejectedFace(
+                        sequenceNumber=image.sequence_number,
+                        boundingBox=face.bounding_box,
+                        detectionConfidence=face.detection_confidence,
+                        reason="face_too_small",
+                        faceSize=float(
+                            min(face.bounding_box.width, face.bounding_box.height)
+                        ),
+                    )
+                )
+                continue
+            if reason in _GROUP_FLAG_REASONS:
+                face = face.model_copy(
+                    update={"quality_flags": [reason], "quality_score": quality_score}
+                )
+            faces.append(face)
+        return ImageAnalysis(
+            faces=faces,
+            rejected=rejected,
+            summary=DetectEmbedImageSummary(
+                sequenceNumber=image.sequence_number,
+                imageWidth=detection.image_width,
+                imageHeight=detection.image_height,
+                detectedFaces=len(detection.faces),
+                embeddedFaces=len(faces),
+                rejectedFaces=len(rejected),
+            ),
+        )
+
+    def detect_and_embed(self, image: SessionImageInput) -> list[DetectedFace]:
+        return self._faces(image, self.detect(image.image_base64))
+
+    def _faces(
+        self, image: SessionImageInput, detection: DetectionResult
+    ) -> list[DetectedFace]:
         return [
             DetectedFace(
                 sequenceNumber=image.sequence_number,
@@ -181,6 +264,7 @@ class MockEmbeddingModel(FaceModelProvider):
                 qualityScore=0.9,
                 landmarks=face.landmarks,
                 aligned=face.landmarks is not None,
+                faceSize=float(min(face.bounding_box.width, face.bounding_box.height)),
             )
             for face in detection.faces
         ]
