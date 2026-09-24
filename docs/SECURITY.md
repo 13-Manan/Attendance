@@ -3,8 +3,8 @@
 This system holds two kinds of data that are not interchangeable with anything
 else it holds.
 
-The first is a **face template**: 512 floats derived from a photograph of a
-student, stored in `FaceEmbedding.vector`. It is not a password. A student
+The first is a **face template**: 128 floats derived from a photograph of a
+student, stored in `FaceEmbedding`. It is not a password. A student
 whose template leaks cannot be issued a new face, and the leak is permanent in
 a way a leaked session cookie is not. Everything below follows from that.
 
@@ -20,11 +20,12 @@ where that is enforced rather than merely asserted.
 
 | | |
 |---|---|
-| Stored in | `FaceEmbedding.vector` (pgvector), scoped by `institutionId` |
+| Stored in | `FaceEmbedding.embedding` (pgvector), scoped by `institutionId` |
 | Derived by | `services/face-ai`, which holds no database credentials (ADR-0002) |
 | Reaches the browser | **Never** |
 | Appears in logs | **Never** |
 | Reachable over `/api/v1` | **No** — no public endpoint returns or accepts one |
+| Leaves our infrastructure | **Never** — see "What leaves this infrastructure" below |
 
 The template is created inside `services/face-ai`, travels once over the
 internal contract to apps/web, and is written to the database. No Server
@@ -38,6 +39,44 @@ defeat the assertion.
 The one identifier that does cross the boundary is `embeddingId` — a row id,
 useful for correlating a `face_enrollment.created` audit row with its
 `face_enrollment.deleted` one, and not a biometric.
+
+### What leaves this infrastructure, and what does not
+
+Production recognition is split deliberately, and the split is where the
+privacy question falls. Azure AI Face is asked one thing per image — *where
+are the faces, and where are their landmarks?* — and everything that decides
+**who** a face belongs to runs inside `services/face-ai` and apps/web, on
+weights baked into our own image. **No face template is ever sent to Microsoft,
+and Identify, Verify and the PersonGroup APIs are never called at all.** The
+templates in the table above are the product of our own code on our own
+hardware, and they stay there.
+
+Three properties of the one call that does go out:
+
+- **The image is re-encoded before it is sent.** face-ai decodes the photo and
+  re-encodes it as JPEG; the bytes that arrived are never forwarded. A phone
+  photograph's EXIF can carry GPS coordinates and the device's identity, and
+  re-encoding sends pixels and nothing else, so **that metadata never leaves
+  this service**. The same step removes a correctness hazard as a side
+  effect: if Azure and our decoder disagreed about EXIF orientation, the
+  landmarks would describe a different frame from the pixels the face chip is
+  cut from, and every face would be aligned on the wrong spot with nothing
+  failing anywhere.
+- **No `faceId` is requested.** `returnFaceId=false` on every Detect call, so
+  Azure is not asked to retain anything from the image. There is no
+  server-side face id to expire, to leak, or to be identified against later.
+- **Nothing is kept on this side, and nothing is asked for on the other.**
+  face-ai holds the bytes for the length of one call and writes them nowhere
+  (§3). What Microsoft does inside its own service is Microsoft's to document
+  — the point is that this product asks it for coordinates and for nothing it
+  would have to store, which is the only part we control.
+
+The images sent are classroom and enrolment photographs, which are biometric
+material in their own right; this is not a claim that nothing sensitive leaves,
+only a precise statement of what does. What leaves is pixels of faces, for the
+duration of one detection call. What does not leave is the template — the
+thing that cannot be reissued if it is lost — or the metadata saying where and
+on whose phone the photograph was taken.
 
 ### Access control
 
@@ -194,6 +233,12 @@ period for, and see in an audit log.
 - **There is no setting that means forever.** "Do not automatically retain
   classroom photos" is enforced by the absence of a value that could express
   it, not by a default somebody can change.
+
+During that one recognition call a re-encoded copy of the image goes to Azure
+AI Face for detection and comes back as coordinates. That is the only place a
+classroom photograph leaves this infrastructure, it carries no EXIF, no
+`faceId` is asked for, and nothing about it is retained at either end — §1
+sets out exactly what does and does not travel.
 
 Images captured offline are a separate case: they stay in IndexedDB on the
 teacher's own device as their own record and are never uploaded by the sync

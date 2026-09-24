@@ -100,8 +100,15 @@ param migrateImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 @description('Pass 2 switch — see modules/app.bicep header.')
 param enableKeyVaultSecretRefs bool = false
 
-@description('Face AI backend: "mock", or "azure" for Azure AI Face (docs/AZURE_FACE.md).')
+@description('''Face AI backend: "mock", "azure" for Azure AI Face
+identification, or "azure_detection_own_recognition" for Azure detection with
+in-process dlib recognition. See modules/app.bicep.''')
 param faceModelBackend string = 'mock'
+
+@description('''Refuse to start on a backend whose weights are not licence-
+cleared for commercial use. True in any environment serving real
+institutions.''')
+param faceAiRequireProductionModel bool = false
 
 @description('Azure AI Face endpoint, used when faceModelBackend is "azure".')
 param azureFaceEndpoint string = ''
@@ -205,6 +212,7 @@ module apps 'modules/app.bicep' = {
     faceAiImage: faceAiImage
     enableKeyVaultSecretRefs: enableKeyVaultSecretRefs
     faceModelBackend: faceModelBackend
+    faceAiRequireProductionModel: faceAiRequireProductionModel
     azureFaceEndpoint: azureFaceEndpoint
     tags: tags
   }

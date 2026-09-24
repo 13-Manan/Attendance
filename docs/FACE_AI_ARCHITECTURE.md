@@ -3,10 +3,16 @@
 How face recognition is structured in this product, why it is structured
 that way, and what is verified versus still open.
 
-This is a foundation document, written in Phase 3.1. **No real face
-recognition model ships in the repository at the time of writing** — see
-[Model licensing](#model-licensing) for why that is a deliberate outcome
-rather than an unfinished task.
+This is a foundation document, written in Phase 3.1, when no real face
+recognition model shipped in the repository at all. **Production now runs one:
+`azure_detection_own_recognition`, in which Azure AI Face finds the faces and
+this service recognises them.** The structure below is unchanged by that — the
+provider boundary existed precisely so a model could arrive without disturbing
+anything above it — but every sentence that said no cleared model existed has
+been corrected. See [Model licensing](#model-licensing) for what was cleared
+and what remains open, and
+[`services/face-ai/docs/RECOGNITION.md`](../services/face-ai/docs/RECOGNITION.md)
+for the backend itself.
 
 ---
 
@@ -44,6 +50,42 @@ rather than an unfinished task.
                                                 │
                                    128-d L2-normalised embedding
 ```
+
+…and, on the same provider boundary, the two backends that call Microsoft:
+
+```
+┌──────────────────────────┐  ┌───────────────────────────────────────┐
+│ AzureFaceModelProvider   │  │ AzureDetectionOwnRecognitionProvider  │
+│ detect AND identify      │  │ WHAT PRODUCTION RUNS                  │
+│ superseded — identify is │  │ productionEligible: true              │
+│ Limited Access and was   │  │ templates are our own vectors, in our │
+│ never approved for us    │  │ own database                          │
+└────────────┬─────────────┘  └──────────────────┬────────────────────┘
+             │                                   │
+ ┌───────────▼──────────┐   ┌────────────────────▼──────────────────┐
+ │ Azure AI Face        │   │ Azure AI Face — Detect only           │
+ │  Detect + Identify   │   │  boxes + 27 landmarks, no faceId      │
+ │  + LargePersonGroups │   └────────────────────┬──────────────────┘
+ └──────────────────────┘                        │
+                            ┌────────────────────▼──────────────────┐
+                            │ dlib, in this container               │
+                            │  5-point align → 150×150 chip         │
+                            │  ResNet v1 → 128-d, L2-normalised     │
+                            └────────────────────┬──────────────────┘
+                                                 │
+                                    128-d L2-normalised embedding
+```
+
+`azure_detection_own_recognition` splits the pipeline where the licensing,
+the privacy and the operational risk all happen to divide the same way.
+Detection is a geometry problem that a managed service is good at and that
+needs no approval; recognition is the part that decides who a student is, and
+it runs here, on public-domain weights, against templates that never leave our
+infrastructure. Nothing in it waits on Microsoft's Limited Access approval,
+because Identify, Verify and the PersonGroup APIs are never called at all.
+The consequence worth stating: `modelVersion` now carries an alignment
+component as well, because Azure supplies the landmarks the chip is cut from,
+so a change to *their* detection model changes *our* templates (§5).
 
 The `opencv` backend uses OpenCV rather than ONNX Runtime for a specific
 reason: the YuNet ONNX graph emits twelve *undecoded* per-stride tensors, and
@@ -103,9 +145,12 @@ structural property rather than a policy.
 
 ```python
 class FaceModelProvider(ABC):
-    name: str                    # "mock", "arcface-r100", …
+    name: str                    # "mock", "dlib-resnet-v1", …
     weights_version: str         # a release/tag/commit — never "latest"
-    preprocessing_version: str   # bumped when decode/crop/align/normalise changes
+    preprocessing_version: str   # bumped when decode/crop/resize/normalise changes
+    alignment_version: str | None  # bumped when the landmarks or the template
+                                   # they are warped onto change; None for a
+                                   # backend with no alignment of its own
     embedding_dim: int
     runtime: str                 # "onnxruntime", "numpy-hash-stub", …
     commercial_use: CommercialUseStatus
@@ -118,9 +163,13 @@ class FaceModelProvider(ABC):
     def embed(image_base64, bounding_box=None, landmarks=None) -> list[float]: ...
     def detect_and_embed(image) -> list[DetectedFace]: ...
     def compare_embeddings(a, b) -> float      # shared, not overridable in practice
+    def calibration() -> ScoreCalibration | None  # how to read this backend's
+                                               # raw scores on the product's
+                                               # scale; None = already on it
     def model_info() -> FaceModelInfo          # concrete — provenance is not a choice
     @property
-    def version(self) -> str                   # f"{weights_version}+pp{preprocessing_version}"
+    def version(self) -> str                   # "<weights>+pp<preprocessing>"
+                                               # plus "+al<alignment>" when set
 ```
 
 Two rules every adapter must honour, stated in the module docstring
@@ -136,6 +185,17 @@ because they are not expressible in the type system:
 `compare_embeddings` is concrete and delegates to the shared
 `matching.cosine_similarity`, so replacing a backend cannot change how two
 vectors are scored — only what the vectors are.
+
+What a score *means*, however, is a different question from how it is
+computed, and it is the backend's to answer. `calibration()` publishes the
+measured map from this recogniser's raw cosines onto the product's scale.
+dlib's ResNet puts most pairs of *different* people above 0.8; handing that
+number to a threshold an institution set at 0.62 would mark every stranger in
+the room present. So a production backend that stores embeddings and publishes
+no map is **refused** by apps/web rather than read raw — see
+[`RECOGNITION_ENGINE.md`](RECOGNITION_ENGINE.md) §4, and
+[`services/face-ai/docs/CALIBRATION.md`](../services/face-ai/docs/CALIBRATION.md)
+for where the map's knots came from.
 
 `model_info()` is concrete too. A backend declares its facts; it does not
 get to compose its own provenance record or decide whether it is
@@ -249,10 +309,12 @@ Every AI result identifies the model that produced it:
 | --- | --- |
 | `modelName` | Model/family identifier |
 | `weightsVersion` | The weights release, tag or commit |
-| `preprocessingVersion` | Bumped when decode, crop, alignment template, resize, channel order or normalisation changes |
-| `modelVersion` | Composite: `<weightsVersion>+pp<preprocessingVersion>` |
+| `preprocessingVersion` | Bumped when decode, crop, resize, channel order or normalisation changes |
+| `alignmentVersion` | Bumped when the landmarks used for alignment, or the template they are warped onto, change. Null for a backend that does no alignment of its own |
+| `modelVersion` | Composite: `<weightsVersion>+pp<preprocessingVersion>`, plus `+al<alignmentVersion>` when there is one |
 | `embeddingDim` | Vector length |
 | `contractVersion` | Wire-contract version |
+| `calibration` | The map from this backend's raw scores onto the product's scale, and the `id` of the measurement it came from |
 | `thresholdsUsed` | The thresholds actually applied (on match results) |
 
 The composite `modelVersion` exists because `FaceEmbedding` has exactly
@@ -262,6 +324,19 @@ provenance with no schema migration — and, more importantly, a
 preprocessing change invalidates stored vectors just as surely as a
 weights change does, so both belong in the identifier that decides
 comparability.
+
+The alignment component was added for the production backend, and it is there
+because that backend's alignment depends on somebody else: Azure supplies the
+27 landmarks the 150×150 chip is cut from, so if Microsoft changes
+`detection_03` the chips change and the templates stop being comparable with
+one another. Production's identifier is therefore
+`dlib-models-2a61575+pp1+al1.detection_03` — weights, preprocessing, and the
+alignment-plus-detector pair. `FaceEmbedding.alignmentVersion` (nullable,
+added by migration `20260924180000_face_embedding_alignment_version`) stores
+that component on its own as well, so "which templates were aligned this way"
+is answerable without parsing the composite string. Changing any component
+flips every existing template to `NEEDS_REENROLLMENT` automatically; that is
+the mechanism, not a manual step somebody has to remember.
 
 What is *not* stored: no raw images, no source image bytes, no
 intermediate crops. Provenance is metadata about the model, not about the
@@ -278,6 +353,18 @@ student's enrolment attempt minutes after a deploy looked successful.
 On every boot with a non-production-eligible backend it logs a warning.
 A stub quietly running in an environment people believe is doing real
 recognition is the failure mode worth shouting about.
+
+The production backend extends that into a chain, every link of it fail-fast:
+verify the recogniser weights' SHA-256, load the network, run a golden
+self-test against pinned values, build the Azure client, and make **one Detect
+call on a synthetic pattern** to prove the credential. The self-test is there
+because dlib selects its SIMD paths from the machine that compiled it, and a
+different BLAS or a miscompiled path changes the descriptors it produces — not
+by much, and not with an error, so the symptom would be students quietly
+ceasing to be recognised months later. A wrong Azure key stops the service. An
+Azure that is merely unreachable logs a warning, lets the service start, and
+answers `503` until it returns; the two are different situations and are
+treated differently.
 
 ---
 
@@ -323,10 +410,15 @@ find any others.
   processing, not default retention.
 - Images are never written to logs, never included in error messages, and
   never returned in API responses.
-- **No third-party hosted AI APIs.** Not Google Vision, not AWS
-  Rekognition, not Azure Face, not any hosted face-recognition service.
-  Biometric material does not leave infrastructure we run. The inference
-  stack runs locally by design.
+- **No third-party hosted face *recognition*.** Not Google Vision, not AWS
+  Rekognition, not Azure Face's Identify. The part of the pipeline that
+  decides who somebody is runs on infrastructure we operate, and **no face
+  template leaves it**. What production does send out is narrower and was
+  approved on exactly that basis: one Azure Detect call per image, asking
+  where the faces are. No `faceId` is requested, so Azure is not asked to
+  retain anything, and the image is re-encoded as JPEG before it is sent so
+  that EXIF — GPS position, device identity — never leaves this service. See
+  [`AZURE_FACE.md`](AZURE_FACE.md) and [`SECURITY.md`](SECURITY.md).
 - Raw embeddings are not exposed through normal APIs (§4).
 - The audit trail carries model metadata and identifiers, never vectors or
   images, so it stays safe to export and read broadly.
@@ -437,31 +529,51 @@ a hash. No real recognition, no licensing exposure, usable for evaluation
 and testing of everything around the model. Any real model used for
 evaluation must have a licence that permits evaluation.
 
-**PRODUCTION MODEL** → **not selected. License verification required
-before production deployment.** No model in this repository is cleared for
-commercial deployment. Per the standing rule: when current commercial
-licensing terms cannot be confidently determined, stop at the architecture
-decision rather than proceeding quietly.
+**PRODUCTION MODEL** → **selected: `azure_detection_own_recognition`, cleared
+2026-09-24.** Path 2 below is the one that was taken. Azure AI Face detects
+under the subscription's product terms; the recogniser is
+`dlib_face_recognition_resnet_model_v1`, whose weights the author released
+into the public domain (the dlib-models repository is CC0-1.0) and which is
+pinned by SHA-256 and baked into the image; dlib itself is Boost Software
+License 1.0. **No licence key, API key, registration or approval is required
+for the model.** The one credential in the system is the Azure resource key,
+and that buys detection as a service rather than a licence to a model.
 
-The open paths, in rough order of effort:
+**One question is referred, not answered.** About half the recogniser's
+training images came from FaceScrub (CC BY-NC-ND 3.0) and VGG Face
+(CC BY-NC 4.0). Whether a non-commercially licensed *dataset* restricts
+commercial use of a *model* trained on it is an unsettled question of law, not
+a defect in the licence we were granted, and it is not one an engineer should
+decide. It is **referred to legal review and open**, recorded in the backend
+log, in the registry entry, on `/v1/model-info` and in
+[`services/face-ai/docs/MODEL_LICENSES.md`](../services/face-ai/docs/MODEL_LICENSES.md).
+Nothing in this repository may describe it as resolved. If the review comes
+back negative the replacement is one pinned artefact and a `modelVersion`
+bump, which re-enrols everybody automatically.
+
+The paths that were open, with the one taken marked:
 
 1. Obtain a commercial licence for InsightFace's pretrained packs.
-2. Find a model whose **weights** carry a genuinely permissive licence
-   (verified clause by clause, not inferred from the code's licence).
+2. **Taken.** Find a model whose **weights** carry a genuinely permissive
+   licence — verified clause by clause, not inferred from the code's licence.
 3. Train our own weights on a commercially usable dataset — highest
-   effort, cleanest licence story.
+   effort, cleanest licence story, and still the answer if the referred
+   question comes back badly.
 
 Candidate evaluations and the mandatory backend log live in
-`services/face-ai/app/models/LICENSING.md`. See also ADR-0006.
+`services/face-ai/app/models/LICENSING.md`; the shipping backend's full audit
+is `services/face-ai/docs/MODEL_LICENSES.md`. See also ADR-0006.
 
 ### The rule is enforced in code, not just prose
 
 `MODEL_REGISTRY` entries carry `commercial_use` and a `licence_note`.
 With `FACE_AI_REQUIRE_PRODUCTION_MODEL=true`, the service **refuses to
 start** on a backend that is not cleared, and the error names
-`LICENSING.md`. A test asserts that no shipped backend claims
-`"permitted"`, so flipping a status to silence the guard fails CI instead
-of shipping.
+`LICENSING.md`. A test pins the set of backends allowed to claim
+`"permitted"` to exactly those that have been through the backend log, and
+asserts no other backend claims it — so clearing one is an edit to the test
+and to `LICENSING.md` together, and flipping a status to silence the guard
+fails CI instead of shipping.
 
 ---
 
@@ -489,9 +601,11 @@ No AI output writes a final attendance mark directly.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `FACE_MODEL_BACKEND` | `mock` | Registry key of the provider to load |
-| `FACE_AI_REQUIRE_PRODUCTION_MODEL` | `false` | Refuse to start unless the backend is licence-cleared |
-| `FACE_MODEL_DIR` | unset | Directory holding ONNX weights |
+| `FACE_MODEL_BACKEND` | `mock` | Registry key of the provider to load. Production: `azure_detection_own_recognition` |
+| `FACE_AI_REQUIRE_PRODUCTION_MODEL` | `false` | Refuse to start unless the backend is licence-cleared. Production: `true` |
+| `FACE_MODEL_DIR` | unset | Directory holding model weights. Production: `/srv/models`, baked into the image |
+| `AZURE_FACE_ENDPOINT` | unset | The Azure AI Face resource endpoint. Server-side only |
+| `AZURE_FACE_KEY` | unset | Key Vault reference. Never logged, never in a response |
 | `FACE_MODEL_EXECUTION_PROVIDERS` | `CPUExecutionProvider` | Comma-separated, in priority order |
 | `FACE_MODEL_INTRA_OP_THREADS` | `0` (runtime default) | Intra-op thread count |
 
@@ -504,11 +618,11 @@ does not touch `apps/web`.
 
 | Risk | Current state |
 | --- | --- |
-| **Model licensing** | Blocking. No production-cleared model exists. §9. |
-| **Recognition accuracy** | Unmeasured — there is no real model to measure. No accuracy claim can be made yet. |
-| **Classroom image quality** | Distance, angle and lighting in a real classroom are materially harder than enrolment captures. Quality metrics are defined in the contract but not yet implemented (`unavailable`). |
+| **Model licensing** | No longer blocking: `azure_detection_own_recognition` is cleared, and nothing waits on Microsoft's Limited Access approval. One residual question — the recogniser's training corpora — is **referred to legal review and open**. §9. |
+| **Recognition accuracy** | Measured on public-domain **adult** portraits, and provisional. Rank-1 was 40/40 on the harder corpus and no impostor and no stranger was ever wrongly marked present, but no classroom photograph and no child's photograph has been measured against this pipeline. [`CALIBRATION.md`](../services/face-ai/docs/CALIBRATION.md) lists what it does not establish. |
+| **Classroom image quality** | Distance, angle and lighting in a real classroom are materially harder than enrolment captures, and that has not changed. The production backend does now populate the contract's quality metrics, from Azure's own per-face attributes, and reports a face it cannot use — too small, unalignable, unembeddable — with a reason rather than dropping it silently. Reporting a bad face is not the same as recognising it. |
 | **CPU/GPU performance** | Unbenchmarked. ONNX Runtime session concurrency is an open question (§8). |
-| **False matches** | Mitigated structurally by class-scoped candidates and a threshold band; not yet validated numerically. |
+| **False matches** | Mitigated structurally by class-scoped candidates, a threshold band, one-to-one assignment within a photograph ([`FACE_ASSIGNMENT.md`](FACE_ASSIGNMENT.md)) and two ambiguity margins. In the evaluation no impostor and no stranger was ever marked present under any condition — but that is 4,040 impostor comparisons on adult portraits, which bounds a false-accept rate loosely and does not measure it. |
 | **Uncertain matches** | Routed to faculty review by construction. The UNCERTAIN band's width is a policy dial that will need real data to set. |
 | **Spoofing / presentation attack** | **No liveness detection exists.** A printed photo or a phone screen would not be rejected by anything in the current pipeline. Faculty presence during capture is the only control today. |
 | **Privacy and biometric regulation** | Embeddings are biometric data under several regimes. Consent, retention and deletion policy are product decisions still to be made. |
@@ -522,3 +636,8 @@ does not touch `apps/web`.
 - [`docs/adr/0005-embedding-model-swap-contract-and-licensing.md`](adr/0005-embedding-model-swap-contract-and-licensing.md)
 - [`docs/adr/0006-model-provider-abstraction-and-insightface-licensing-verdict.md`](adr/0006-model-provider-abstraction-and-insightface-licensing-verdict.md)
 - [`services/face-ai/app/models/LICENSING.md`](../services/face-ai/app/models/LICENSING.md) — the backend log
+- [`services/face-ai/docs/RECOGNITION.md`](../services/face-ai/docs/RECOGNITION.md) — the production backend, stage by stage
+- [`services/face-ai/docs/MODEL_LICENSES.md`](../services/face-ai/docs/MODEL_LICENSES.md) — its licence audit, including the referred question
+- [`services/face-ai/docs/CALIBRATION.md`](../services/face-ai/docs/CALIBRATION.md) — the thresholds and the measurements behind them
+- [`docs/FACE_ASSIGNMENT.md`](FACE_ASSIGNMENT.md) — one student, one face
+- [`docs/AZURE_FACE.md`](AZURE_FACE.md) — the Azure resource, and what is sent to it

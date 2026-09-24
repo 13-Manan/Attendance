@@ -3,12 +3,19 @@
 How a classroom capture becomes an **advisory** attendance suggestion, and
 where every decision that could mark the wrong student present is made.
 
-Written in Phase 5. Companion documents:
+Written in Phase 5, and revised when production gained a real recogniser.
+Companion documents:
 [`FACE_AI_ARCHITECTURE.md`](FACE_AI_ARCHITECTURE.md) (layering and the model
-boundary), [`services/face-ai/bench/README.md`](../services/face-ai/bench/README.md)
-(how thresholds are meant to be chosen), and
+boundary), [`FACE_ASSIGNMENT.md`](FACE_ASSIGNMENT.md) (one student, one face —
+the assignment step in §4, and why it is greedy rather than Hungarian),
+[`services/face-ai/docs/RECOGNITION.md`](../services/face-ai/docs/RECOGNITION.md)
+(the other half of the pipeline: Azure detects, face-ai recognises),
+[`services/face-ai/docs/CALIBRATION.md`](../services/face-ai/docs/CALIBRATION.md)
+(the measurements the thresholds in §4 actually rest on),
+[`services/face-ai/bench/README.md`](../services/face-ai/bench/README.md)
+(the harness), and
 [`services/face-ai/app/models/LICENSING.md`](../services/face-ai/app/models/LICENSING.md)
-(why no model here is production-cleared yet).
+(how a backend gets cleared for production, and which one is).
 
 > **Nothing in this document finalizes attendance.** The engine writes no
 > database rows. It returns a summary that a faculty member confirms.
@@ -19,7 +26,8 @@ boundary), [`services/face-ai/bench/README.md`](../services/face-ai/bench/README
 
 | Concern | Location |
 | --- | --- |
-| Orchestration, scoring, policy, deduplication | `apps/web/src/modules/recognition-engine/service.ts` |
+| Orchestration, scoring, assignment, policy, deduplication | `apps/web/src/modules/recognition-engine/service.ts` |
+| Reading one backend's scores on the product's scale | `apps/web/src/modules/recognition-engine/calibration.ts` |
 | Result and policy types | `apps/web/src/modules/recognition-engine/types.ts` |
 | Server action entry point | `apps/web/src/modules/recognition-engine/actions.ts` |
 | Class-scoped pgvector candidate lookup | `apps/web/src/modules/recognition-results/repository.ts` |
@@ -43,8 +51,8 @@ runRecognitionAction  ── requirePermission("attendanceSession.capture")
    │                     requireSameInstitution(session)
    │                     requireCohortAccess(cohort)
    ▼
-GET /v1/model-info            ← which model is running, right now
-   │
+GET /v1/model-info            ← which model is running, right now, and the
+   │                             calibration it publishes for its scores
    ▼
 class-scoped candidate pool   ← pgvector; subject enrollment if the session
    │                             has one, else the cohort; always filtered
@@ -56,7 +64,16 @@ POST /v1/detect-embed         ← ONE batched call for all 1–3 images
    ├── drop faces below minDetectionConfidence  (dropReason recorded)
    │
    ▼
-cosine similarity vs every candidate → best + runner-up
+cosine similarity vs every candidate
+   │
+   ▼
+calibrate onto the product's scale  ← before any threshold sees a number
+   │
+   ▼
+best + runner-up (a different student), per face
+   │
+   ▼
+one student per face, within each photograph   (FACE_ASSIGNMENT.md)
    │
    ▼
 confidence policy → MATCHED | UNCERTAIN | UNMATCHED
@@ -68,7 +85,7 @@ cross-image deduplication by studentId (best score wins)
 advisory per student → PRESENT | NEEDS_REVIEW | ABSENT
 ```
 
-Three properties of that chain are load-bearing:
+Four properties of that chain are load-bearing:
 
 **Authorization happens before any I/O.** Permission, institution and cohort
 checks all run before the candidate pool is loaded and before a single image
@@ -81,6 +98,12 @@ would re-warm the pipeline on every frame.
 **Model identity is resolved first.** The pool query is filtered by the
 running model's `modelName` and composite `modelVersion`, so templates
 enrolled under a different build are never compared against the current one.
+
+**Scores are calibrated before anything looks at them.** `/v1/model-info` is
+also where the running backend declares how its raw similarities map onto the
+product's scale, and that map is applied at the single point where cosines are
+produced — so the thresholds, the assignment, the aggregate and the number a
+teacher is shown are all the same kind of number. §4 is where that matters.
 
 ---
 
@@ -128,30 +151,85 @@ in the UI, because "we could not compare this student" must never render as
 
 ## 4. Confidence policy
 
-Four knobs, all runtime configuration:
+### The scale these thresholds are written against
+
+A threshold means nothing without the scale it is on, and recognisers do not
+agree on one. The recogniser production runs — dlib's ResNet, behind
+`azure_detection_own_recognition` — puts **most pairs of different people
+above 0.85**, and a raw cosine of `0.94`, which would sail past `presentMin`
+read naively, is two different people. A model trained with a margin loss puts
+strangers near zero instead. Compare a raw dlib score against `0.62` directly
+and every stranger in the room is marked present.
+
+Institutions configure `presentMin` and `reviewMin` without being told which
+recogniser is deployed, and they should not have to be told. So the backend
+publishes a **measured map** onto the product's scale — `calibration` on
+`GET /v1/model-info`: piecewise-linear knots, currently raw `0.930 → 0.45` and
+raw `0.955 → 0.62`, plus a `rawAmbiguityMargin` of `0.01` — and
+`recognition-engine/calibration.ts` applies it at the single point where
+cosines are produced. **Every score in the rest of this document is on the
+product's scale, after that map.** The raw cosine is carried alongside it, so a
+result stays explainable after a recalibration and the raw margin below can be
+enforced; nothing compares the raw number to `presentMin`.
+
+Two properties make that safe to build on:
+
+- **The map is monotone.** Its knots span raw −1 to 1 and increase strictly in
+  both coordinates, so calibration can never reorder two candidates. It
+  changes which side of a threshold a score falls on, never who is in front.
+- **It fails closed.** A production backend that stores embeddings and
+  publishes *no* calibration is **refused** rather than read raw: the run
+  stops and nothing is marked. "No map" and "the identity map" are different
+  claims, and guessing the second when the service meant the first is how a
+  classroom gets marked present. A backend whose raw scale genuinely is the
+  product's says so by publishing the identity map. Development backends
+  without one are still read raw — requiring a calibration from `mock` would
+  break every local checkout for no safety gained.
+
+The arithmetic exists twice, in `calibration.ts` and in
+`services/face-ai/app/matching.py`, with a test asserting both produce
+identical floating-point values at 23 points including every knot: a
+one-ulp disagreement at a knot puts a student on the other side of a
+threshold.
+
+### The knobs
+
+Four are runtime configuration; the fifth comes from the backend, because only
+the backend knows its own scale:
 
 | Knob | Default | Source | Meaning |
 | --- | --- | --- | --- |
 | `presentMin` | `0.62` | `Institution.settings.confidenceThresholds` | At or above → MATCHED |
 | `reviewMin` | `0.45` | `Institution.settings.confidenceThresholds` | At or above (and below `presentMin`) → UNCERTAIN |
-| `ambiguityMargin` | `0.05` | engine policy / per-run override | Best must beat runner-up by this much |
+| `ambiguityMargin` | `0.05` | engine policy / per-run override | Best must beat runner-up by this much, in calibrated points |
 | `minDetectionConfidence` | `0.5` | engine policy / per-run override | Below this, the face is not scored at all |
+| `calibration.rawAmbiguityMargin` | `0.01` | the running backend, via `/v1/model-info` | Best must *also* beat runner-up by this much on the backend's own raw scale |
 
-> **These defaults are plumbing, not findings.** No dataset has validated
-> them. They exist so the pipeline runs end to end; a deployment must replace
-> them with values measured by
-> [the benchmark harness](../services/face-ai/bench/README.md).
+> **`presentMin` and `reviewMin` are institution policy. The map underneath
+> them is a measurement, and it is provisional.** The two thresholds are not
+> changing; what was measured is what a raw score from this recogniser means
+> against them. That measurement was taken on public-domain **adult**
+> portraits — never on classroom photographs, never on children, and never on
+> a photograph from this product's own database. An institution deploying this
+> should expect to re-measure against its own population before trusting the
+> present threshold unattended.
+> [`CALIBRATION.md`](../services/face-ai/docs/CALIBRATION.md) states exactly
+> what was and was not tested, including a section on what it does **not**
+> establish. `ambiguityMargin` and `minDetectionConfidence` remain engine
+> defaults that no dataset has validated.
 
 ### Classification
 
 ```
-similarity >= presentMin                     → MATCHED
-reviewMin <= similarity < presentMin         → UNCERTAIN
-similarity < reviewMin                       → UNMATCHED
+calibrated >= presentMin                     → MATCHED
+reviewMin <= calibrated < presentMin         → UNCERTAIN
+calibrated < reviewMin                       → UNMATCHED
 ```
 
 Bounds are inclusive at the lower edge, so a threshold of `0.62` means
-"0.62 counts".
+"0.62 counts". A raw score sitting exactly on a knot reads as exactly that
+knot's calibrated value, which is what keeps that sentence true through the
+map.
 
 ### The ambiguity rule
 
@@ -164,6 +242,16 @@ This is the near-collision case that a threshold alone cannot catch, and it
 is where a single number silently becomes the wrong person. The rule only
 fires where it can change an outcome: a near-tie that was already below
 `presentMin` is not flagged, because it was already going to review.
+
+**Two margins, and either one is enough to demote.** The institution's margin
+is in calibrated points, which is what an administrator can reason about. The
+backend's `rawAmbiguityMargin` is in raw points, because the map stretches the
+top of the scale: two students `0.002` raw apart are the same face to the
+recogniser however far apart their calibrated scores end up. The measurement
+behind that number is blunt — in the evaluation corpus there exists a genuine
+pair whose correct match beat the wrong one by two ten-thousandths — so a face
+whose top two candidates are within `0.01` raw goes to a teacher regardless of
+where calibration put them.
 
 **The runner-up is always a different student.** This is load-bearing, and it
 was wrong until Phase 4. A student may hold up to `MAX_SAMPLES_PER_STUDENT`
@@ -180,6 +268,29 @@ A student's own templates now compete to represent that student, and only the
 best score from a *different* student can be the runner-up. The rule still
 catches genuine look-alikes — that case is tested with two students holding
 two samples each.
+
+### One student, one face
+
+Scoring each face against the pool independently and giving every face its own
+best match hands the same student to two faces, because two faces really can
+resemble one person — siblings, cousins, or a recogniser having a bad day with
+a turned head. So the faces **within one photograph** are matched to students
+jointly, by `assignFacesOneToOne`: a student may be given at most one face per
+image. A face that lost its top choice and took its second is recorded as
+`reassigned` and can never be a confident match; a face with nothing left
+above the review floor is assigned nobody and becomes an unknown face, never a
+guess. Any student who was the top choice of two or more faces is `contested`
+and goes to a teacher however high the winning score was.
+
+The matching is greedy, deliberately, rather than the textbook Hungarian
+assignment: a sum of similarities is not a likelihood, and maximising it can
+reach its optimum by giving a face to somebody who was not its best match at
+all. [`FACE_ASSIGNMENT.md`](FACE_ASSIGNMENT.md) works that through with the
+example, and states what the assignment deliberately does not do.
+
+Assignment is within one image, because "two faces in one photograph are two
+different people" is only true within one photograph. Merging the evidence
+across the round's photographs is §5, and it has the opposite rule.
 
 ### Low-confidence detections
 
@@ -225,12 +336,18 @@ frame.
    confidence, then on the lowest capture number. Fully deterministic: the
    same observations always produce the same register, whatever order the
    detector returned faces in.
-3. **Classify** the representative's raw similarity through the same
-   `presentMin` / `reviewMin` bands every other decision uses.
+3. **Classify** the representative's similarity — calibrated, like every
+   other score in this document — through the same `presentMin` / `reviewMin`
+   bands every other decision uses.
 4. **Apply demotions.** Each can only make the answer more cautious:
    - `ambiguous_face` — the representative's runner-up (a different student)
-     was inside the margin.
+     was inside the margin, either margin.
    - `duplicate_within_capture` — see §6.
+   - `low_quality_face` — the winning face failed a quality check that face-ai
+     reported. It is still matched; it is never matched above review.
+   - `reassigned_face` — the winning face's own best candidate was somebody
+     else, claimed by a stronger face, and this student was its second choice
+     (§4).
 5. **Never promote.** A student whose representative observation is UNCERTAIN
    stays UNCERTAIN no matter how many other captures agreed. Agreement
    between two uncertain looks is not certainty. There is no branch in
@@ -266,8 +383,17 @@ face simply won and the collision was visible only to somebody reading
 `perFace`; a confident-looking PRESENT produced by a coin flip is
 unreviewable, because nobody reviews a confident Present.
 
-The losing face keeps its own `perFace` record with its own decision, so the
-collision is still legible rather than being tidied away.
+Since the one-to-one assignment landed (§4), the student cannot actually hold
+two faces in one capture: the stronger face keeps them and is flagged
+`contested`, and the other face is either reassigned to its next candidate or
+left unknown. The demotion fires on that flag as readily as on two raw
+observations, so a result assembled without the assignment — an older run, a
+different path — still demotes. Neither the flag nor the count is the rule;
+"two faces claimed this person" is.
+
+The losing face keeps its own `perFace` record with its own decision and its
+own demotions, so the collision is still legible rather than being tidied
+away.
 
 The *cross-capture* case is the opposite signal and is left alone: the same
 student in photo 1 and photo 2 is one person photographed twice, which is the
@@ -308,7 +434,11 @@ the `policy` actually applied, `candidateScope`, `candidatePoolSize`,
 `unmatchedStudentIds`.
 
 Storing the policy *with* the result matters: a summary read six months later
-must be interpretable without guessing which thresholds were in force.
+must be interpretable without guessing which thresholds were in force. The
+policy carries the backend's calibration, including its `id` (currently
+`dlib-resnet-v1.azure-d03.2026-09-24`), for the same reason one step further
+down — a recalibration changes what a stored score *means*, and that has to be
+visible in the audit trail rather than silently rewriting history.
 
 ---
 
@@ -341,6 +471,8 @@ string `embedding` nor any component of a fixture vector.
 | Caller lacks permission / wrong institution / no cohort access | Throws before pool load and before any image is sent |
 | face-ai unreachable or returns non-2xx | Error propagates; the capture wizard shows it and falls back to roll-call |
 | Malformed request rejected by face-ai | Surfaces as an error — never as "no faces detected" |
+| An Azure outage behind the production backend | face-ai answers `503`; it propagates as an error and never as "no faces found" |
+| A production embedding backend publishes no calibration, or an unusable one | `FaceCalibrationError` before any score is read; the run stops and nobody is marked (§4) |
 | Zero candidates in the pool | Runs, returns no matches, `candidatePoolSize: 0` |
 | Corrupt/zero-length template | Scores 0 rather than `NaN`; one bad row cannot fail the class |
 | Dimension mismatch | Candidate skipped and counted, not scored as 0 |
@@ -374,27 +506,45 @@ deterministically across calls, a student in two photos is counted once, the
 search stays class-scoped, and the summary carries no biometric material.
 
 What they do **not** prove: that anybody is recognised correctly. The mock is
-a hash stub. Accuracy is the benchmark's job, and the benchmark has not been
-run against a real dataset.
+a hash stub. Whether the production recogniser separates one person from
+another was measured separately, outside this repository, on public-domain
+adult portraits —
+[`CALIBRATION.md`](../services/face-ai/docs/CALIBRATION.md) — and that
+evaluation is what the calibration knots come from. It is **not** a classroom
+benchmark: no classroom photograph and no child's photograph has been measured
+against this pipeline.
 
 ---
 
 ## 11. Status and limitations
 
-- **A real recogniser exists and is still not production-cleared.** Phase 5
-  added the `opencv` backend: YuNet detection + SFace embedding, both pinned by
-  SHA-256 and verified at startup. Its weight licences are permissive (YuNet
-  MIT, SFace Apache-2.0), but the training-data provenance behind the
-  distributed SFace artefact is unresolved for commercial biometric use, so it
-  reports `commercialUse: "unclear"` and `productionEligible: false`. The
-  service refuses to start on it with `FACE_AI_REQUIRE_PRODUCTION_MODEL=true`.
-  `mock` remains a hash stub; `onnx` remains a weightless scaffold.
-- **Embeddings are 128-d**, SFace's native width, since Phase 5. Any template
-  enrolled before that migration is a different width and is skipped and
-  counted rather than compared — see §3.
-- **Thresholds are unvalidated defaults.** See §4.
-- **No accuracy claim is supported by evidence.** No benchmark run against
-  real classroom data exists.
+- **A production-cleared recogniser now runs.**
+  `azure_detection_own_recognition`: Azure AI Face for detection and landmarks
+  only, and dlib's `dlib_face_recognition_resnet_model_v1` in face-ai's own
+  process for the part that decides who somebody is. The weights are public
+  domain, SHA-256 pinned and verified at startup, so it reports
+  `commercialUse: "permitted"` and `productionEligible: true`. Nothing in it
+  waits on Microsoft's Limited Access approval, because Identify is never
+  called. One licence question — about half the weights' training images came
+  from two non-commercially licensed research corpora — is **referred to legal
+  review and open**; see
+  [`MODEL_LICENSES.md`](../services/face-ai/docs/MODEL_LICENSES.md). `opencv`
+  is still `unclear` and still refused in production; `mock` remains a hash
+  stub; `onnx` remains a weightless scaffold.
+- **Embeddings are 128-d**, SFace's native width since Phase 5 and the dlib
+  recogniser's width as well. Any template enrolled before that migration is a
+  different width and is skipped and counted rather than compared — see §3.
+  Templates are additionally filtered by `modelVersion`, now
+  `dlib-models-2a61575+pp1+al1.detection_03`, so a template written by an
+  earlier build is counted as incompatible rather than compared.
+- **The thresholds are institution policy; the calibration under them is
+  provisional.** It was measured on public-domain adult portraits, not on
+  classroom photographs and not on children. `ambiguityMargin` and
+  `minDetectionConfidence` are still unvalidated engine defaults. See §4.
+- **No accuracy claim is supported by classroom evidence.** What exists is an
+  evaluation on adult portraits with synthetic degradation, whose own document
+  lists at length what it does not establish. No benchmark run against real
+  classroom data exists, and none against children.
 - **Attendance is never finalized by the engine.** It returns an advisory
   summary and writes nothing; `modules/attendance-review` turns that into a
   register, and only a faculty member closes one.
@@ -403,11 +553,18 @@ run against a real dataset.
   Everything around it — states, failures, lifecycle, payload bounds — runs
   against `fixtureCameraSource`, which proves the software and says nothing
   about a lens. See §12.
-- Occlusion, extreme angles and back-row distance are known-hard and
-  unmeasured here; the benchmark manifest has slots for exactly those
-  conditions.
+- Occlusion, extreme angles and back-row distance are known-hard. Occlusion
+  and small faces were measured synthetically for the production recogniser
+  and the result is the intended shape — as conditions worsen the system stops
+  claiming rather than starts guessing, and at 36 pixels nothing is
+  auto-marked present at all — but that is portraits degraded in software, not
+  a back row. See
+  [`CALIBRATION.md`](../services/face-ai/docs/CALIBRATION.md).
 
-**License verification required before production deployment.**
+**The recogniser's licence is verified and recorded
+([`LICENSING.md`](../services/face-ai/app/models/LICENSING.md)); the question
+of whether two non-commercially licensed training corpora reach the trained
+weights is referred to legal review and is not settled.**
 
 ---
 

@@ -1,0 +1,11 @@
+# Build tooling for the image's builder stage. Not installed at runtime.
+#
+# dlib is compiled from source (requirements-dlib.txt) with
+# `--no-build-isolation`, which means pip uses whatever build backend is
+# already installed instead of fetching an unpinned one into a throwaway
+# environment. These are that backend, pinned by hash for the same reason the
+# sdist is: a build input nobody chose is a build input nobody can audit.
+setuptools==84.0.0 \
+    --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
+wheel==0.45.1 \
+    --hash=sha256:708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248

@@ -458,6 +458,88 @@ guess at. Read the refusal, run `--args inspect`, and decide deliberately.
 
 ---
 
+## The Face AI service
+
+`attendance-prod-face-ai` runs `FACE_MODEL_BACKEND=azure_detection_own_recognition`:
+Azure AI Face is asked where the faces are, and the service recognises them in
+its own process, on weights baked into the image. Identify is never called, so
+**no part of production waits on Microsoft's Limited Access approval** and no
+face template leaves the container. The design is
+[`services/face-ai/docs/RECOGNITION.md`](../services/face-ai/docs/RECOGNITION.md);
+what follows is what an operator needs.
+
+### Environment
+
+| Variable | Production value | Set by |
+|---|---|---|
+| `FACE_MODEL_BACKEND` | `azure_detection_own_recognition` | `infra/azure/parameters/production.bicepparam` → `modules/app.bicep` |
+| `FACE_AI_REQUIRE_PRODUCTION_MODEL` | `true` | the same; refuses to start on a backend whose licence is not cleared |
+| `FACE_MODEL_DIR` | `/srv/models` | **the image**, not the container app. `ENV` in `services/face-ai/Dockerfile`, alongside the weights it points at |
+| `AZURE_FACE_ENDPOINT` | `https://attendance-azure-face.cognitiveservices.azure.com/` | `production.bicepparam` |
+| `AZURE_FACE_KEY` | `secretref:azure-face-key` | Container App secret → Key Vault `AZURE-FACE-KEY` |
+| `FACE_AI_AUTH_TOKEN` | the shared service token | Container App secret → Key Vault `FACE-AI-SERVICE-TOKEN`; `docs/SECURITY.md` §4 |
+| `FACE_AI_REQUIRE_AUTH` | `true` | `modules/app.bicep`, tied to `enableKeyVaultSecretRefs`: the service refuses to start unauthenticated in any environment that has real secrets attached |
+
+The weights are **in the image**, fetched and checksum-verified at build time
+and never downloaded at runtime. There is no volume to mount and no model
+directory to provision: a face-ai revision either has the right bytes baked
+in or fails to start.
+
+Rotating the Azure key is the same shape as any other: write the new value to
+`AZURE-FACE-KEY` in `attendance-prod-keyvault` and restart the face-ai
+revision. Nothing in git changes. See `docs/AZURE_FACE.md`.
+
+### Startup, and what each failure means
+
+Startup is fail-fast and strictly ordered. Each step exists because its
+failure mode is otherwise silent:
+
+1. **Verify the recogniser weights' SHA-256** against the pin in
+   `app/models/model_files.py`.
+2. **Load the network.**
+3. **Run the golden self-test** — the network on a fixed synthetic chip,
+   compared against pinned values.
+4. **Build the Azure client.**
+5. **One Detect call on a synthetic pattern**, to prove the credential.
+
+| Symptom in the logs | What it means | What to do |
+|---|---|---|
+| Weights checksum mismatch | The image's model layer is not the one that was built and verified | Roll back to the previous face-ai digest; rebuild. Do not "re-pull" |
+| Golden self-test failure | This build of dlib computes different descriptors — a different BLAS, a miscompiled SIMD path, substituted weights. Templates written by it would not match templates written by any other build | Roll back. The same check runs in the image build (`scripts/verify_recognizer.py`), so an image that fails here should never have been pushed — find out why it was |
+| Startup fails naming the backend's commercial-use status | `FACE_AI_REQUIRE_PRODUCTION_MODEL=true` and `FACE_MODEL_BACKEND` selects an uncleared backend | Fix the parameter. Do not clear the guard |
+| Startup fails on the Azure probe, credential rejected | The key is wrong, revoked, or points at the wrong resource | Check `AZURE-FACE-KEY` in Key Vault, then restart the revision |
+| **Warning** at startup, service running, requests answering `503` | Azure was merely unreachable at boot. The service starts deliberately in this case | Treat as an Azure incident, not a deployment one. It recovers without a redeploy |
+| `503` from `/v1/detect-embed` under load | An Azure outage propagating. **It is never reported as "no faces found"** — a classroom with nobody in it is a claim, and an outage is not evidence for it | Teachers fall back to roll-call; the capture wizard already does this |
+
+A wrong key stops the service; an unreachable Azure does not. The distinction
+is deliberate: one is a deployment mistake that should never serve traffic,
+and the other is somebody else's incident that will pass.
+
+### Checking what a revision is actually running
+
+Both scripts ship in the image. Neither needs the network, an Azure
+credential, or the service to be answering requests — only a replica to exec
+into:
+
+```sh
+az containerapp exec -n attendance-prod-face-ai -g attendance-production-rg \
+  --command "python scripts/verify_recognizer.py --dir /srv/models"
+# weights SHA-256 + the golden self-test. Exits non-zero, loudly, on any
+# mismatch. Prints no vector.
+
+az containerapp exec -n attendance-prod-face-ai -g attendance-production-rg \
+  --command "python scripts/sbom.py --pretty"
+# CycloneDX inventory: the pinned model artefacts with their checksums and
+# source URLs, plus the installed distribution versions. Generated rather
+# than committed so it cannot drift from what the build actually reads.
+```
+
+`verify_recognizer.py` is the first thing to run against a container that is
+behaving oddly — it answers "is this the recogniser we calibrated?" without
+touching Azure. `sbom.py` answers "what is actually in this image?", which is
+the question an audit asks and which a requirements file cannot answer,
+because a range is what was asked for and not what was installed.
+
 ## Health checks
 
 ```sh

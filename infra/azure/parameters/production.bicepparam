@@ -58,7 +58,14 @@ param enableKeyVaultSecretRefs = false
 // enableKeyVaultSecretRefs (pass 2), which the live apps already run with.
 // Identification needs Microsoft's Limited Access approval; until then the
 // service detects only. See docs/AZURE_FACE.md.
-param faceModelBackend = 'azure'
+// Azure finds the faces; this product recognises them. Identification stays
+// behind Microsoft's Limited Access approval, and nothing here waits on it.
+param faceModelBackend = 'azure_detection_own_recognition'
+
+// Production serves real institutions, so a backend whose weights are not
+// licence-cleared must not start. The recogniser's weights are public domain
+// (services/face-ai/docs/MODEL_LICENSES.md).
+param faceAiRequireProductionModel = true
 param azureFaceEndpoint = 'https://attendance-azure-face.cognitiveservices.azure.com/'
 
 param captureRetentionDays = 30

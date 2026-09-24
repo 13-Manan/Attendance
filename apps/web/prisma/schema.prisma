@@ -648,6 +648,13 @@ model FaceEmbedding {
   // preprocessing?" without parsing a string that is not meant to be parsed.
   weightsVersion       String?
   preprocessingVersion String?
+  // Which landmark-to-template mapping produced this vector. Part of
+  // `modelVersion` too, so comparability is already enforced by the filter
+  // that uses it; kept here so "your samples were aligned the old way, please
+  // enrol again" can be said without parsing a composite string. Null for a
+  // backend that does no alignment of its own, and for every row written
+  // before the column existed.
+  alignmentVersion     String?
   // Recorded per row as well as fixed by the column, because a future model
   // swap changes the column for new rows while these rows still describe
   // vectors of the old width.

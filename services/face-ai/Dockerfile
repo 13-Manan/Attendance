@@ -8,8 +8,47 @@
 # into a biometric template, and it has no business seeing the web application,
 # the Prisma schema or the infrastructure templates — ADR-0002 keeps it a pure
 # function of its input, and a build context is part of that boundary.
+#
+# Two stages. The first compiles dlib, which needs a C++ toolchain, CMake and
+# ~1 GiB of intermediate objects; none of that belongs in a running container.
+# The second installs the resulting wheel, bakes the pinned recogniser weights
+# in, and proves at BUILD time that the compiled network computes the values
+# the thresholds were calibrated against.
 
-FROM python:3.12-slim AS base
+# ---------------------------------------------------------------------------
+# Stage 1: compile the recogniser
+# ---------------------------------------------------------------------------
+
+FROM python:3.12-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /build
+
+# build-essential and cmake compile dlib. libopenblas-dev gives its matrix
+# operations a tuned BLAS — the difference between a classroom photograph
+# embedding in a second and in several. The runtime stage installs the
+# matching libopenblas0-pthread; if it were missing, `import dlib` would fail
+# in the self-test below rather than in production.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential cmake libopenblas-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-build.txt requirements-dlib.txt ./
+
+# --require-hashes on both: every input to the compiled artefact is pinned by
+# content, not by a version number somebody could republish.
+RUN pip install --require-hashes -r requirements-build.txt \
+ && pip wheel --no-binary :all: --no-build-isolation --no-deps \
+      --require-hashes -r requirements-dlib.txt -w /wheels
+
+# ---------------------------------------------------------------------------
+# Stage 2: the image that runs
+# ---------------------------------------------------------------------------
+
+FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -26,8 +65,12 @@ WORKDIR /srv
 # "headless" removes the GUI stack (libGL, X11, GTK) but not glib, and without
 # it `import cv2` fails with a missing libgthread — which mentions neither
 # OpenCV nor glib and is a genuinely confusing first-boot failure.
+#
+# libopenblas0-pthread is what the compiled dlib links against. The -dev
+# package from the builder stage is not needed here, only the shared library.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libgomp1 libglib2.0-0 \
+ && apt-get install -y --no-install-recommends \
+      libgomp1 libglib2.0-0 libopenblas0-pthread \
  && rm -rf /var/lib/apt/lists/*
 
 # Dependencies before source, so editing a handler does not reinstall
@@ -35,28 +78,56 @@ RUN apt-get update \
 COPY requirements.txt requirements-prod.txt ./
 RUN pip install --no-cache-dir -r requirements-prod.txt
 
+# --no-deps because dlib declares none and pip must not reach the network to
+# confirm that; --no-index because nothing here may come from anywhere but the
+# wheel the builder produced.
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --no-index --no-deps /wheels/dlib-*.whl \
+ && rm -rf /wheels
+
 # Application code only. .dockerignore keeps tests/, bench/ and dev
 # requirements out of the image.
 COPY app ./app
 COPY scripts ./scripts
 
-# Model weights are NOT baked into this image.
+# The recogniser's weights, baked in and verified.
 #
-# They are ~37 MiB of binary whose commercial-use status is unresolved
-# (app/models/LICENSING.md), so shipping them inside an image that gets pushed
-# to a registry is a licensing decision, not a packaging one. The image is
-# therefore model-agnostic: mount or copy verified artefacts to FACE_MODEL_DIR,
-# and the backend verifies their SHA-256 at startup before OpenCV opens them.
+# This image is no longer model-agnostic, and that is the point. The weights
+# are public domain (docs/MODEL_LICENSES.md), so shipping them inside a
+# registry image is a packaging decision rather than a licensing one — which
+# it was not, for the artefacts this line deliberately does not fetch.
 #
-# With the default FACE_MODEL_BACKEND=mock no weights are needed at all, which
-# is what makes this image deployable while the licensing question is open.
-#
-# To build an image that does carry them, add — deliberately, and only once the
-# licence question is settled:
-#     RUN python scripts/fetch_models.py --dir /srv/models
-#     ENV FACE_MODEL_DIR=/srv/models
+# Downloaded here rather than copied from the build context so the SHA-256 in
+# app/models/model_files.py is the only thing that decides what gets baked in:
+# a substituted file fails the build, and nobody can slip a different
+# recogniser in by dropping it in models/. The service then verifies the same
+# checksum again at startup, so a layer altered after the fact does not serve.
+RUN python scripts/fetch_models.py --set dlib --dir /srv/models
+ENV FACE_MODEL_DIR=/srv/models
 
-# Never root. If an image-parsing bug in pillow or onnxruntime is ever
+# Prove the compiled network computes what the thresholds were calibrated
+# against, in the image, at build time.
+#
+# dlib selects SSE4/AVX code paths from the machine that compiles it, and a
+# different BLAS or a miscompiled SIMD path changes the descriptors it
+# produces — subtly, in a way that would show up as students who stop being
+# recognised rather than as an error. This runs the same golden self-test the
+# service runs at startup, so an image that would do that never gets pushed.
+RUN python scripts/verify_recognizer.py --dir /srv/models
+
+# One thread per library, because the process model is already parallel: two
+# gunicorn workers against the 1 vCPU allocation. A BLAS that helpfully starts
+# a thread per core would oversubscribe the container and make every request
+# slower.
+ENV OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1
+
+# A decompression-bomb guard. OpenCV will happily allocate a 2-gigapixel frame
+# from a few kilobytes of PNG and take the container's whole 2 GiB with it.
+# 50 megapixels is far above any camera this product sees.
+ENV OPENCV_IO_MAX_IMAGE_PIXELS=50000000
+
+# Never root. If an image-parsing bug in pillow, OpenCV or dlib is ever
 # exploitable, the blast radius should not include the container's filesystem.
 RUN useradd --system --create-home --uid 10001 faceai \
  && chown -R faceai:faceai /srv

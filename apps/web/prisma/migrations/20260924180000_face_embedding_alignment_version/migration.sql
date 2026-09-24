@@ -1,0 +1,15 @@
+-- Which landmark-to-template mapping produced each stored template.
+--
+-- `modelVersion` already carries it: the composite is
+-- "<weights>+pp<preprocessing>+al<alignment>", and candidate retrieval filters
+-- on `modelVersion`, so a template aligned by an older mapping is already
+-- excluded from comparison. This column changes nothing about that. It exists
+-- so the question "why is this student never recognised?" can be answered from
+-- the row — a re-enrolment prompt should be able to say which mapping a
+-- student's samples were taken under without parsing a string that is not
+-- meant to be parsed.
+--
+-- Nullable and backfilled with nothing. Every existing row predates alignment
+-- versioning, and inventing a value for them would assert something nobody
+-- measured. NULL reads as "not recorded", which is true.
+ALTER TABLE "FaceEmbedding" ADD COLUMN "alignmentVersion" TEXT;

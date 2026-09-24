@@ -458,6 +458,11 @@ export interface EmbedResponse {
   /** Structured provenance mirroring the composite `modelVersion`. */
   weightsVersion: string;
   preprocessingVersion: string;
+  /** Structured component: the landmark-to-template mapping this vector was
+   * aligned by. Already part of `modelVersion`; stored separately so a
+   * template can say how it was aligned without parsing that string. Absent
+   * from a backend that does no alignment of its own. */
+  alignmentVersion?: string | null;
   /** False when the backend could not align (no landmarks available). An
    * unaligned embedding is still returned but is materially less accurate;
    * the orchestrator may choose to treat it as low quality. */
@@ -479,6 +484,8 @@ export type EnrollResponse =
       embeddingDim: number;
       weightsVersion: string;
       preprocessingVersion: string;
+      /** See EmbedResponse.alignmentVersion. */
+      alignmentVersion?: string | null;
       aligned: boolean;
     }
   | {

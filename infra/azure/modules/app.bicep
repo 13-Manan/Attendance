@@ -65,11 +65,15 @@ param enableKeyVaultSecretRefs bool = false
 
 @description('''Face AI model backend. "mock" has no weights; "onnx" is a
 scaffold with no licence-cleared weights (ADR-0006); "azure" is Azure AI Face
-(docs/AZURE_FACE.md), whose key must come from Key Vault — pass 2 only.''')
+identification (docs/AZURE_FACE.md); "azure_detection_own_recognition" uses
+Azure only to detect faces and recognises in-process with dlib
+(services/face-ai/docs/RECOGNITION.md). The last two need the Azure Face key
+from Key Vault — pass 2 only.''')
 @allowed([
   'mock'
   'onnx'
   'azure'
+  'azure_detection_own_recognition'
 ])
 param faceModelBackend string = 'mock'
 
@@ -78,8 +82,9 @@ on face-ai only — never on the web app. Not a secret; the key is.''')
 param azureFaceEndpoint string = ''
 
 @description('''Refuse to start on a backend whose weights are not cleared for
-commercial use. MUST stay false while faceModelBackend is "mock", or the
-service will not boot.''')
+commercial use. MUST stay false while faceModelBackend is "mock" or "onnx", or
+the service will not boot — which is the point: it is what stops an unlicensed
+model reaching production by accident.''')
 param faceAiRequireProductionModel bool = false
 
 param tags object
@@ -112,7 +117,10 @@ var webSecrets = enableKeyVaultSecretRefs ? [
   }
 ] : []
 
-var useAzureFace = enableKeyVaultSecretRefs && faceModelBackend == 'azure'
+// Both Azure-backed backends need the endpoint and the key: one calls Detect
+// and Identify, the other calls Detect and recognises in-process. Neither can
+// start without them, so the secret reference is attached for both.
+var useAzureFace = enableKeyVaultSecretRefs && (faceModelBackend == 'azure' || faceModelBackend == 'azure_detection_own_recognition')
 
 var faceAiSecrets = concat(enableKeyVaultSecretRefs ? [
   {

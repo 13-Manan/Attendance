@@ -34,6 +34,7 @@ export interface InsertFaceEmbeddingInput {
   embeddingDim: number;
   weightsVersion: string | null;
   preprocessingVersion: string | null;
+  alignmentVersion: string | null;
   aligned: boolean | null;
   qualityScore: number | null;
   captureSource: FaceCaptureSource;
@@ -93,14 +94,16 @@ export async function insertFaceEmbedding(
   await client.$executeRaw`
     INSERT INTO "FaceEmbedding" (
       id, "institutionId", "studentId", embedding, "modelName",
-      "modelVersion", "weightsVersion", "preprocessingVersion", "embeddingDim",
+      "modelVersion", "weightsVersion", "preprocessingVersion",
+      "alignmentVersion", "embeddingDim",
       aligned, "qualityScore", "captureSource", channel, "enrolledByUserId",
       "sourceImageUrl", "isActive", "createdAt"
     ) VALUES (
       ${id}, ${input.institutionId}, ${input.studentId},
       ${vectorLiteral(input.embedding)}::vector, ${input.modelName},
       ${input.modelVersion}, ${input.weightsVersion}, ${input.preprocessingVersion},
-      ${input.embeddingDim}, ${input.aligned}, ${input.qualityScore},
+      ${input.alignmentVersion}, ${input.embeddingDim}, ${input.aligned},
+      ${input.qualityScore},
       ${input.captureSource}::"FaceCaptureSource", ${input.channel}::"FaceEnrollmentChannel",
       ${input.enrolledByUserId}, ${input.sourceImageUrl ?? null}, true,
       ${createdAt}::timestamptz AT TIME ZONE 'utc'
