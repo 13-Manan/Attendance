@@ -205,6 +205,32 @@ function acceptedEnrollment(embedding: number[] = UNIT_VECTOR) {
   };
 }
 
+/**
+ * The running model, as `/v1/model-info` reports it.
+ *
+ * Stubbed rather than left to the default, which would reach for the real
+ * face service. Enrollment needs to know how to read the backend's similarity
+ * scores before it may store a template — see
+ * `recognition-engine/calibration.ts` — so a test that omitted this would be
+ * exercising "the face service was unreachable" while claiming to exercise
+ * something else, and would pass or fail depending on whether a development
+ * server happened to be listening.
+ */
+async function runningModel() {
+  return {
+    modelName: "mock",
+    modelVersion: "0.1.0+pp1",
+    weightsVersion: "0.1.0",
+    preprocessingVersion: "1",
+    embeddingDim: EMBEDDING_DIMENSION,
+    embeddingNormalized: true,
+    runtime: "numpy-hash-stub",
+    commercialUse: "not-applicable" as const,
+    productionEligible: false,
+    contractVersion: "v1",
+  };
+}
+
 /** A college, so the self-enrollment path is permitted by default. */
 async function collegeInstitution() {
   return { id: "inst-A", name: "Northfield", type: "COLLEGE", settings: {} } as never;
@@ -281,6 +307,7 @@ test("self-enrollment uses the caller's linked profile, not a studentId from the
       },
       listActiveTemplateModelsForStudent: async () => [],
       getInstitution: collegeInstitution,
+      faceModelInfo: runningModel,
       faceEnroll: async () => acceptedEnrollment(),
       insertFaceEmbedding: async (input) => {
         w.embeddings.push(input);
@@ -648,6 +675,7 @@ test("a successful enrollment never returns the biometric template to its caller
       getStudentByUserId: async () => student(),
       listActiveTemplateModelsForStudent: async () => [],
       getInstitution: collegeInstitution,
+      faceModelInfo: runningModel,
       faceEnroll: async () => acceptedEnrollment(unitVectorWithTelltale()),
       insertFaceEmbedding: async () => ({ id: "emb-1" }),
       recordAuditLog: async () => {},
@@ -678,6 +706,7 @@ test("the audit row for an enrollment carries metadata, never the vector", async
       getStudentByUserId: async () => student(),
       listActiveTemplateModelsForStudent: async () => [],
       getInstitution: collegeInstitution,
+      faceModelInfo: runningModel,
       faceEnroll: async () => acceptedEnrollment(unitVectorWithTelltale()),
       insertFaceEmbedding: async () => ({ id: "emb-1" }),
       recordAuditLog: async (input) => {
