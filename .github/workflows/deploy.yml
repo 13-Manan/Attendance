@@ -423,6 +423,18 @@ jobs:
       #
       # Face AI first: web calls it, and the dependency should not be older
       # than its caller during the changeover.
+      # Two environment variables are declared here rather than carried
+      # forward, and only these two. They are the difference between a service
+      # that recognises faces and one that does not, and between a licence
+      # guard that is armed and one that is not — so they belong in the
+      # pipeline, where a reviewer can see them, rather than in whatever state
+      # a previous manual `containerapp update` happened to leave behind.
+      # `--set-env-vars` adds or replaces exactly the names given; the Key
+      # Vault secret references (AZURE_FACE_KEY, FACE_AI_AUTH_TOKEN) and
+      # everything else on the template are untouched.
+      #
+      # They mirror infra/azure/parameters/production.bicepparam, which remains
+      # the declaration of record for a full infrastructure deployment.
       - id: face_ai
         name: Deploy Face AI (internal ingress)
         run: |
@@ -433,6 +445,9 @@ jobs:
             --name "$FACE_AI_APP" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "$image" \
+            --set-env-vars \
+              FACE_MODEL_BACKEND=azure_detection_own_recognition \
+              FACE_AI_REQUIRE_PRODUCTION_MODEL=true \
             --query "properties.latestRevisionName" -o tsv)
           echo "revision=${revision}" >> "$GITHUB_OUTPUT"
           echo "Face AI revision: ${revision}"

@@ -332,3 +332,31 @@ def test_python_contract_version_matches_the_typescript_contract():
     assert version and dimension, "could not read the TypeScript contract"
     assert version.group(1) == FACE_AI_CONTRACT_VERSION
     assert int(dimension.group(1)) == EMBEDDING_DIMENSION
+
+
+def test_the_loaded_model_is_named_in_the_logs_at_startup(caplog):
+    """Otherwise nobody can answer "which recogniser is this container
+    running?" from production, and the runbook sends operators looking for a
+    line that never appears.
+
+    Root logging is configured by the lifespan, not at import, because a
+    library should not reconfigure logging for whatever imports it — but the
+    service is an application and this is its entry point.
+    """
+    import logging
+
+    from app.main import configure_logging
+
+    configure_logging("INFO")
+    assert logging.getLogger().handlers, "the root logger has nowhere to write"
+    assert logging.getLogger().isEnabledFor(logging.INFO)
+
+    with caplog.at_level(logging.INFO):
+        with TestClient(app):
+            pass
+
+    loaded = [r for r in caplog.records if "face-ai model loaded" in r.getMessage()]
+    assert loaded, "startup did not record which model it loaded"
+    message = loaded[0].getMessage()
+    assert "backend=mock" in message
+    assert "version=" in message

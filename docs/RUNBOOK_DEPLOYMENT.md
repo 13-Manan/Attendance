@@ -472,8 +472,8 @@ what follows is what an operator needs.
 
 | Variable | Production value | Set by |
 |---|---|---|
-| `FACE_MODEL_BACKEND` | `azure_detection_own_recognition` | `infra/azure/parameters/production.bicepparam` → `modules/app.bicep` |
-| `FACE_AI_REQUIRE_PRODUCTION_MODEL` | `true` | the same; refuses to start on a backend whose licence is not cleared |
+| `FACE_MODEL_BACKEND` | `azure_detection_own_recognition` | **the deploy workflow**, re-asserted on every deployment (`.github/workflows/deploy.yml`, the Face AI step); mirrored in `infra/azure/parameters/production.bicepparam` |
+| `FACE_AI_REQUIRE_PRODUCTION_MODEL` | `true` | the same. Refuses to start on a backend whose licence is not cleared |
 | `FACE_MODEL_DIR` | `/srv/models` | **the image**, not the container app. `ENV` in `services/face-ai/Dockerfile`, alongside the weights it points at |
 | `AZURE_FACE_ENDPOINT` | `https://attendance-azure-face.cognitiveservices.azure.com/` | `production.bicepparam` |
 | `AZURE_FACE_KEY` | `secretref:azure-face-key` | Container App secret → Key Vault `AZURE-FACE-KEY` |
@@ -484,6 +484,14 @@ The weights are **in the image**, fetched and checksum-verified at build time
 and never downloaded at runtime. There is no volume to mount and no model
 directory to provision: a face-ai revision either has the right bytes baked
 in or fails to start.
+
+The first two are declared in the deploy workflow rather than carried forward
+from whatever the previous revision happened to have, because they are the
+difference between a service that recognises faces and one that does not.
+Everything else on the template — the Key Vault secret references above,
+ingress, identity, scale — is carried forward by `az containerapp update`
+untouched. Changing the backend is therefore an edit to the workflow and a
+deployment, not a console action somebody has to remember to repeat.
 
 Rotating the Azure key is the same shape as any other: write the new value to
 `AZURE-FACE-KEY` in `attendance-prod-keyvault` and restart the face-ai
@@ -501,6 +509,22 @@ failure mode is otherwise silent:
    compared against pinned values.
 4. **Build the Azure client.**
 5. **One Detect call on a synthetic pattern**, to prove the credential.
+
+A successful boot records which model it loaded, on one line:
+
+```
+INFO app.main face-ai model loaded: backend=azure_detection_own_recognition
+  version=dlib-models-2a61575+pp1+al1.detection_03 runtime=dlib+azure-face-detect
+  commercial_use=permitted production_eligible=True
+```
+
+That line is the answer to "which recogniser is this container running?", and
+it is worth checking after any deployment. `FACE_AI_LOG_LEVEL` controls the
+threshold and defaults to `INFO`; set it to `WARNING` only if something is
+flooding, and know that you lose that line by doing so. A backend that is not
+cleared for production logs a warning on every boot as well — deliberately
+loud, because a stub running where people believe real recognition is
+happening is the failure worth shouting about.
 
 | Symptom in the logs | What it means | What to do |
 |---|---|---|

@@ -21,6 +21,39 @@ from app.routers import enrollment, gallery, health, process
 logger = logging.getLogger(__name__)
 
 
+def configure_logging(level: str) -> None:
+    """Give this service's own log records somewhere to go.
+
+    Without this they go nowhere. Python's root logger has no handler by
+    default, and the handler of last resort only emits WARNING and above — so
+    every ``logger.info`` in this service, including the line that records
+    which model was loaded, was written and discarded. A deployment's most
+    basic question ("which recogniser is this container actually running?")
+    had no answer in the logs, and the runbook told operators to look for a
+    line that could not appear.
+
+    gunicorn and uvicorn configure their *own* loggers rather than the root,
+    which is why running under either did not fix this.
+
+    A handler is added only when the root has none. Seizing logging from
+    something that already configured it — a platform agent, a test harness,
+    an operator debugging a container — would be the kind of helpfulness that
+    loses records. The level is set either way, because a root that has a
+    handler but sits at WARNING drops the same lines for a different reason.
+
+    Nothing logged by this service contains a key, an image or a vector; the
+    tests assert that separately.
+    """
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        root.addHandler(handler)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the model once, at startup.
@@ -35,6 +68,7 @@ async def lifespan(app: FastAPI):
     the request path entirely.
     """
     settings = get_settings()
+    configure_logging(settings.face_ai_log_level)
     # Before the model, on purpose: a deployment that demands authentication
     # and has no secret should never reach the point of loading weights and
     # binding a port. It must fail while an orchestrator still calls it a

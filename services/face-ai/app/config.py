@@ -190,6 +190,10 @@ class Settings(BaseSettings):
     #: characters per 3 bytes, so 8 MiB of text is ~6 MiB of image — the same
     #: ceiling apps/web enforces on its own upload paths, kept here as well
     #: because this service must not depend on its caller to bound it.
+    #: Level for this service's own log records. INFO so that the line naming
+    #: the loaded model appears on every boot — see `configure_logging`.
+    face_ai_log_level: str = "INFO"
+
     face_ai_max_image_base64_chars: int = 8 * 1024 * 1024
 
     #: Largest accepted ``images`` array on ``/v1/detect-embed``. Matches the
