@@ -245,7 +245,7 @@ export function describeRefusal(
 
     case "recognition_not_enabled":
       return staff
-        ? "Face enrolment is paused: the face recognition provider has not enabled identification for this system yet. The photograph was not sent anywhere and nothing was stored. Attendance can still be taken by hand."
+        ? "Face enrolment is paused: face identification is awaiting Azure approval for this system. The photograph was not sent anywhere and nothing was stored. Attendance can still be taken by hand."
         : "Face enrolment is not available yet. Nothing was saved. Your institution will let you know when it opens.";
 
     case "no_active_class":

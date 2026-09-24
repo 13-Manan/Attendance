@@ -378,8 +378,13 @@ test("a provider that may not identify yet is described honestly", () => {
   const state = { modelName: "azure-face", modelVersion: "x", productionEligible: true, identification: "not_approved" as const };
   assert.equal(recognitionAvailability(state), "identification_pending");
   const m = describeRecognitionAvailability(state, { showDiagnostics: false });
+  assert.equal(m.headline, "Face identification is awaiting Azure approval");
   assert.match(m.detail, /nobody is matched/);
+  assert.match(m.detail, /Nobody is marked present or absent automatically/);
   assert.equal(m.diagnostics, null);
+  const outage = describeRecognitionAvailability({ ...state, identification: "unavailable" }, { showDiagnostics: false });
+  assert.equal(outage.availability, "identification_pending");
+  assert.doesNotMatch(outage.headline, /approval/);
   assert.equal(recognitionAvailability({ ...state, identification: "enabled" }), "ready");
   assert.equal(recognitionAvailability({ ...state, identification: undefined }), "ready");
 });

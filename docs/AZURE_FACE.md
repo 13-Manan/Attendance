@@ -47,7 +47,9 @@ answers `403 UnsupportedFeature`, and:
 
 - face-ai's `/v1/model-info` reports `identification: "not_approved"`.
 - `/v1/gallery/enroll` refuses with `409 identification_not_approved` before
-  any image is sent. The web app shows "Face enrolment is paused".
+  any image is sent. Staff and teachers see "Face identification is awaiting
+  Azure approval" (or "temporarily unavailable" when Azure is unreachable,
+  which is retryable and never worded as a pending approval).
 - `/v1/identify` still detects and counts faces and returns them with no
   candidates. Every student is `NEEDS_REVIEW` with reason
   `identification_unavailable`. Nobody is marked present or absent by the

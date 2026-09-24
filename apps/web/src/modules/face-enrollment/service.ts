@@ -590,6 +590,11 @@ async function performGalleryEnrollment(
 
   // Limited Access: without Microsoft's approval Azure refuses to identify, so
   // a stored face could never be used. Refused before the image is sent.
+  // "unavailable" is the provider being unreachable, not the approval gate:
+  // retryable, and worded as an outage rather than a pending approval.
+  if (modelInfo.identification === "unavailable") {
+    return refuse("service_error", channel, status);
+  }
   if (!identificationEnabled(modelInfo.identification)) {
     return refuse("recognition_not_enabled", channel, status);
   }

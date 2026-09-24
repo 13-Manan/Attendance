@@ -1284,6 +1284,14 @@ test("gallery: identification not approved refuses before the image is sent", as
   assert.equal(g.faceEnrollCalls, 0);
 });
 
+test("gallery: an unreachable identification service is a retryable outage, not a pending approval", async () => {
+  const { h, g } = galleryHarness({ identification: "unavailable" });
+  const result = await enrollFaceForStudentRequest(staffAdmin(), { studentId: "student-1", ...CAMERA }, h.deps);
+  assert.equal(result.ok === false && result.reason, "service_error");
+  assert.equal(result.ok === false && result.retryable, true);
+  assert.equal(g.enrollRequests.length, 0);
+});
+
 test("gallery: a provider 409 identification_not_approved is the same refusal", async () => {
   const error = Object.assign(new Error("face_ai_request_failed"), { code: "identification_not_approved" });
   const { h, g } = galleryHarness({ response: error });

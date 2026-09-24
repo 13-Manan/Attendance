@@ -92,10 +92,15 @@ function ModelProvenance({ model }: { model: ModelInfoResponse | null }) {
 
       {model.templateKind === "gallery" && model.identification !== "enabled" ? (
         <p role="alert" className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
-          <span className="font-medium">Identification is not enabled yet.</span> This provider
-          detects and counts faces, but may not match them to students until identification is
-          approved for this account. Enrolment is paused, and every register is decided by hand
-          until then. No redeploy is needed once it is approved.
+          <span className="font-medium">
+            {model.identification === "not_approved"
+              ? "Face identification is awaiting Azure approval."
+              : "Face identification is temporarily unavailable."}
+          </span>{" "}
+          This provider detects and counts faces, but may not match them to students until
+          identification is available for this account. Enrolment is paused, and every register
+          is decided by hand until then. The service rechecks on its own; no redeploy is needed
+          once it is approved.
         </p>
       ) : null}
 

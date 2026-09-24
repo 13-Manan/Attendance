@@ -106,7 +106,7 @@ function reasonText(student: AttendanceReviewStudent): string {
     case "recognition_unavailable":
       return "Recognition did not run for this session. Call the roll and decide each student.";
     case "identification_unavailable":
-      return "Faces were counted, but face matching is not switched on yet, so nobody was compared. Decide this student yourself.";
+      return "Faces were counted, but face identification is not available (awaiting Azure approval or temporarily unreachable), so nobody was compared. Decide this student yourself.";
     case "manually_corrected":
       return "Set by a faculty member.";
     default:

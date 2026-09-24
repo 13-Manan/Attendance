@@ -138,9 +138,14 @@ export default async function StaffEnrollFacePage({
           role="status"
           className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
         >
-          <span className="font-medium">Face enrolment is paused.</span> The face service can
-          detect faces but is not yet allowed to identify them, so new samples cannot be added.
-          Existing samples are unaffected, and attendance can still be taken by hand.
+          <span className="font-medium">
+            {runningModel?.identification === "not_approved"
+              ? "Face identification is awaiting Azure approval."
+              : "Face identification is temporarily unavailable."}
+          </span>{" "}
+          Face enrolment is paused: the face service can detect faces but cannot identify them
+          yet, so new samples cannot be added. Existing samples are unaffected, and attendance
+          can still be taken by hand.
         </p>
       ) : null}
       {!runningModel ? (

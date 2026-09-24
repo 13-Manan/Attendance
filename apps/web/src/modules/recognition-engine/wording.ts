@@ -85,13 +85,23 @@ export function describeRecognitionAvailability(
         diagnostics,
       };
     case "identification_pending":
-      return {
-        availability,
-        headline: "Face matching not switched on yet",
-        detail:
-          "Faces in the photo are detected and counted for real, but matching them to students is not enabled on this system yet, so nobody is matched. Decide every student yourself.",
-        diagnostics,
-      };
+      // "not_approved" is Microsoft's Limited Access gate and lasts until they
+      // decide; anything else is the provider being unreachable right now.
+      return model.identification === "not_approved"
+        ? {
+            availability,
+            headline: "Face identification is awaiting Azure approval",
+            detail:
+              "Faces in the photo are detected and counted for real, but Microsoft has not yet approved face identification for this system, so nobody is matched. Nobody is marked present or absent automatically: decide every student yourself.",
+            diagnostics,
+          }
+        : {
+            availability,
+            headline: "Face identification is temporarily unavailable",
+            detail:
+              "Faces in the photo are detected and counted, but the identification service could not be reached, so nobody is matched. Nobody is marked present or absent automatically: decide every student yourself.",
+            diagnostics,
+          };
     case "unavailable":
       return {
         availability,
