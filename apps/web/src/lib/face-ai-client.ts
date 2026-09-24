@@ -52,13 +52,18 @@ function serviceHeaders(extra: Record<string, string> = {}): Record<string, stri
  * the `face-ai <path> failed: <status>` wording operators already know.
  */
 export class FaceAiRequestError extends Error {
-  constructor(
-    readonly path: string,
-    readonly status: number,
-    readonly code: string | null,
-  ) {
+  // Plain fields, not constructor parameter properties: the test loader runs
+  // this file through Node's type stripping, which cannot rewrite those.
+  readonly path: string;
+  readonly status: number;
+  readonly code: string | null;
+
+  constructor(path: string, status: number, code: string | null) {
     super(`face-ai ${path} failed: ${status}${code ? ` ${code}` : ""}`);
     this.name = "FaceAiRequestError";
+    this.path = path;
+    this.status = status;
+    this.code = code;
   }
 }
 
