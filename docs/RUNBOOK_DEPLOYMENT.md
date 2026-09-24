@@ -115,6 +115,33 @@ az containerapp revision list -n attendance-prod-web -g attendance-production-rg
   --query "[?properties.active].{name:name,state:properties.runningState,image:properties.template.containers[0].image}" -o table
 ```
 
+### Rolling Face AI back past the recognition change — read this first
+
+The deploy workflow sets `FACE_MODEL_BACKEND=azure_detection_own_recognition`
+on every deployment. Any face-ai image built **before** that backend existed
+does not know the name, and `build_provider` raises `Unknown
+FACE_MODEL_BACKEND` at startup — so rolling the image back on its own takes
+the service down rather than restoring it. Roll the variable back in the same
+command:
+
+```sh
+az containerapp update -n attendance-prod-face-ai -g attendance-production-rg \
+  --image attendanceprodacr.azurecr.io/face-ai:$PREV \
+  --set-env-vars FACE_MODEL_BACKEND=azure FACE_AI_REQUIRE_PRODUCTION_MODEL=false
+```
+
+`false` on the guard because the older backends are not licence-cleared and it
+would otherwise refuse to start. That is the guard doing its job, and lowering
+it is part of *deliberately* going back to a backend that identifies nobody —
+not something to do to make an unrelated deployment pass.
+
+The next deployment from `main` puts both variables back, so a rollback done
+this way is temporary by construction. If it needs to stick, revert the commit.
+
+The `alignmentVersion` column added with this change is expand-only — nullable,
+with no backfill and no code that requires it — so an older image runs fine
+against the newer schema and the database needs no rollback.
+
 ### Disabling a bad revision outright
 
 ```sh
@@ -467,6 +494,25 @@ its own process, on weights baked into the image. Identify is never called, so
 face template leaves the container. The design is
 [`services/face-ai/docs/RECOGNITION.md`](../services/face-ai/docs/RECOGNITION.md);
 what follows is what an operator needs.
+
+Two standing caveats, so that nobody operating this reads "deployed" as
+"settled":
+
+- **The recogniser's weights are public domain, and one question about them is
+  open.** About half the images they were trained on came from two research
+  corpora with non-commercial licences. Whether that restricts commercial use
+  of a model trained on them is an unsettled question of law, it has been
+  **referred for legal review, and it is not resolved**. The audit is
+  [`services/face-ai/docs/MODEL_LICENSES.md`](../services/face-ai/docs/MODEL_LICENSES.md).
+  If the review comes back negative, the replacement path is one registry
+  entry and a re-enrolment — not a rewrite.
+- **The thresholds are provisional.** They were measured on public-domain
+  adult portraits, and re-measured end to end through the production path. No
+  classroom photograph, no child, and no pair of siblings has been measured
+  against this pipeline. Uncertain matches go to a teacher by design; treat
+  the automatic decisions as advisory until an institution has validated them
+  against its own population
+  ([`CALIBRATION.md`](../services/face-ai/docs/CALIBRATION.md)).
 
 ### Environment
 
