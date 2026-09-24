@@ -139,7 +139,8 @@ test("two administrators adding the same class at once create it once", { skip: 
 test("a name that reads as an existing class is refused", { skip: SKIP }, async () => {
   await assert.rejects(
     () => createClass(actor, { yearId: YEAR_NOW, className: "Grade 8", sections: sections("A") }, school),
-    /already has "Class 8", which reads as the same class/,
+    // Either spelling may have won the race in the test above.
+    /already has "class 8", which reads as the same class/i,
   );
 });
 
