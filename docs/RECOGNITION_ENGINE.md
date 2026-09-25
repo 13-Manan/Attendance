@@ -341,7 +341,14 @@ frame.
    bands every other decision uses.
 4. **Apply demotions.** Each can only make the answer more cautious:
    - `ambiguous_face` — the representative's runner-up (a different student)
-     was inside the margin, either margin.
+     was inside the margin, either margin; **or** the student has a
+     *lookalike* in this class: another student whose own templates would
+     confidently match theirs (`findLookalikeStudents`). In practice that is
+     identical twins, and between them the margin is not evidence of which
+     one it is, however wide. Enrolment refuses a sample that close to
+     another student unless staff confirm they are different people, so a
+     pair is normally a confirmed one. No pair was found among unrelated
+     people ([CALIBRATION.md](../services/face-ai/docs/CALIBRATION.md#twins)).
    - `duplicate_within_capture` — see §6.
    - `low_quality_face` — the winning face failed a quality check that face-ai
      reported. It is still matched; it is never matched above review.

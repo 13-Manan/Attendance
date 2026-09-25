@@ -590,6 +590,33 @@ refusals are not written to the audit log in apps/web, so this is the only
 record of them. How the threshold was set:
 `services/face-ai/docs/CALIBRATION.md`, "Enrolment sharpness".
 
+Every classroom recognition run writes one structured line from apps/web —
+counts and identifiers of the run, never a name, a score per student, a
+template or a vector (the numbers below are illustrative):
+
+```
+{"log":"recognition.run","sessionId":"…","cohortId":"…","candidateScope":"cohort",
+ "candidatePoolSize":42,"skippedIncompatibleCandidates":0,"capturesProcessed":2,
+ "detectedFaces":71,"scoredFaces":69,"matched":31,"uncertain":7,"unmatched":4,
+ "unknownFaces":3,"rejectedFaces":2,"flaggedFaces":5,"modelName":"dlib-resnet-v1",
+ "modelVersion":"dlib-models-2a61575+pp1+al1.detection_03","productionEligible":true,
+ "templateKind":"embedding","lookalikeStudents":2,"durationMs":2840}
+```
+
+- `flaggedFaces` — faces carrying a quality flag, each capped at review.
+  Since 2026-09-25 blur and exposure are measured on the face rather than
+  taken from Azure's ratings (`services/face-ai/docs/CALIBRATION.md`,
+  "Classroom quality"), so this should be a small share of `scoredFaces` in
+  ordinary light. Most of a class flagged on a normal day means the camera or
+  the room, not the students: check focus and light before anything else.
+- `lookalikeStudents` — students in the pool with a lookalike in it,
+  normally a pair of identical twins that staff confirmed at enrolment
+  (the `face_enrollment.distinct_person_confirmed` audit row). A match to
+  either of them is never marked present automatically. An unexpected
+  non-zero count in a class without twins means two students' templates are
+  confidently alike — find the confirmation in the audit log and check it
+  was right.
+
 | Symptom in the logs | What it means | What to do |
 |---|---|---|
 | Weights checksum mismatch | The image's model layer is not the one that was built and verified | Roll back to the previous face-ai digest; rebuild. Do not "re-pull" |

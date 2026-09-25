@@ -191,6 +191,63 @@ the build actually reads.
 
 ---
 
+## Re-examined for the robustness work (2026-09-25)
+
+The 2026-09-25 robustness work asked whether a different detector or
+recogniser should replace these, and allowed a replacement only if it was
+benchmarked here **and** passed every licence gate. Nothing was replaced, and
+nothing was added: no new model, library, artefact or runtime download.
+
+**Detector.** `detection_03` stays. It is the newest of Azure's three
+detection models and the one Microsoft documents as improved on small,
+side-view and rotated faces; `detection_02` returns no landmarks, which the
+alignment needs; `detection_01` is the oldest. Measured here, it found every
+face from 40px to 200px in 600 composed classroom photographs, so a tiled or
+multi-pass detection — more Azure calls per photograph — was not built. The
+terms, the key handling and the detection-only posture are unchanged.
+
+**Recogniser.** The recognisers that are markedly more robust to a turned
+head than this one are margin-loss networks (ArcFace and its successors).
+Their published weights fail the licence gate at the training data or the
+weights themselves, before any benchmark could matter:
+
+| Candidate | Why it cannot ship |
+| --- | --- |
+| InsightFace (ArcFace `buffalo_l`, `antelopev2`) | Weights licensed for non-commercial research only (verified, see `../app/models/LICENSING.md`) |
+| facenet-pytorch (VGGFace2 weights) | Trained on VGGFace2, whose publishers withdrew it; treated as research-only |
+| SFace (OpenCV zoo) | Permissive weight licence, undocumented training corpus (this backend log's `opencv` entry) |
+| Other margin-loss weights in public repositories | Trained on MS-Celeb-1M derivatives, WebFace260M subsets or Glint360K — research-only or withdrawn corpora — whatever the repository's code licence says |
+
+"The GitHub repository is MIT" was not accepted as an answer for any of them:
+the licence of the code says nothing about the weights, and the weights'
+licence says nothing about the corpus.
+
+**Why dlib remains acceptable.** Its weights are public domain by the
+author's statement; it needs no key, account or download at runtime; it runs
+in this container, so no face template leaves our infrastructure; and on
+the measurements taken for this work, what it cannot do safely ends up in
+review rather than as a wrong attendance record — with one exception:
+identical twins, which face recognisers in general do not reliably tell
+apart (below). The residual
+training-data question above is unchanged and still referred.
+
+**Its measured limitations**, all in [CALIBRATION.md](CALIBRATION.md):
+
+| Condition | What it does | Consequence |
+| --- | --- | --- |
+| Head turned 30–45° | genuine median 0.950; 36% can be marked present | mostly review |
+| Head turned beyond 45° | 0.928; none can be marked present | review or not matched |
+| Looking down more than 15° | 0.944; 39% can be marked present | often review |
+| Glasses on one day, not the other | 0.929; half below the review floor | often not matched |
+| Faces around 40px | 20% marked present in clean light | mostly review |
+| Severe blur, 8px or more of shake | flagged | review |
+| Identical twins | a photograph of one is as close to the other as to themselves | caught as a pair and sent to review only when both are enrolled with several samples; otherwise can be marked present as each other |
+
+In none of these did the recogniser make two unrelated people look alike
+enough to be marked present as each other — across the 10,172 classroom
+placements, the 591 single-person photographs and every template
+arrangement measured. What it cannot see, it leaves to review.
+
 ## Verification record
 
 | Item | Verified | By | How |
@@ -203,3 +260,5 @@ the build actually reads.
 | Commercial-use position on training data | **REFERRED** | — | Awaiting legal review; see above |
 | Calibration holds through the production path | 2026-09-24 | this deployment | 142 live Detect calls with re-encoded payloads; every decision identical to the original-bytes evaluation ([CALIBRATION.md](CALIBRATION.md)) |
 | Compiled recogniser matches the calibrated one | 2026-09-24 | this deployment | Golden self-test run inside the built image (`scripts/verify_recognizer.py`) |
+| Detector and recogniser re-examined; nothing replaced, nothing added | 2026-09-25 | robustness work | Candidate licences above; `requirements*.txt`, `Dockerfile` and `app/models/model_files.py` unchanged by this work |
+| Detection-only posture unchanged | 2026-09-25 | robustness work | No new Azure path or attribute in production calls; `tests/test_azure_dlib_provider.py` still fails on any path but `/detect` and on `returnFaceId=true` |

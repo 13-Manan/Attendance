@@ -8,6 +8,7 @@ import {
   classifyBySimilarity,
   cosineSimilarity,
   findLookalikeStudents,
+  LOOKALIKE_REVIEW_BAND_MATCHES,
   runRecognitionForSession,
   scoreFaceAgainstCandidates,
 } from "./service.ts";
@@ -1768,6 +1769,89 @@ test("findLookalikeStudents reads templates on the backend's calibrated scale", 
   const tight = findLookalikeStudents([template("a", axis(0)), template("b", at(0.96))], DIM, policy({ calibration }));
   assert.equal(loose.size, 0);
   assert.equal(tight.size, 2);
+});
+
+test("findLookalikeStudents finds identical twins whose templates only ever reach the review band", () => {
+  // Three samples each, every comparison between them 0.94 raw: never a
+  // confident match, but the same two students again and again — what an
+  // identical twin looks like to this recogniser.
+  const b = twinRow(0.94).embedding;
+  const pairs = findLookalikeStudents(
+    [
+      template("a", axis(0), "1"),
+      template("a", axis(0), "2"),
+      template("a", axis(0), "3"),
+      template("b", b, "1"),
+      template("b", b, "2"),
+      template("b", b, "3"),
+      template("c", axis(2)),
+    ],
+    DIM,
+    policy({ calibration: DLIB_CALIBRATION }),
+  );
+  assert.deepEqual([...(pairs.get("a") ?? [])], ["b"]);
+  assert.deepEqual([...(pairs.get("b") ?? [])], ["a"]);
+  assert.equal(pairs.has("c"), false);
+});
+
+test("findLookalikeStudents: a resemblance seen in fewer comparisons is not a pair", () => {
+  // Unrelated classmates can meet in the review band once or twice. Only
+  // LOOKALIKE_REVIEW_BAND_MATCHES comparisons, between the same two students,
+  // make them lookalikes.
+  const b = twinRow(0.94).embedding;
+  const few = Array.from({ length: LOOKALIKE_REVIEW_BAND_MATCHES - 1 }, (_, i) => template("b", b, `${i}`));
+  const pairs = findLookalikeStudents([template("a", axis(0)), ...few], DIM, policy({ calibration: DLIB_CALIBRATION }));
+  assert.equal(pairs.size, 0);
+
+  // Three samples each, but one comparison short of the pattern in the band.
+  const near = Array.from({ length: LOOKALIKE_REVIEW_BAND_MATCHES - 1 }, (_, i) =>
+    template("b", faceMix({ 0: 0.94 }), `near-${i}`),
+  );
+  const far = Array.from({ length: Math.max(0, 3 - near.length) }, (_, i) => template("b", axis(5 + i), `far-${i}`));
+  const spread = findLookalikeStudents(
+    [template("a", axis(0), "1"), template("a", axis(2), "2"), template("a", axis(3), "3"), ...near, ...far],
+    DIM,
+    policy({ calibration: DLIB_CALIBRATION }),
+  );
+  assert.equal(spread.size, 0);
+});
+
+test("twins whose templates never confidently match each other still go to review", async () => {
+  // 0.99 raw against twin A and 0.93 against twin B: calibrated, a margin far
+  // wider than either ambiguity margin. Their three samples each meet at 0.94
+  // — the pair is found from the templates, and the match is not trusted.
+  const b = twinRow(0.94).embedding;
+  const pool = [
+    ...["1", "2", "3"].map((s) => ({ ...studentRow(0, { sample: s }), studentId: "twin-a", id: `emb-twin-a-${s}` })),
+    ...["1", "2", "3"].map((s) => ({ ...twinRow(0.94), embedding: b, id: `emb-twin-b-${s}` })),
+    studentRow(2),
+  ];
+  const faces = [detectedFace(1, faceMix({ 0: 0.99 })), detectedFace(1, faceMix({ 2: 0.99 }))];
+  const summary = await runRecognitionForSession(
+    makeUser(),
+    ONE_IMAGE,
+    harness({ pool, faces, modelInfo: makeModelInfo({ calibration: DLIB_CALIBRATION }) }).deps,
+  );
+  const students = byStudent(summary);
+  assert.equal(students.get("twin-a")?.advisoryResult, "NEEDS_REVIEW");
+  assert.ok((students.get("twin-a")?.downgrades as string[]).includes("ambiguous_face"));
+  assert.equal(students.get("stu-2")?.advisoryResult, "PRESENT");
+});
+
+test("a classmate who resembles one student once is not sent to review for it", async () => {
+  // The same face and scores as above, but the resemblance is one template
+  // pair, not a pattern: the match stands.
+  const pool = [
+    { ...studentRow(0), studentId: "stu-a", id: "emb-stu-a" },
+    { ...twinRow(0.94), studentId: "stu-b", id: "emb-stu-b" },
+  ];
+  const faces = [detectedFace(1, faceMix({ 0: 0.99 }))];
+  const summary = await runRecognitionForSession(
+    makeUser(),
+    ONE_IMAGE,
+    harness({ pool, faces, modelInfo: makeModelInfo({ calibration: DLIB_CALIBRATION }) }).deps,
+  );
+  assert.equal(byStudent(summary).get("stu-a")?.advisoryResult, "PRESENT");
 });
 
 test("twins: a confident-looking match to one twin still goes to review", async () => {

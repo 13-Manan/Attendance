@@ -1259,7 +1259,8 @@ def test_azures_blur_and_exposure_ratings_no_longer_flag_a_good_face(face_px):
 
 @pytest.mark.parametrize("gain", [0.45, 0.3])
 def test_a_dark_face_is_not_flagged(gain):
-    # Darkened to x0.3 the recogniser still matched as reliably as clean.
+    # Darkened to x0.3, faces were still recognised automatically 61% of the
+    # time (71% in clean light) and never as somebody else: the score decides.
     frame, detection = render_face(160)
     dark = np.clip(frame.astype(np.float64) * gain, 0, 255).astype(np.uint8)
     assert classroom_flags_for(dark, detection) == []
@@ -1346,3 +1347,30 @@ def test_an_occluded_face_is_still_flagged():
     covered = copy.deepcopy(detection)
     covered["faceAttributes"]["occlusion"]["eyeOccluded"] = True
     assert "occluded" in classroom_flags_for(frame, covered)
+
+
+# ---------------------------------------------------------------------------
+# Eyes closed
+# ---------------------------------------------------------------------------
+#
+# A blink is not a quality problem and no rule treats it as one. Alignment
+# uses the eye corners, which a closed eye still has; what closed eyes cost a
+# match is measured (docs/CALIBRATION.md, "Pose, eyes, expression and
+# glasses") and left to the score. These pin that no hard rule appears.
+
+
+def test_closed_eyes_are_not_a_classroom_flag():
+    frame, detection = render_face(160, eyes="closed")
+    assert classroom_flags_for(frame, detection) == []
+
+
+def test_closed_eyes_do_not_refuse_an_enrolment():
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    frame, detection = render_face(220, eyes="closed")
+    fake.faces = [detection]
+
+    outcome = provider.enroll_image(encoded(frame))
+
+    assert outcome.assessment.reason == "ok"
+    assert outcome.embedding is not None

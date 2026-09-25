@@ -44,9 +44,14 @@ def render_face(
     height: int = 720,
     background: str = "flat",
     seed: int = 3,
+    eyes: str = "open",
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """A BGR frame with one face whose box is ``face_px`` wide, and the Azure
-    detect entry for it (box, 27-point landmark names, clean attributes)."""
+    detect entry for it (box, 27-point landmark names, clean attributes).
+
+    ``eyes="closed"`` draws the lids shut — skin where the eye was, a lash
+    line across it — with the corners where they were, as Azure still finds
+    them on a blink."""
     iod = face_px * IOD_PER_BOX
     cx, cy = width / 2.0, height / 2.0
     s = _SUPERSAMPLE
@@ -82,10 +87,15 @@ def render_face(
         eye = p(side * 0.5, -0.15)
         brow = p(side * 0.5, -0.36)
         cv2.ellipse(canvas, brow, ax(0.27, 0.09), 0, 190, 350, dark, px(0.075), aa)
-        cv2.ellipse(canvas, eye, ax(0.17, 0.075), 0, 0, 360, white, -1, aa)
-        cv2.circle(canvas, eye, px(0.068), iris, -1, aa)
-        cv2.circle(canvas, eye, px(0.03), pupil, -1, aa)
-        cv2.ellipse(canvas, eye, ax(0.17, 0.075), 0, 180, 360, lid, px(0.025), aa)
+        if eyes == "closed":
+            cv2.ellipse(canvas, eye, ax(0.17, 0.075), 0, 0, 180, lid, px(0.03), aa)
+        elif eyes == "open":
+            cv2.ellipse(canvas, eye, ax(0.17, 0.075), 0, 0, 360, white, -1, aa)
+            cv2.circle(canvas, eye, px(0.068), iris, -1, aa)
+            cv2.circle(canvas, eye, px(0.03), pupil, -1, aa)
+            cv2.ellipse(canvas, eye, ax(0.17, 0.075), 0, 180, 360, lid, px(0.025), aa)
+        else:
+            raise ValueError(eyes)
         nose = p(side * 0.11, 0.37)
         cv2.ellipse(canvas, nose, ax(0.055, 0.03), side * 20, 0, 360, nostril, -1, aa)
         wing = p(side * 0.16, 0.31)

@@ -44,6 +44,7 @@ import {
 } from "./policy";
 import {
   HUMAN_REASON,
+  describeConfirmedDistinct,
   describeLookalike,
   describeRefusal,
   isRetryable,
@@ -629,15 +630,20 @@ async function performEnrollment(
     : HUMAN_REASON.ok;
   // Staff are told; a student enrolling themselves is not told who they look
   // like, for the same reason a collision never names anybody on that path.
-  const lookalikeLabel =
-    lookalike && channel === "STAFF" ? await staffLabel(d, student, lookalike.studentId) : null;
+  const notes: string[] = [];
+  if (channel === "STAFF" && confirmedDistinct) {
+    const label = await staffLabel(d, student, confirmedDistinct.studentId);
+    if (label) notes.push(describeConfirmedDistinct(label));
+  }
+  if (channel === "STAFF" && lookalike) {
+    const label = await staffLabel(d, student, lookalike.studentId);
+    if (label) notes.push(describeLookalike(label));
+  }
   return {
     ok: true,
     embeddingId: written.id,
     qualityScore: response.assessment.qualityScore,
-    message: lookalikeLabel
-      ? `${saved} ${describeLookalike(lookalikeLabel)}`
-      : saved,
+    message: [saved, ...notes].join(" "),
     status: after,
     replaced: written.retired,
   };

@@ -20,6 +20,17 @@ import { MAX_SAMPLES_PER_STUDENT } from "./policy";
  * a good photograph is accepted whichever way the head was pointing, and
  * nothing here tells the person a turn was detected.
  *
+ * ## Glasses
+ *
+ * A student enrolled without glasses who wears them in class is compared
+ * across a change the recogniser handles badly: between photographs of one
+ * person on different days, a change of glasses left half the pairs below the
+ * review floor, against a tenth with no change (services/face-ai/docs/
+ * CALIBRATION.md, "Pose, eyes, expression and glasses"). It never made two
+ * people look the same — the cost is missed recognition, not a wrong one. So
+ * the last step asks anyone who wears glasses only some of the time for one
+ * photograph the other way.
+ *
  * ## Left and right
  *
  * Always the subject's own left and right. The live preview is mirrored and
@@ -61,9 +72,12 @@ const STEPS: Record<GuidedStepKey, { title: string; self: string; student: strin
   },
   lighting: {
     title: "Different light",
-    self: "Move to different light — nearer a window, or under the room lights — and face the camera.",
+    self:
+      "Move to different light — nearer a window, or under the room lights — and face the camera. " +
+      "If you wear glasses on some days and not others, take this one the other way from the first four.",
     student:
-      "Move to different light — nearer a window, or under the room lights — and have the student face the camera.",
+      "Move to different light — nearer a window, or under the room lights — and have the student face the camera. " +
+      "If they wear glasses on some days and not others, take this one the other way from the first four.",
   },
 };
 

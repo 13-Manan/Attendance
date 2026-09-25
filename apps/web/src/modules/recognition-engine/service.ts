@@ -437,17 +437,36 @@ export function assignFacesOneToOne(
 }
 
 /**
+ * How many of two students' cross-template comparisons must reach
+ * `reviewMin` for them to be lookalikes when none reaches `presentMin`. See
+ * `findLookalikeStudents`.
+ */
+export const LOOKALIKE_REVIEW_BAND_MATCHES = 3;
+
+/**
  * Students in this pool whom the recogniser cannot reliably tell apart —
  * identical twins, in practice — found from their own templates.
  *
- * Two students are lookalikes when a template of one would be a *confident*
- * match for the other: calibrated similarity at or above `presentMin`, the
- * same line the enrollment duplicate check draws. Measured on public-domain
- * photographs (services/face-ai/docs/CALIBRATION.md, "Twins"): for identical
- * twins, 17-29% of cross-twin comparisons reached it, so a pair with a few
- * samples each is found almost surely; for unrelated people, none of 59,587
- * comparisons did. Such a pair only exists at all because a member of staff
- * confirmed at enrollment that they are different people.
+ * Two students are lookalikes when either
+ *
+ * - a template of one would be a *confident* match for the other: calibrated
+ *   similarity at or above `presentMin`, the line the enrollment duplicate
+ *   check draws — enrolling such a sample takes a member of staff confirming
+ *   they are different people; or
+ * - at least `LOOKALIKE_REVIEW_BAND_MATCHES` comparisons between their
+ *   templates reach `reviewMin`. One such comparison happens between
+ *   unrelated people; several, between the same two students, is what an
+ *   identical twin looks like to this recogniser — their templates sit in
+ *   the review band against each other the way one person's photographs of
+ *   different days do.
+ *
+ * Measured on public-domain photographs (services/face-ai/docs/CALIBRATION.md,
+ * "Twins"): with five samples each, the second condition found three
+ * identical-twin pairs in every one of 180 random enrolments, where the
+ * first alone found 82-97% of them, and none of 351 unrelated pairs met
+ * either. With one sample each there is one comparison, neither condition
+ * can see a twin, and a confident match to one twin can be the other — which
+ * is why enrollment asks for five.
  *
  * The consequence is in `runRecognitionForSession`: a match to either of them
  * is never PRESENT on the recogniser's word alone, however wide the margin,
@@ -467,6 +486,8 @@ export function findLookalikeStudents(
     set.add(b);
     lookalikes.set(a, set);
   };
+  // Review-band comparisons so far, per unordered pair of students.
+  const reviewBand = new Map<string, number>();
   for (let i = 0; i < usable.length; i++) {
     for (let j = i + 1; j < usable.length; j++) {
       const a = usable[i];
@@ -476,7 +497,14 @@ export function findLookalikeStudents(
         cosineSimilarity(a.embedding, b.embedding),
         policy.calibration,
       );
-      if (similarity >= policy.presentMin) {
+      if (similarity < policy.reviewMin) continue;
+      const key =
+        a.studentId < b.studentId
+          ? `${a.studentId}\u0000${b.studentId}`
+          : `${b.studentId}\u0000${a.studentId}`;
+      const seen = (reviewBand.get(key) ?? 0) + 1;
+      reviewBand.set(key, seen);
+      if (similarity >= policy.presentMin || seen >= LOOKALIKE_REVIEW_BAND_MATCHES) {
         note(a.studentId, b.studentId);
         note(b.studentId, a.studentId);
       }

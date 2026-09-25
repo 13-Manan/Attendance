@@ -33,6 +33,15 @@ test("turn instructions use the subject's own left and right, never the screen's
   }
 });
 
+test("the last step asks for one photograph the other way when glasses come and go", () => {
+  for (const subject of ["self", "student"] as const) {
+    assert.match(guidedStep("lighting", subject).instruction, /glasses on some days and not others/);
+  }
+  for (const key of ["frontal", "left", "right", "expression"] as const) {
+    assert.doesNotMatch(guidedStep(key, "self").instruction, /glasses/);
+  }
+});
+
 test("feedback headlines are the product's words", () => {
   assert.equal(captureFeedbackHeadline({ ok: true }), "Good — capture accepted");
   assert.equal(captureFeedbackHeadline({ ok: false, reason: "face_too_small" }), "Move closer");

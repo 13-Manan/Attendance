@@ -132,8 +132,23 @@ export interface FaceSampleRecord {
  * attendance is where the two are told apart — or sent to a teacher when they
  * cannot be.
  */
+/**
+ * Why both of two similar students need a full set: attendance finds a pair
+ * it cannot tell apart from the pair's own templates. With five each it found
+ * three of the four identical-twin pairs measured at that size every time;
+ * with one each, in 3-40% of enrolments
+ * (services/face-ai/docs/CALIBRATION.md, "Twins").
+ */
+const COMPLETE_BOTH =
+  "Take all five guided photographs of both students — with fewer, attendance may not see that the two look alike.";
+
 export function describeLookalike(otherStudentLabel: string): string {
-  return `Note: this face closely resembles ${otherStudentLabel}. Both stay enrolled; when a classroom photograph cannot tell them apart, it is sent to review rather than guessed.`;
+  return `Note: this face closely resembles ${otherStudentLabel}. Both stay enrolled; when a classroom photograph cannot tell them apart, it is sent to review rather than guessed. ${COMPLETE_BOTH}`;
+}
+
+/** Staff only: after confirming two students are different people. */
+export function describeConfirmedDistinct(otherStudentLabel: string): string {
+  return `Saved as a different person from ${otherStudentLabel}. A classroom match to either of them is sent to review rather than guessed. ${COMPLETE_BOTH}`;
 }
 
 export const HUMAN_REASON: Record<FaceQualityReason, string> = {

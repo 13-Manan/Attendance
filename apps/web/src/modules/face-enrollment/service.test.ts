@@ -638,9 +638,11 @@ test("a lookalike is enrolled and noted, not refused", async () => {
 
   assert.equal(result.ok, true);
   assert.equal(h.inserted.length, 1, "the sample is stored");
-  // Staff are told whom it resembles and what attendance will do about it.
+  // Staff are told whom it resembles, what attendance will do about it, and
+  // what it needs to be able to: a full set of photographs of both.
   assert.match(result.message, /Rohan Gupta \(S-002\)/);
   assert.match(result.message, /review/);
+  assert.match(result.message, /all five guided photographs of both/);
   // The resemblance is recorded, as ids and a score.
   const created = h.audits.find((a) => a.action === "face_enrollment.created");
   const payload = created?.afterJson as Record<string, unknown>;
@@ -748,6 +750,9 @@ test("staff can confirm identical twins are different people, and the confirmati
 
   assert.equal(result.ok, true);
   assert.equal(h.inserted.length, 1);
+  // Staff are told what the pair now needs: five photographs of each.
+  assert.match(result.message, /different person from Rohan Gupta \(S-002\)/);
+  assert.match(result.message, /all five guided photographs of both/);
   const confirmed = h.audits.find((a) => a.action === "face_enrollment.distinct_person_confirmed");
   assert.ok(confirmed, "the override has its own audit row");
   const payload = confirmed.afterJson as Record<string, unknown>;

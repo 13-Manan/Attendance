@@ -133,6 +133,29 @@ in four directions; its threshold is set by what blur costs a template. A face
 that is too small is told to move closer before blur is judged at all. The
 evidence is in [CALIBRATION.md](CALIBRATION.md#enrolment-sharpness).
 
+### Classroom quality
+
+A classroom face is never refused for quality: it is embedded and matched,
+and a quality flag caps whatever it matches at review. A flag means one thing
+— *this face is outside the conditions the thresholds were validated on*:
+
+| Flag | Raised when |
+| --- | --- |
+| `face_too_small` | under 40px |
+| `bad_angle` | turned more than 45° left or right, 35° up or down, or 45° rolled |
+| `blurred` | the enrolment blur measure, on the face, is past severe (0.72; 0.78 at 40px) |
+| `too_dark` | the face is darker *and* flatter than the darkest validated condition |
+| `too_bright` | more than 60% of the face is blown out |
+| `occluded` | Azure reports the eyes, forehead or mouth covered, or a mask; or more than a tenth of the face's core is outside the photograph |
+| `low_quality` | Azure rates the face `low` for recognition |
+
+Blur and exposure are measured on the face, as at enrolment, and Azure's
+ratings of them do not decide: its blur rating flagged 98% of faces that had
+only been darkened. With Azure's ratings deciding, 21% of students in the
+evaluation's classroom photographs were recognised automatically; measured on
+the face, 43%. Neither — nor no flags at all — marked a single student present
+as somebody else. See [CALIBRATION.md](CALIBRATION.md#classroom-quality).
+
 ## Failure behaviour
 
 The rule: **an outage is an outage.** It never becomes "no faces found", which
