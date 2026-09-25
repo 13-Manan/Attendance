@@ -142,9 +142,10 @@ export async function updateStudent(
     const { studentId, ...data } = input;
     const updated = await tx.student.update({ where: { id: studentId }, data });
 
+    const action = studentAuditAction(existing.status, updated.status);
     await recordAuditLog(
       {
-        action: studentAuditAction(existing.status, updated.status),
+        action,
         entityType: "Student",
         entityId: updated.id,
         institutionId: existing.institutionId,
@@ -154,6 +155,37 @@ export async function updateStudent(
       },
       tx,
     );
+
+    // Archiving ends recognition and restoring resumes it, with no change to
+    // the templates: eligibility reads the student's status on every run
+    // (modules/recognition-results/eligibility.ts). Said by name in the same
+    // transaction, so the log cannot record one without the other.
+    if (action !== "student.updated") {
+      const liveTemplates = await tx.faceEmbedding.count({
+        where: { studentId: updated.id, isActive: true },
+      });
+      if (liveTemplates > 0) {
+        await recordAuditLog(
+          {
+            action:
+              action === "student.archived"
+                ? "face_enrollment.eligibility_revoked"
+                : "face_enrollment.eligibility_restored",
+            entityType: "Student",
+            entityId: updated.id,
+            institutionId: existing.institutionId,
+            actorUserId: actor.userId,
+            afterJson: {
+              studentId: updated.id,
+              studentStatus: updated.status,
+              liveTemplates,
+              recognitionEligible: updated.status === "ACTIVE",
+            },
+          },
+          tx,
+        );
+      }
+    }
 
     return { previousStatus: existing.status, updated };
   });

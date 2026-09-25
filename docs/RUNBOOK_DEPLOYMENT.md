@@ -600,7 +600,9 @@ template or a vector (the numbers below are illustrative):
  "detectedFaces":71,"scoredFaces":69,"matched":31,"uncertain":7,"unmatched":4,
  "unknownFaces":3,"rejectedFaces":2,"flaggedFaces":5,"modelName":"dlib-resnet-v1",
  "modelVersion":"dlib-models-2a61575+pp1+al1.detection_03","productionEligible":true,
- "templateKind":"embedding","lookalikeStudents":2,"durationMs":2840}
+ "templateKind":"embedding","lookalikeStudents":2,"candidateTemplates":198,
+ "excludedArchivedStudents":1,"excludedArchivedTemplates":5,
+ "excludedTenantMismatchTemplates":0,"durationMs":2840}
 ```
 
 - `flaggedFaces` — faces carrying a quality flag, each capped at review.
@@ -616,6 +618,18 @@ template or a vector (the numbers below are illustrative):
   non-zero count in a class without twins means two students' templates are
   confidently alike — find the confirmation in the audit log and check it
   was right.
+- `candidateTemplates`, `excluded…` — recognition eligibility
+  (`apps/web/src/modules/recognition-results/eligibility.ts`), as counts: the
+  templates compared, and the live templates of students in this class that
+  were kept out. `excludedArchived…` are students archived ("deleted" in the
+  directory) who are still on the class list: they are never recognised, and
+  archiving a student with face data writes a
+  `face_enrollment.eligibility_revoked` audit row (restoring writes
+  `…_restored`). `excludedTenantMismatchTemplates` should always be 0; anything
+  else is a row linking a student into another institution's class — find it,
+  it is a data fault. When somebody reports "a deleted student is still being
+  recognised", this line says whether that run could have: a student it
+  excluded was not compared.
 
 | Symptom in the logs | What it means | What to do |
 |---|---|---|

@@ -155,12 +155,23 @@ export interface NearestTemplateRow {
  * filter is equally required — similarity between vectors from two different
  * models is not a number that means anything, and acting on it would refuse
  * honest enrollments at random.
+ *
+ * ## Whose templates count
+ *
+ * Other students' templates count only while they are eligible for
+ * recognition (`modules/recognition-results/eligibility.ts`): an archived
+ * student's face is no longer a live identity, so it neither refuses nor
+ * notes a new enrollment — the same face can be enrolled under the student
+ * who is actually on roll. The student being enrolled always sees their own
+ * live samples, archived or not, so a re-submitted photograph is still
+ * recognised as one.
  */
 export async function findNearestTemplatesInInstitution(
   institutionId: string,
   probe: readonly number[],
   model: { modelName: string; modelVersion: string },
   limit: number,
+  options: { enrollingStudentId?: string | null } = {},
   client: Client = prisma,
 ): Promise<NearestTemplateRow[]> {
   if (probe.length !== EMBEDDING_DIMENSION) {
@@ -182,11 +193,17 @@ export async function findNearestTemplatesInInstitution(
       fe."studentId"                              AS "studentId",
       1 - (fe.embedding <=> ${literal}::vector)   AS similarity
     FROM "FaceEmbedding" fe
+    INNER JOIN "Student" s
+      ON s.id = fe."studentId"
+     AND s."institutionId" = fe."institutionId"
     WHERE fe."institutionId" = ${institutionId}
       AND fe."isActive" = TRUE
       AND fe.embedding IS NOT NULL
       AND fe."modelName" = ${model.modelName}
       AND fe."modelVersion" = ${model.modelVersion}
+      -- Rule 2 of recognition-results/eligibility.ts, for everyone but the
+      -- student being enrolled.
+      AND (s.status = 'ACTIVE' OR fe."studentId" = ${options.enrollingStudentId ?? null})
     ORDER BY fe.embedding <=> ${literal}::vector
     LIMIT ${limit}
   `;

@@ -1,5 +1,6 @@
 import { EMBEDDING_DIMENSION } from "@attendance/shared-types";
 import { prisma } from "@/lib/prisma";
+import { ELIGIBLE_TEMPLATE_STUDENT_JOIN, RECOGNITION_ELIGIBLE_STUDENT_STATUS } from "./eligibility";
 
 export interface CandidateEmbedding {
   id: string;
@@ -41,6 +42,9 @@ export interface CandidateEmbeddingWithVector extends CandidateEmbedding {
  * caller that omits `model` is asking for every candidate regardless of
  * provenance, which is only correct while a single model has ever been
  * used; the recognition pipeline is expected to pass it.
+ *
+ * Eligibility — which templates may take part at all — is one rule for every
+ * loader: see `./eligibility.ts`.
  */
 export async function findCandidateEmbeddingsForCohort(
   cohortId: string,
@@ -50,6 +54,7 @@ export async function findCandidateEmbeddingsForCohort(
     where: {
       isActive: true,
       student: {
+        status: RECOGNITION_ELIGIBLE_STUDENT_STATUS,
         enrollments: { some: { cohortId, status: "ACTIVE" } },
       },
       ...(model ? { modelName: model.modelName, modelVersion: model.modelVersion } : {}),
@@ -68,7 +73,10 @@ export async function findCandidateEmbeddingsForCohort(
  *
  * Every access to biometric templates for recognition passes through this
  * function; the cohort filter is required (no unscoped variant, same rule
- * as `findCandidateEmbeddingsForCohort`).
+ * as `findCandidateEmbeddingsForCohort`). Only eligible templates are
+ * returned — live, of a student on roll, of this class's institution — and
+ * the filter is in the SQL, so an archived student's vectors never take a
+ * candidate slot (`./eligibility.ts`).
  */
 export async function findCandidateEmbeddingsWithVectorsForCohort(
   cohortId: string,
@@ -102,9 +110,13 @@ export async function findCandidateEmbeddingsWithVectorsForCohort(
       fe."embeddingDim"  AS "embeddingDim",
       fe.embedding::text AS "embeddingText"
     FROM "FaceEmbedding" fe
+    ${ELIGIBLE_TEMPLATE_STUDENT_JOIN}
+    INNER JOIN "Cohort" c
+      ON c.id = ${cohortId}
+     AND c."institutionId" = fe."institutionId"
     INNER JOIN "Enrollment" en
       ON en."studentId" = fe."studentId"
-     AND en."cohortId" = ${cohortId}
+     AND en."cohortId" = c.id
      AND en.status = 'ACTIVE'
     WHERE fe."isActive" = TRUE
       -- Gallery samples (Azure) carry no vector and are matched by the
@@ -145,7 +157,8 @@ export async function findCandidateEmbeddingsWithVectorsForCohort(
  *
  * The cohort `Enrollment` join is kept as well as the subject join: a student
  * who left the cohort but whose subject row was never cleaned up must not
- * reappear in a classroom search.
+ * reappear in a classroom search. Eligibility as for the cohort loader
+ * (`./eligibility.ts`).
  */
 export async function findCandidateEmbeddingsWithVectorsForCohortSubject(
   cohortSubjectId: string,
@@ -169,14 +182,18 @@ export async function findCandidateEmbeddingsWithVectorsForCohortSubject(
       fe."embeddingDim"  AS "embeddingDim",
       fe.embedding::text AS "embeddingText"
     FROM "FaceEmbedding" fe
+    ${ELIGIBLE_TEMPLATE_STUDENT_JOIN}
     INNER JOIN "StudentSubjectEnrollment" sse
       ON sse."studentId" = fe."studentId"
      AND sse."cohortSubjectId" = ${cohortSubjectId}
     INNER JOIN "CohortSubject" cs
       ON cs.id = sse."cohortSubjectId"
+    INNER JOIN "Cohort" c
+      ON c.id = cs."cohortId"
+     AND c."institutionId" = fe."institutionId"
     INNER JOIN "Enrollment" en
       ON en."studentId" = fe."studentId"
-     AND en."cohortId" = cs."cohortId"
+     AND en."cohortId" = c.id
      AND en.status = 'ACTIVE'
     WHERE fe."isActive" = TRUE
       -- Gallery samples (Azure) carry no vector and are matched by the
@@ -194,6 +211,62 @@ export async function findCandidateEmbeddingsWithVectorsForCohortSubject(
     embeddingDim: r.embeddingDim,
     embedding: parsePgVectorLiteral(r.embeddingText),
   }));
+}
+
+/** Why live templates in a class were not candidates. Counts only. */
+export interface IneligibleTemplateCounts {
+  /** Templates of students actively enrolled in the class but archived. */
+  studentNotActiveTemplates: number;
+  /** How many archived students those templates belong to. */
+  studentNotActiveStudents: number;
+  /** Templates whose rows disagree about the institution. Should be zero. */
+  tenantMismatchTemplates: number;
+}
+
+/**
+ * For the run log: the live, comparable templates of the class that
+ * eligibility kept out of the candidate pool, and why. The same scope and
+ * model as `findCandidateEmbeddingsWithVectorsForCohort`, without rules 2 and
+ * 3 of `./eligibility.ts`, counted rather than loaded. Nothing is returned but
+ * numbers.
+ */
+export async function countIneligibleTemplatesForCohort(
+  cohortId: string,
+  model: { modelName: string; modelVersion: string },
+): Promise<IneligibleTemplateCounts> {
+  const [row] = await prisma.$queryRaw<
+    Array<{
+      studentNotActiveTemplates: number;
+      studentNotActiveStudents: number;
+      tenantMismatchTemplates: number;
+    }>
+  >`
+    SELECT
+      count(*) FILTER (WHERE s.status <> 'ACTIVE')::int
+        AS "studentNotActiveTemplates",
+      count(DISTINCT fe."studentId") FILTER (WHERE s.status <> 'ACTIVE')::int
+        AS "studentNotActiveStudents",
+      count(*) FILTER (
+        WHERE s.status = 'ACTIVE'
+          AND (s."institutionId" <> fe."institutionId" OR c."institutionId" <> fe."institutionId")
+      )::int AS "tenantMismatchTemplates"
+    FROM "FaceEmbedding" fe
+    INNER JOIN "Student" s ON s.id = fe."studentId"
+    INNER JOIN "Enrollment" en
+      ON en."studentId" = fe."studentId"
+     AND en."cohortId" = ${cohortId}
+     AND en.status = 'ACTIVE'
+    INNER JOIN "Cohort" c ON c.id = en."cohortId"
+    WHERE fe."isActive" = TRUE
+      AND fe.embedding IS NOT NULL
+      AND fe."modelName" = ${model.modelName}
+      AND fe."modelVersion" = ${model.modelVersion}
+  `;
+  return {
+    studentNotActiveTemplates: row?.studentNotActiveTemplates ?? 0,
+    studentNotActiveStudents: row?.studentNotActiveStudents ?? 0,
+    tenantMismatchTemplates: row?.tenantMismatchTemplates ?? 0,
+  };
 }
 
 /**

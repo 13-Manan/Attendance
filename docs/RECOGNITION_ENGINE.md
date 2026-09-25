@@ -134,6 +134,23 @@ The subject loader keeps the cohort-enrollment join deliberately: a student
 who left the class but whose elective row was never cleaned up must not
 reappear in a classroom search.
 
+**Eligibility.** Inside either scope, a template is a candidate only if it is
+live (`isActive`), its student is on roll (`Student.status = ACTIVE`), and the
+template, the student and the class belong to one institution — one rule for
+every loader, the gallery path and enrolment's duplicate scan, in SQL
+([`recognition-results/eligibility.ts`](../apps/web/src/modules/recognition-results/eligibility.ts)).
+A student is never deleted here; "delete" in the directory archives them, and
+archiving ends their recognition on the next run while their templates,
+registers and audit history stay. Before 2026-09-26 the status was read by
+nothing on this path, and an archived student kept being recognised — and
+kept their face, so the same face could not be enrolled under anyone else
+without a false "different people" confirmation. The register re-reads
+eligibility when it is written, so a match made against a student archived
+while the run was in flight is not recorded as a finding, and "add another
+photo" does not carry forward an earlier round's match for a student who can
+no longer be compared. There is no cache between this rule and a run: every
+run reads the database, and face-ai holds no templates.
+
 **Fallback.** Per-student subject enrollment is optional in the data model —
 a non-elective subject can legitimately have no `StudentSubjectEnrollment`
 rows. If the subject pool comes back empty, the engine falls back to the

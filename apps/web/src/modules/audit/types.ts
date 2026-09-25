@@ -110,6 +110,15 @@ export type AuditAction =
   // for exactly those should find them by name. Carries both student ids and
   // the similarity; never a face or a vector.
   | "face_enrollment.distinct_person_confirmed"
+  // A student with live face templates was archived, or brought back. The
+  // `student.archived`/`student.restored` row records the status change;
+  // these record what it did to recognition, by name, so "when did this
+  // student stop being recognisable?" is answered without knowing the
+  // eligibility rule (modules/recognition-results/eligibility.ts). The
+  // templates themselves are not changed — the rule reads the student's
+  // status on every run. Counts and ids only.
+  | "face_enrollment.eligibility_revoked"
+  | "face_enrollment.eligibility_restored"
   // Phase 11 face-data retention. `deactivated` above is a soft delete and was
   // the only erasure this system could record; these two are the rows that
   // prove a biometric template actually stopped existing.

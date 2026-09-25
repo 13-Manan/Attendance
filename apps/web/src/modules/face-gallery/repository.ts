@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import type { GalleryPlacement } from "@attendance/shared-types";
 import { prisma } from "@/lib/prisma";
+import { RECOGNITION_ELIGIBLE_STUDENT_STATUS } from "@/modules/recognition-results/eligibility";
 import type { FaceCaptureSource, FaceEnrollmentChannel } from "@/modules/face-enrollment/types";
 import type { PlacementRow } from "./policy";
 
@@ -168,7 +169,8 @@ export interface GalleryCandidate {
  * this cohort (and, for a subject session, in that subject) are candidates.
  * A person in the gallery who has since left the class resolves to nobody,
  * so a stale provider-side face can never mark a student who does not belong
- * in the room. Only active samples under the running model count.
+ * in the room. Only active samples under the running model count, and only
+ * students on roll (`modules/recognition-results/eligibility.ts`).
  */
 export async function findGalleryCandidates(
   galleryId: string,
@@ -183,6 +185,7 @@ export async function findGalleryCandidates(
         isActive: true,
         ...model,
         student: {
+          status: RECOGNITION_ELIGIBLE_STUDENT_STATUS,
           enrollments: { some: { cohortId: scope.cohortId, status: "ACTIVE" } },
           ...(scope.cohortSubjectId
             ? { subjectEnrollments: { some: { cohortSubjectId: scope.cohortSubjectId } } }

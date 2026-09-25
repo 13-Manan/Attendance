@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { ELIGIBLE_TEMPLATE_WHERE } from "@/modules/recognition-results/eligibility";
 import type { AttendanceResult } from "@/modules/attendance/types";
 import type { SessionStatus } from "@/modules/sessions/types";
 import type { AttendanceRosterStudent } from "./types";
@@ -71,6 +72,11 @@ export async function listCohortSubjectRoster(
  * actually compare. Used to tell "we compared you and found nothing" apart
  * from "we never had anything to compare you against" — two very different
  * things to tell a student who was marked absent.
+ *
+ * "Could compare" is the recognition eligibility rule
+ * (`modules/recognition-results/eligibility.ts`), read when the register is
+ * written: an archived student is never described as compared, and a match a
+ * run made before its student was archived is not written as a finding.
  */
 export async function listStudentIdsWithComparableTemplates(
   studentIds: string[],
@@ -80,7 +86,7 @@ export async function listStudentIdsWithComparableTemplates(
   const rows = await prisma.faceEmbedding.findMany({
     where: {
       studentId: { in: studentIds },
-      isActive: true,
+      ...ELIGIBLE_TEMPLATE_WHERE,
       ...(model ? { modelName: model.modelName, modelVersion: model.modelVersion } : {}),
     },
     select: { studentId: true },
@@ -89,7 +95,7 @@ export async function listStudentIdsWithComparableTemplates(
   return rows.map((r) => r.studentId);
 }
 
-/** Any active template at all, regardless of model build. */
+/** Any eligible template at all, regardless of model build. */
 export async function listStudentIdsWithAnyTemplate(studentIds: string[]): Promise<string[]> {
   return listStudentIdsWithComparableTemplates(studentIds);
 }

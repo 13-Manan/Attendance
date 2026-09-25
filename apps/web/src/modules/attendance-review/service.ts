@@ -707,6 +707,10 @@ const FINDING_STRENGTH: Record<string, number> = {
  *    means the recogniser confused someone with this student, and a clear
  *    match in another photo could be that same someone. Whichever round has
  *    it wins, capped at review.
+ *  - A finding whose basis has since been revoked does not survive: when the
+ *    student can no longer be compared at all (archived, or every template
+ *    withdrawn or deleted), an earlier round's finding rests on a template
+ *    recognition may no longer use, and the new round's account replaces it.
  *  - Otherwise the stronger finding wins (PRESENT > review > no match > not
  *    evaluated), then the higher similarity; ties keep what is there.
  *
@@ -721,6 +725,8 @@ export function mergeRoundDecision(
   previousNote: StoredStudentNote | undefined,
   next: { row: AttendanceCandidateRow; note: StoredStudentNote },
   captureOffset: number,
+  /** Whether the student is still eligible for recognition now. */
+  options: { stillComparable?: boolean } = {},
 ): { write: AttendanceCandidateRow | null; note: StoredStudentNote } {
   const shifted: StoredStudentNote = {
     ...next.note,
@@ -752,6 +758,10 @@ export function mergeRoundDecision(
   });
 
   if (previousRow.isManuallyCorrected) return keepPrevious();
+
+  if (options.stillComparable === false && previousRow.aiResult !== "NOT_EVALUATED") {
+    return takeNext();
+  }
 
   const previousDuplicate = previousNote?.reason === "duplicate_in_capture";
   const nextDuplicate = next.note.reason === "duplicate_in_capture";
@@ -874,13 +884,22 @@ export async function generateAttendanceCandidates(
   // holding a sample under the same model who is not in this gallery (joined
   // the class after enrolling) was never searchable, and "compared and not
   // found" would be a false statement about them.
+  //
+  // Either way, recognition eligibility is read again here, as the register
+  // is written (modules/recognition-results/eligibility.ts). A student
+  // archived while this run was in flight is not written as compared, and a
+  // match the run made against them is not written as a finding.
+  const eligibleNow = recognitionRan
+    ? new Set(
+        await listComparable(studentIds, {
+          modelName: recognition.modelName,
+          modelVersion: recognition.modelVersion,
+        }),
+      )
+    : new Set<string>();
   const comparable = recognitionRan
     ? new Set(
-        recognition.comparableStudentIds ??
-          (await listComparable(studentIds, {
-            modelName: recognition.modelName,
-            modelVersion: recognition.modelVersion,
-          })),
+        (recognition.comparableStudentIds ?? [...eligibleNow]).filter((id) => eligibleNow.has(id)),
       )
     : new Set<string>();
   // Only queried when it changes the message shown to the reviewer.
@@ -960,6 +979,7 @@ export async function generateAttendanceCandidates(
       previous.notes[student.studentId],
       { row, note: decision.note },
       captureOffset,
+      { stillComparable: comparable.has(student.studentId) },
     );
     notes[student.studentId] = merged.note;
     if (merged.write) rows.push(merged.write);

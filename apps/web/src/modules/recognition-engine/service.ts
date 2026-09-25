@@ -7,8 +7,10 @@ import { resolveFacePolicy } from "@/modules/admin-settings/policy";
 import { getInstitutionById } from "@/modules/institutions/repository";
 import type { Institution } from "@/modules/institutions/types";
 import {
+  countIneligibleTemplatesForCohort,
   findCandidateEmbeddingsWithVectorsForCohort,
   findCandidateEmbeddingsWithVectorsForCohortSubject,
+  type IneligibleTemplateCounts,
 } from "@/modules/recognition-results/repository";
 import type { CandidateEmbeddingWithVector } from "@/modules/recognition-results/repository";
 import { matchStatusToAttendanceResult } from "@/modules/recognition-results/service";
@@ -718,6 +720,15 @@ export interface RunRecognitionForSessionDeps {
   requireCohortSubjectAccess?: (u: SessionUser, cohortSubjectId: string) => Promise<void>;
   loadCandidateEmbeddings?: LoadCandidatesFn;
   loadSubjectCandidateEmbeddings?: LoadCandidatesFn;
+  /**
+   * For the run log only: how many live templates of the class eligibility
+   * kept out, and why. Defaults to the database count when the candidate
+   * loaders are the database ones; a run with injected loaders logs none.
+   */
+  countIneligibleTemplates?: (
+    cohortId: string,
+    model: { modelName: string; modelVersion: string },
+  ) => Promise<IneligibleTemplateCounts>;
   detectEmbed?: DetectEmbedFn;
   /** Gallery backends (templateKind "gallery"): identify against the class
    * gallery, and resolve its person ids to this class's students. */
@@ -790,6 +801,10 @@ interface FrontHalf {
   gallery?: { identification: IdentificationStatus; galleryReady: boolean };
   /** Vector path only: see `findLookalikeStudents`. */
   lookalikes?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Vector path only, for the run log: eligible templates compared. */
+  candidateTemplates?: number;
+  /** Vector path only, for the run log: see `countIneligibleTemplates`. */
+  ineligible?: IneligibleTemplateCounts | null;
 }
 
 type RunSession = Pick<AttendanceSession, "id" | "cohortId" | "cohortSubjectId">;
@@ -875,6 +890,16 @@ async function scoreAgainstEmbeddings(
     (c) => c.modelName === modelFilter.modelName && c.modelVersion === modelFilter.modelVersion,
   );
   const otherBuildTemplates = rawCandidates.length - sameBuild.length;
+
+  // Diagnostics, never a decision: what eligibility excluded from this class.
+  // Only against the database the loaders read, and never allowed to fail a
+  // run — a count that cannot be taken is logged as absent.
+  const countIneligible =
+    deps.countIneligibleTemplates ??
+    (deps.loadCandidateEmbeddings ? null : countIneligibleTemplatesForCohort);
+  const ineligible = countIneligible
+    ? await countIneligible(session.cohortId, modelFilter).catch(() => null)
+    : null;
   const candidates: CandidateTemplate[] = sameBuild.map((c) => ({
     embeddingId: c.id,
     studentId: c.studentId,
@@ -947,6 +972,8 @@ async function scoreAgainstEmbeddings(
     rejectedFaces: response.rejectedFaces ?? [],
     durationMs,
     lookalikes: findLookalikeStudents(candidates, EMBEDDING_DIMENSION, policy),
+    candidateTemplates: candidates.length,
+    ineligible,
   };
 }
 
@@ -1326,7 +1353,11 @@ export async function runRecognitionForSession(
       : {}),
   };
 
-  logRecognitionRun(summary, { lookalikeStudents: run.lookalikes?.size ?? 0 });
+  logRecognitionRun(summary, {
+    lookalikeStudents: run.lookalikes?.size ?? 0,
+    candidateTemplates: run.candidateTemplates ?? null,
+    ineligible: run.ineligible ?? null,
+  });
   return summary;
 }
 
@@ -1343,7 +1374,11 @@ export async function runRecognitionForSession(
  */
 function logRecognitionRun(
   summary: RecognitionRunSummary,
-  extra: { lookalikeStudents: number },
+  extra: {
+    lookalikeStudents: number;
+    candidateTemplates: number | null;
+    ineligible: IneligibleTemplateCounts | null;
+  },
 ): void {
   const matched = summary.perStudent.filter((s) => s.matchStatus === "MATCHED").length;
   const uncertain = summary.perStudent.filter((s) => s.matchStatus === "UNCERTAIN").length;
@@ -1375,6 +1410,18 @@ function logRecognitionRun(
       // How many students in the pool have a lookalike in it (see
       // findLookalikeStudents) — a count, never who.
       lookalikeStudents: extra.lookalikeStudents,
+      // Eligibility (modules/recognition-results/eligibility.ts), as counts:
+      // the templates compared, and the live templates of students in this
+      // class that were kept out — archived students, rows that disagree
+      // about the institution. Never who, and never a vector.
+      candidateTemplates: extra.candidateTemplates,
+      ...(extra.ineligible
+        ? {
+            excludedArchivedStudents: extra.ineligible.studentNotActiveStudents,
+            excludedArchivedTemplates: extra.ineligible.studentNotActiveTemplates,
+            excludedTenantMismatchTemplates: extra.ineligible.tenantMismatchTemplates,
+          }
+        : {}),
       durationMs: summary.durationMs,
     }),
   );

@@ -116,6 +116,9 @@ export interface FaceEnrollmentDeps {
     probe: readonly number[],
     model: TemplateModel,
     limit: number,
+    /** Whose own samples count even if they are archived: the student being
+     * enrolled. Everyone else's count only while they are eligible. */
+    enrollingStudentId?: string,
   ) => Promise<repo.NearestTemplateRow[]>;
   findOwnTemplateSimilarities?: (
     institutionId: string,
@@ -192,7 +195,13 @@ function defaults() {
       return faceModelInfo();
     },
     listActiveTemplateModelsForStudent: repo.listActiveTemplateModelsForStudent,
-    findNearestTemplates: repo.findNearestTemplatesInInstitution,
+    findNearestTemplates: (
+      institutionId: string,
+      probe: readonly number[],
+      model: TemplateModel,
+      limit: number,
+      enrollingStudentId?: string,
+    ) => repo.findNearestTemplatesInInstitution(institutionId, probe, model, limit, { enrollingStudentId }),
     findOwnTemplateSimilarities: repo.findOwnTemplateSimilarities,
     insertFaceEmbedding: (input: repo.InsertFaceEmbeddingInput) => repo.insertFaceEmbedding(input),
     replaceTemplates: async (
@@ -968,6 +977,7 @@ async function detectCollision(
       embedding,
       model,
       DUPLICATE_SCAN_NEIGHBOURS,
+      student.id,
     );
   } catch {
     return clear;
