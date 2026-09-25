@@ -62,6 +62,9 @@ export interface FaceCaptureProps {
   onSubmit: (image: {
     imageBase64: string;
     captureSource: FaceCaptureSource;
+    /** Staff confirmation that a duplicate is a different person; see
+     * EnrollFaceForStudentInput. Ignored on the self-enrollment path. */
+    confirmDistinctFromStudentId?: string;
   }) => Promise<FaceEnrollmentResult>;
   /**
    * Retires every stored sample and stores this one instead. Staff only —
@@ -71,6 +74,7 @@ export interface FaceCaptureProps {
   onReplace?: (image: {
     imageBase64: string;
     captureSource: FaceCaptureSource;
+    confirmDistinctFromStudentId?: string;
   }) => Promise<FaceEnrollmentResult>;
   /** The subject's enrollment status as of the last server render. */
   initialStatus: FaceEnrollmentStatusSummary;
@@ -101,6 +105,13 @@ export function FaceCapture({
   const [stage, setStage] = useState<Stage>({ name: "choosing" });
   const [status, setStatus] = useState(initialStatus);
   const [result, setResult] = useState<FaceEnrollmentResult | null>(null);
+  // Set after a staff `duplicate_identity` refusal: whom a "different people"
+  // confirmation would name, and which action to repeat with it.
+  const [distinct, setDistinct] = useState<{
+    studentId: string;
+    label: string | null;
+    mode: "add" | "replace";
+  } | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [replaceMode, setReplaceMode] = useState(false);
@@ -254,9 +265,13 @@ export function FaceCapture({
   // -- submission -----------------------------------------------------------
 
   const send = useCallback(
-    async (mode: "add" | "replace") => {
+    async (mode: "add" | "replace", confirmDistinctFromStudentId?: string) => {
       if (stage.name !== "review") return;
-      const payload = { imageBase64: stage.imageBase64, captureSource: stage.source };
+      const payload = {
+        imageBase64: stage.imageBase64,
+        captureSource: stage.source,
+        ...(confirmDistinctFromStudentId ? { confirmDistinctFromStudentId } : {}),
+      };
       const previewUrl = stage.previewUrl;
 
       setStage({ name: "submitting", previewUrl });
@@ -276,6 +291,11 @@ export function FaceCapture({
         setResult(outcome);
         setStatus(outcome.status);
         setConfirmingReplace(false);
+        const collided =
+          !outcome.ok && outcome.reason === "duplicate_identity" && subject === "student"
+            ? outcome.collidedWith
+            : undefined;
+        setDistinct(collided ? { ...collided, mode } : null);
 
         if (outcome.ok) {
           // The image has served its purpose. Dropping it here means a page
@@ -283,6 +303,10 @@ export function FaceCapture({
           // a photograph of a child.
           setReplaceMode(false);
           setStage({ name: "choosing" });
+        } else if (collided) {
+          // A retake cannot resolve this one, but a confirmation can — and it
+          // needs this photograph. Kept only until it is sent or discarded.
+          setStage(held);
         } else if (outcome.retryable) {
           // Keep the still on screen: the reason is about this photograph, and
           // being able to look at it while reading "the face is too small" is
@@ -301,11 +325,12 @@ export function FaceCapture({
         setStage(held);
       }
     },
-    [onReplace, onSubmit, setConfirmingReplace, stage],
+    [onReplace, onSubmit, setConfirmingReplace, stage, subject],
   );
 
   const discard = useCallback(() => {
     setResult(null);
+    setDistinct(null);
     setCameraError(null);
     setFileError(null);
     setStage({ name: "choosing" });
@@ -411,6 +436,24 @@ export function FaceCapture({
             <strong className="block">{captureFeedbackHeadline(result)}</strong>
             {result.message}
           </Message>
+        ) : null}
+        {distinct && stage.name === "review" ? (
+          <div className="flex flex-col items-start gap-2 rounded-md border border-neutral-200 px-3 py-2">
+            <p className="max-w-md text-xs text-neutral-600">
+              Only if you have checked in person that this student and{" "}
+              {distinct.label ?? "the other student"} are different people — identical twins, for
+              example. Both will be enrolled, and a classroom photograph that cannot tell them apart
+              goes to review instead of being guessed. The confirmation is recorded.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => void send(distinct.mode, distinct.studentId)}>
+                They are different people — enrol this sample
+              </Button>
+              <Button type="button" variant="secondary" onClick={discard}>
+                Cancel
+              </Button>
+            </div>
+          </div>
         ) : null}
         {result?.ok && status.remainingSlots > 0 ? (
           <p className="text-xs text-neutral-500">

@@ -44,6 +44,7 @@ import {
 } from "./policy";
 import {
   HUMAN_REASON,
+  describeLookalike,
   describeRefusal,
   isRetryable,
   type FaceCaptureSource,
@@ -276,6 +277,17 @@ export interface EnrollFaceInput {
 
 export interface EnrollFaceForStudentInput extends EnrollFaceInput {
   studentId: string;
+  /**
+   * Set only after a `duplicate_identity` refusal that named this student,
+   * by a member of staff who has confirmed the two are different people —
+   * identical twins, in the case this exists for.
+   *
+   * It is bound to that one student: it waives the collision with them and
+   * with nobody else, so a stale or copied confirmation cannot wave through a
+   * collision with a third student. Staff only — the self-enrollment path has
+   * no way to carry it, by construction rather than by check.
+   */
+  confirmDistinctFromStudentId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +314,14 @@ export async function enrollFaceForStudentRequest(
   if (!student) throw new Error("student_not_found");
   requireSameInstitution(actor, student.institutionId);
 
-  return performEnrollment(actor, student, input, "STAFF", { replace: false }, d);
+  return performEnrollment(
+    actor,
+    student,
+    input,
+    "STAFF",
+    { replace: false, confirmDistinctFrom: input.confirmDistinctFromStudentId ?? null },
+    d,
+  );
 }
 
 /**
@@ -357,7 +376,14 @@ export async function replaceFaceEnrollmentRequest(
   if (!student) throw new Error("student_not_found");
   requireSameInstitution(actor, student.institutionId);
 
-  return performEnrollment(actor, student, input, "STAFF", { replace: true }, d);
+  return performEnrollment(
+    actor,
+    student,
+    input,
+    "STAFF",
+    { replace: true, confirmDistinctFrom: input.confirmDistinctFromStudentId ?? null },
+    d,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +425,7 @@ async function performEnrollment(
   student: Student,
   input: EnrollFaceInput,
   channel: FaceEnrollmentChannel,
-  options: { replace: boolean },
+  options: { replace: boolean; confirmDistinctFrom?: string | null },
   d: ResolvedDeps,
 ): Promise<FaceEnrollmentResult> {
   const institutionId = student.institutionId;
@@ -496,13 +522,14 @@ async function performEnrollment(
   }
 
   // -- 7. Collision -------------------------------------------------------
-  const collision = await detectCollision(
+  const { collision, lookalike, confirmedDistinct } = await detectCollision(
     institution,
     student,
     response.embedding,
     runningModel,
     options.replace,
     calibration,
+    channel === "STAFF" ? (options.confirmDistinctFrom ?? null) : null,
     d,
   );
   if (collision.kind !== "none") {
@@ -560,8 +587,36 @@ async function performEnrollment(
       captureSource: input.captureSource,
       channel,
       ...(options.replace ? { retiredTemplates: written.retired } : {}),
+      // Who this face resembles, when it resembles somebody closely enough
+      // that attendance will send the close calls between them to review.
+      // Ids and a score, never a vector.
+      ...(lookalike
+        ? {
+            lookalikeOfStudentId: lookalike.studentId,
+            lookalikeSimilarity: Number(lookalike.similarity.toFixed(4)),
+          }
+        : {}),
     },
   });
+
+  if (confirmedDistinct) {
+    await d.recordAuditLog({
+      action: "face_enrollment.distinct_person_confirmed",
+      entityType: "FaceEmbedding",
+      entityId: written.id,
+      institutionId,
+      actorUserId: actor.userId,
+      afterJson: {
+        studentId: student.id,
+        distinctFromStudentId: confirmedDistinct.studentId,
+        distinctFromEmbeddingId: confirmedDistinct.embeddingId,
+        similarity: Number(confirmedDistinct.similarity.toFixed(4)),
+        modelName: response.modelName,
+        modelVersion: response.modelVersion,
+        channel,
+      },
+    });
+  }
 
   // Recomputed from what is now stored, so the caller's slot count reflects the
   // write rather than the state before it. A replacement retired everything
@@ -569,16 +624,39 @@ async function performEnrollment(
   const survivingModels = options.replace ? [] : storedModels;
   const after = summariseEnrollmentStatus([...survivingModels, runningModel], runningModel);
 
+  const saved = options.replace
+    ? `Enrolled. ${written.retired === 0 ? "There were no earlier samples to retire." : `${written.retired} earlier sample${written.retired === 1 ? "" : "s"} retired.`}`
+    : HUMAN_REASON.ok;
+  // Staff are told; a student enrolling themselves is not told who they look
+  // like, for the same reason a collision never names anybody on that path.
+  const lookalikeLabel =
+    lookalike && channel === "STAFF" ? await staffLabel(d, student, lookalike.studentId) : null;
   return {
     ok: true,
     embeddingId: written.id,
     qualityScore: response.assessment.qualityScore,
-    message: options.replace
-      ? `Enrolled. ${written.retired === 0 ? "There were no earlier samples to retire." : `${written.retired} earlier sample${written.retired === 1 ? "" : "s"} retired.`}`
-      : HUMAN_REASON.ok,
+    message: lookalikeLabel
+      ? `${saved} ${describeLookalike(lookalikeLabel)}`
+      : saved,
     status: after,
     replaced: written.retired,
   };
+}
+
+/**
+ * "Name (code)" for a student at the same institution, or null.
+ *
+ * Only ever called on the staff path. The institution check is paranoia: the
+ * scans that produce these ids are institution-scoped already.
+ */
+async function staffLabel(
+  d: ResolvedDeps,
+  student: Student,
+  otherStudentId: string,
+): Promise<string | null> {
+  const other = await d.getStudentById(otherStudentId);
+  if (!other || other.institutionId !== student.institutionId) return null;
+  return `${studentDisplayName(other)} (${other.studentCode})`;
 }
 
 /**
@@ -805,6 +883,54 @@ async function performGalleryEnrollment(
  * that protects the register, so a scan that cannot run is recorded as such
  * rather than passed over in silence.
  */
+/** Another student this face resembles, as the scan saw it. */
+interface OtherStudentMatch {
+  studentId: string;
+  embeddingId: string;
+  similarity: number;
+}
+
+interface CollisionFindings {
+  /** What refuses this sample, or `none`. */
+  collision: EnrollmentCollision;
+  /**
+   * The closest other student in the review band: close enough that
+   * attendance will send the close calls between the two of them to a
+   * teacher, not close enough to be the same person. Recorded, never refused
+   * — see "Lookalikes" below.
+   */
+  lookalike: OtherStudentMatch | null;
+  /** The student staff confirmed this is a different person from. */
+  confirmedDistinct: OtherStudentMatch | null;
+}
+
+/**
+ * ## Lookalikes are enrolled, not refused
+ *
+ * A face in the review band against another student's template used to be
+ * refused as `ambiguous_identity`. That scan covers the whole institution,
+ * so the refusal applied a per-class threshold to a pool that grows with
+ * every enrollment. Measured on 248 people, 18.5% of photographs had a
+ * different person at or above the review band; at 500 students with five
+ * samples each, most new enrollments would have been refused
+ * (services/face-ai/docs/CALIBRATION.md, "Enrollment at institution scale").
+ *
+ * Refusing a lookalike protects nobody. A photograph of an *enrolled* someone
+ * else lands in the duplicate band — no two different people reached it in
+ * 59,587 comparisons — and is still refused. What refusing a lookalike does
+ * is leave that student with no template, so they are never recognised at
+ * all. The protection against confusing two similar students is at
+ * attendance time, where it can see both: the ambiguity margins, the
+ * one-to-one assignment, and a teacher.
+ *
+ * ## Twins
+ *
+ * Identical twins can land in the duplicate band. That refusal stands by
+ * default — it is usually a duplicate record — and a member of staff who has
+ * checked can confirm the two are different people. The confirmation names
+ * one student and waives the collision with them alone; it is audited as
+ * `face_enrollment.distinct_person_confirmed`.
+ */
 async function detectCollision(
   institution: Institution,
   student: Student,
@@ -812,8 +938,14 @@ async function detectCollision(
   model: TemplateModel,
   isReplacement: boolean,
   calibration: ScoreCalibration | null,
+  confirmDistinctFrom: string | null,
   d: ResolvedDeps,
-): Promise<EnrollmentCollision> {
+): Promise<CollisionFindings> {
+  const clear: CollisionFindings = {
+    collision: { kind: "none" },
+    lookalike: null,
+    confirmedDistinct: null,
+  };
   // pgvector returns the backend's own cosine. The thresholds below are the
   // institution's, on the product's scale, so every row is mapped onto that
   // scale before either is compared with the other.
@@ -832,29 +964,52 @@ async function detectCollision(
       DUPLICATE_SCAN_NEIGHBOURS,
     );
   } catch {
-    return { kind: "none" };
+    return clear;
   }
 
   const thresholds = resolveConfidenceThresholds(institution);
-  const collision = classifyEnrollmentCollision(
-    onProductScale(neighbours),
-    student.id,
-    thresholds,
-  );
+
+  // Classify, set aside what does not refuse, and classify what is left —
+  // until what is left refuses or is clear. Each pass removes one student,
+  // so it ends. The strongest collision is always considered first.
+  let remaining = onProductScale(neighbours);
+  let lookalike: OtherStudentMatch | null = null;
+  let confirmedDistinct: OtherStudentMatch | null = null;
+  let collision: EnrollmentCollision;
+  for (;;) {
+    collision = classifyEnrollmentCollision(remaining, student.id, thresholds);
+    if (
+      collision.kind === "belongs_to_other_student" &&
+      confirmDistinctFrom !== null &&
+      collision.studentId === confirmDistinctFrom
+    ) {
+      confirmedDistinct = collision;
+      const waived = collision.studentId;
+      remaining = remaining.filter((n) => n.studentId !== waived);
+      continue;
+    }
+    if (collision.kind === "ambiguous_with_other_student") {
+      lookalike ??= collision;
+      const noted = collision.studentId;
+      remaining = remaining.filter((n) => n.studentId !== noted);
+      continue;
+    }
+    break;
+  }
 
   // A replacement is allowed to be the same face as the sample it replaces —
   // that is the ordinary case when somebody re-takes a poor photograph of the
   // same person. The checks against *other* students still apply.
   if (isReplacement && collision.kind === "already_enrolled") {
-    return { kind: "none" };
+    return { collision: { kind: "none" }, lookalike, confirmedDistinct };
   }
-  if (collision.kind !== "none") return collision;
+  if (collision.kind !== "none") return { collision, lookalike, confirmedDistinct };
 
   // A replacement retires the whole set, so there is nothing for the new
   // sample to be consistent *with* — and re-enrolling from scratch is the
   // intended answer when a student no longer resembles their old templates.
   // Checking here would leave that student with no way back in.
-  if (isReplacement) return { kind: "none" };
+  if (isReplacement) return { collision, lookalike, confirmedDistinct };
 
   let own: repo.NearestTemplateRow[];
   try {
@@ -868,10 +1023,14 @@ async function detectCollision(
     // Same posture as the neighbour scan above: a failed safety query must not
     // become a failed enrollment. It means the check did not run, not that it
     // passed — which is why the query is not a filter over an optional list.
-    return { kind: "none" };
+    return { collision, lookalike, confirmedDistinct };
   }
 
-  return classifyOwnSampleMismatch(onProductScale(own), thresholds);
+  return {
+    collision: classifyOwnSampleMismatch(onProductScale(own), thresholds),
+    lookalike,
+    confirmedDistinct,
+  };
 }
 
 /**
@@ -923,16 +1082,8 @@ async function refuseCollision(
   // Only looked up for staff, and only because they cannot resolve the
   // collision without it. The student path never learns who they collided
   // with; see `describeRefusal`.
-  let otherLabel: string | null = null;
-  if (channel === "STAFF") {
-    const other = await d.getStudentById(collision.studentId);
-    // Cross-tenant paranoia: the scan is institution-scoped, so this can only
-    // differ if something upstream is wrong. Say nothing rather than name
-    // somebody from another institution.
-    if (other && other.institutionId === student.institutionId) {
-      otherLabel = `${studentDisplayName(other)} (${other.studentCode})`;
-    }
-  }
+  const otherLabel =
+    channel === "STAFF" ? await staffLabel(d, student, collision.studentId) : null;
 
   await d.recordAuditLog({
     action: "face_enrollment.refused",
@@ -954,7 +1105,13 @@ async function refuseCollision(
     },
   });
 
-  return refuse(reason, channel, status, otherLabel);
+  const refused = refuse(reason, channel, status, otherLabel);
+  // Staff may confirm a duplicate is really two people. The UI needs to know
+  // whom that confirmation would name — and only staff ever learn it.
+  if (!refused.ok && channel === "STAFF" && reason === "duplicate_identity") {
+    return { ...refused, collidedWith: { studentId: collision.studentId, label: otherLabel } };
+  }
+  return refused;
 }
 
 // ---------------------------------------------------------------------------

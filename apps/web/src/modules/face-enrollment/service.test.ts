@@ -616,9 +616,17 @@ test("a student is never told whose face theirs collided with", async () => {
   assert.match(result.message, /office/i, "and is told who can help");
 });
 
-test("a near-collision is refused as ambiguous rather than stored", async () => {
+test("a lookalike is enrolled and noted, not refused", async () => {
+  // Changed deliberately (services/face-ai/docs/CALIBRATION.md, "Enrollment
+  // at institution scale"). This used to be refused as `ambiguous_identity`,
+  // which across a whole institution refuses most students once it holds a
+  // few hundred — and leaves each of them with no template at all, so never
+  // recognised. The two are told apart at attendance, or sent to review.
   const h = harness({
-    students: [student(), student({ id: "student-2", userId: "u2", studentCode: "S-002" })],
+    students: [
+      student(),
+      student({ id: "student-2", userId: "u2", studentCode: "S-002", firstName: "Rohan", lastName: "Gupta" }),
+    ],
     neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.5 }],
   });
 
@@ -627,7 +635,184 @@ test("a near-collision is refused as ambiguous rather than stored", async () => 
     { studentId: "student-1", ...CAMERA },
     h.deps,
   );
-  assert.equal(result.ok === false && result.reason, "ambiguous_identity");
+
+  assert.equal(result.ok, true);
+  assert.equal(h.inserted.length, 1, "the sample is stored");
+  // Staff are told whom it resembles and what attendance will do about it.
+  assert.match(result.message, /Rohan Gupta \(S-002\)/);
+  assert.match(result.message, /review/);
+  // The resemblance is recorded, as ids and a score.
+  const created = h.audits.find((a) => a.action === "face_enrollment.created");
+  const payload = created?.afterJson as Record<string, unknown>;
+  assert.equal(payload.lookalikeOfStudentId, "student-2");
+  assert.equal(payload.lookalikeSimilarity, 0.5);
+  assert.equal(auditText(h).includes(String(UNIT_VECTOR[0])), false, "no vector in the log");
+});
+
+test("a student enrolling themselves is never told whom they resemble", async () => {
+  const h = harness({
+    institution: institution({ type: "COLLEGE" }),
+    students: [
+      student(),
+      student({ id: "student-2", userId: "u2", studentCode: "S-002", firstName: "Rohan", lastName: "Gupta" }),
+    ],
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.5 }],
+  });
+
+  const result = await enrollOwnFaceRequest(studentUser(), CAMERA, h.deps);
+
+  assert.equal(result.ok, true);
+  assert.doesNotMatch(result.message, /Rohan|S-002|student-2|resembles/);
+});
+
+test("a lookalike does not hide a re-submitted photograph", async () => {
+  // The lookalike is set aside and the scan carries on: the same bytes twice
+  // is still caught, rather than spending a sample slot on it.
+  const h = harness({
+    students: [student(), student({ id: "student-2", userId: "u2", studentCode: "S-002" })],
+    storedModels: [MODEL],
+    neighbours: [
+      { embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.5 },
+      { embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.995 },
+    ],
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "already_enrolled");
+  assert.equal(h.inserted.length, 0);
+});
+
+test("a lookalike does not skip the check against the student's own samples", async () => {
+  const h = harness({
+    students: [student(), student({ id: "student-2", userId: "u2", studentCode: "S-002" })],
+    storedModels: [MODEL],
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.5 }],
+    ownSimilarities: [{ embeddingId: "emb-own", studentId: "student-1", rawSimilarity: 0.2 }],
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "does_not_match_student");
+  assert.equal(h.inserted.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Identical twins: a duplicate that is two people
+// ---------------------------------------------------------------------------
+
+const TWINS = [
+  student(),
+  student({ id: "student-2", userId: "u2", studentCode: "S-002", firstName: "Rohan", lastName: "Gupta" }),
+];
+
+test("a duplicate refusal tells staff whom a 'different people' confirmation would name", async () => {
+  const h = harness({
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "duplicate_identity");
+  assert.deepEqual(result.ok === false && result.collidedWith, {
+    studentId: "student-2",
+    label: "Rohan Gupta (S-002)",
+  });
+  assert.match(result.message, /twins/);
+});
+
+test("staff can confirm identical twins are different people, and the confirmation is audited", async () => {
+  const h = harness({
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA, confirmDistinctFromStudentId: "student-2" },
+    h.deps,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(h.inserted.length, 1);
+  const confirmed = h.audits.find((a) => a.action === "face_enrollment.distinct_person_confirmed");
+  assert.ok(confirmed, "the override has its own audit row");
+  const payload = confirmed.afterJson as Record<string, unknown>;
+  assert.equal(payload.studentId, "student-1");
+  assert.equal(payload.distinctFromStudentId, "student-2");
+  assert.equal(payload.similarity, 0.93);
+  assert.equal(confirmed.actorUserId, staffAdmin().userId);
+  assert.equal(auditText(h).includes(String(UNIT_VECTOR[0])), false, "no vector in the log");
+});
+
+test("a confirmation naming a different student waives nothing", async () => {
+  const h = harness({
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA, confirmDistinctFromStudentId: "student-9" },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "duplicate_identity");
+  assert.equal(h.inserted.length, 0);
+});
+
+test("a confirmation names one student: a second strong collision is still refused", async () => {
+  // Triplets, or a twin and a genuine duplicate record: confirming one
+  // collision must not wave through the other.
+  const h = harness({
+    students: [
+      ...TWINS,
+      student({ id: "student-3", userId: "u3", studentCode: "S-003", firstName: "Arjun", lastName: "Gupta" }),
+    ],
+    neighbours: [
+      { embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 },
+      { embeddingId: "emb-y", studentId: "student-3", rawSimilarity: 0.9 },
+    ],
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA, confirmDistinctFromStudentId: "student-2" },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "duplicate_identity");
+  assert.equal(result.ok === false && result.collidedWith?.studentId, "student-3");
+  assert.equal(h.inserted.length, 0);
+});
+
+test("a student cannot confirm they are not a twin of somebody else", async () => {
+  // Self-enrollment has no field for it; a client that sends one anyway is
+  // not heard, and learns nothing about whom it collided with.
+  const h = harness({
+    institution: institution({ type: "COLLEGE" }),
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+  });
+
+  const smuggled = { ...CAMERA, confirmDistinctFromStudentId: "student-2" } as typeof CAMERA;
+  const result = await enrollOwnFaceRequest(studentUser(), smuggled, h.deps);
+
+  assert.equal(result.ok === false && result.reason, "duplicate_identity");
+  assert.equal(result.ok === false && result.collidedWith, undefined);
   assert.equal(h.inserted.length, 0);
 });
 
@@ -1457,8 +1642,7 @@ test("enrollment stops when a production model publishes no score calibration", 
 test("a collision scan on a calibrated backend uses the product's scale", async () => {
   // The neighbour is at 0.94 raw — two different people for the dlib
   // recogniser, and 0.518 calibrated. Read raw it would refuse this student's
-  // own enrollment as somebody else's face; calibrated it is a flag, and the
-  // sample is still not stored.
+  // own enrollment as somebody else's face; calibrated it is a lookalike.
   const h = harness({
     students: [
       student(),
@@ -1487,6 +1671,9 @@ test("a collision scan on a calibrated backend uses the product's scale", async 
     h.deps,
   );
 
-  assert.equal(result.ok === false && result.reason, "ambiguous_identity");
-  assert.equal(h.inserted.length, 0);
+  // Read raw, 0.94 is past presentMin and this would be refused as somebody
+  // else's face. On the product's scale it is a lookalike: enrolled, noted.
+  assert.equal(result.ok, true);
+  assert.equal(h.inserted.length, 1);
+  assert.match(result.message, /Rohan Gupta/);
 });

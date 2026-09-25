@@ -7,6 +7,7 @@ import {
   countDistinctUnknownFaces,
   classifyBySimilarity,
   cosineSimilarity,
+  findLookalikeStudents,
   runRecognitionForSession,
   scoreFaceAgainstCandidates,
 } from "./service.ts";
@@ -1696,4 +1697,129 @@ test("a student contested by two faces is given to one of them and reviewed", ()
   assert.equal(assignments[1].topChoice?.studentId, "rahul");
   // Rahul was wanted by two faces, so his result is a teacher's to confirm.
   assert.deepEqual([...contested], ["rahul"]);
+});
+
+// ---------------------------------------------------------------------------
+// Identical twins and other lookalikes
+// ---------------------------------------------------------------------------
+//
+// dlib cannot reliably tell identical twins apart: on public-domain photographs
+// 17-29% of cross-twin comparisons reached the present threshold (docs, "Twins").
+// Two students whose own templates would confidently match each other are
+// lookalikes, and a match to either is never PRESENT on the recogniser's word.
+
+/** Twin B: a template at cosine `c` to twin A's (axis 0), off along axis 1. */
+function twinRow(c: number) {
+  const v = new Array<number>(DIM).fill(0);
+  v[0] = c;
+  v[1] = Math.sqrt(1 - c * c);
+  return {
+    id: "emb-twin-b",
+    studentId: "twin-b",
+    modelName: "mock",
+    modelVersion: "0.1.0+pp1",
+    embeddingDim: DIM,
+    embedding: v,
+  } satisfies CandidateEmbeddingWithVector;
+}
+
+function template(studentId: string, embedding: number[], sample = "a"): CandidateTemplate {
+  return {
+    embeddingId: `emb-${studentId}-${sample}`,
+    studentId,
+    embedding,
+    modelName: "mock",
+    modelVersion: "0.1.0+pp1",
+  };
+}
+
+test("findLookalikeStudents pairs students whose templates confidently match", () => {
+  const pairs = findLookalikeStudents(
+    [
+      template("a", axis(0)),
+      template("b", twinRow(0.7).embedding),
+      template("c", axis(2)),
+      // A student's own samples never make them their own lookalike.
+      template("c", faceMix({ 2: 0.99 }), "b"),
+    ],
+    DIM,
+    policy(),
+  );
+  assert.deepEqual([...(pairs.get("a") ?? [])], ["b"]);
+  assert.deepEqual([...(pairs.get("b") ?? [])], ["a"]);
+  assert.equal(pairs.has("c"), false);
+});
+
+test("findLookalikeStudents reads templates on the backend's calibrated scale", () => {
+  // 0.94 raw is two different people for dlib — a lookalike, not a twin.
+  // 0.96 raw would be a confident match: those two are paired.
+  const calibration = {
+    id: "dlib-test",
+    knots: [
+      { raw: -1, calibrated: -1 },
+      { raw: 0.93, calibrated: 0.45 },
+      { raw: 0.955, calibrated: 0.62 },
+      { raw: 1, calibrated: 1 },
+    ],
+    rawAmbiguityMargin: 0.01,
+  };
+  const at = (c: number) => twinRow(c).embedding;
+  const loose = findLookalikeStudents([template("a", axis(0)), template("b", at(0.94))], DIM, policy({ calibration }));
+  const tight = findLookalikeStudents([template("a", axis(0)), template("b", at(0.96))], DIM, policy({ calibration }));
+  assert.equal(loose.size, 0);
+  assert.equal(tight.size, 2);
+});
+
+test("twins: a confident-looking match to one twin still goes to review", async () => {
+  // Before: 0.95 against twin A, 0.665 against twin B — a margin wide enough
+  // to mark A present. Between identical twins that margin is not evidence.
+  const pool = [studentRow(0), twinRow(0.7), studentRow(2)];
+  pool[0] = { ...pool[0], studentId: "twin-a", id: "emb-twin-a" };
+  const faces = [detectedFace(1, faceMix({ 0: 0.95 })), detectedFace(1, faceMix({ 2: 0.95 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+
+  const students = byStudent(summary);
+  assert.equal(students.get("twin-a")?.advisoryResult, "NEEDS_REVIEW");
+  assert.ok((students.get("twin-a")?.downgrades as string[]).includes("ambiguous_face"));
+  // An unrelated classmate in the same photograph is unaffected.
+  assert.equal(students.get("stu-2")?.advisoryResult, "PRESENT");
+});
+
+test("twins: both in one photograph each get one face, and both go to review", async () => {
+  const b = twinRow(0.7);
+  const pool = [{ ...studentRow(0), studentId: "twin-a", id: "emb-twin-a" }, b];
+  // Twin B's face: close to B's template (0.95), less so to A's.
+  const bFace = b.embedding.map((x) => x * 0.95);
+  bFace[5] = Math.sqrt(1 - 0.95 * 0.95);
+  const faces = [detectedFace(1, faceMix({ 0: 0.95 })), detectedFace(1, bFace)];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+
+  const claimed = summary.perFace.map((f) => f.candidateStudentId);
+  assert.deepEqual(claimed, ["twin-a", "twin-b"], "one face each: one-to-one still holds");
+  for (const s of summary.perStudent) assert.equal(s.advisoryResult, "NEEDS_REVIEW");
+});
+
+test("twins: a twin in another class is no reason to doubt this one", async () => {
+  // Lookalikes are found within the pool being searched. Twin B is not in
+  // this class, so nothing in this photograph can be confused with them.
+  const pool = [{ ...studentRow(0), studentId: "twin-a", id: "emb-twin-a" }, studentRow(2)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.95 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  assert.equal(byStudent(summary).get("twin-a")?.advisoryResult, "PRESENT");
+});
+
+test("the run log counts lookalikes without naming anybody", async () => {
+  const pool = [{ ...studentRow(0), studentId: "twin-a", id: "emb-twin-a" }, twinRow(0.7)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.95 }))];
+  const lines: string[] = [];
+  const original = console.info;
+  console.info = (line: string) => void lines.push(line);
+  try {
+    await runRecognitionForSession(makeUser(), ONE_IMAGE, harness({ pool, faces }).deps);
+  } finally {
+    console.info = original;
+  }
+  const run = JSON.parse(lines.find((l) => l.includes("recognition.run"))!);
+  assert.equal(run.lookalikeStudents, 2);
+  assert.doesNotMatch(lines.join("\n"), /twin-a|twin-b/);
 });

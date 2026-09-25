@@ -90,6 +90,13 @@ export type FaceEnrollmentResult =
        * wasted effort and the UI should offer something else instead.
        */
       retryable: boolean;
+      /**
+       * Staff path, `duplicate_identity` only: the student this face collided
+       * with. Present so the UI can offer the one resolution a retake cannot —
+       * "these are different people" (identical twins) — bound to exactly this
+       * student. Never set on the self-enrollment path.
+       */
+      collidedWith?: { studentId: string; label: string | null };
     };
 
 /**
@@ -117,6 +124,16 @@ export interface FaceSampleRecord {
   retiredAt: Date | null;
   retiredByName: string | null;
   retirementReason: FaceSampleRetirementReason | null;
+}
+
+/**
+ * Appended, for staff only, to a successful enrollment whose face closely
+ * resembles another student's. Not a refusal: both students are enrolled, and
+ * attendance is where the two are told apart — or sent to a teacher when they
+ * cannot be.
+ */
+export function describeLookalike(otherStudentLabel: string): string {
+  return `Note: this face closely resembles ${otherStudentLabel}. Both stay enrolled; when a classroom photograph cannot tell them apart, it is sent to review rather than guessed.`;
 }
 
 export const HUMAN_REASON: Record<FaceQualityReason, string> = {
@@ -219,8 +236,8 @@ export function describeRefusal(
     case "duplicate_identity":
       return staff
         ? other
-          ? `This face already belongs to ${other}. Enrolling it here would leave the recognition pipeline unable to tell the two records apart. If they are the same person, merge the student records first.`
-          : "This face is already enrolled against a different student at this institution. Enrolling it here would leave the recognition pipeline unable to tell the two records apart."
+          ? `This face already belongs to ${other}. If they are the same person, merge the student records instead of enrolling this sample. If you have checked that they are different people — identical twins, for example — you can confirm that and enrol it: attendance will then send any capture it cannot tell apart to review.`
+          : "This face is already enrolled against a different student at this institution. If they are the same person, merge the student records instead. If they are different people — identical twins, for example — you can confirm that and enrol this sample."
         : "That photograph could not be saved. Please speak to your institution's office — they can sort this out.";
 
     case "ambiguous_identity":

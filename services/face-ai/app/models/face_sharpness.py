@@ -235,3 +235,27 @@ def measure_blur(rgb: np.ndarray, points: Sequence[tuple[float, float]]) -> floa
     """The blur of the face at ``points`` in ``rgb``. Compare with
     ``MAX_ENROLLMENT_BLUR``."""
     return blur_effect(canonical_face(rgb, points))
+
+
+def face_core_outside(
+    points: Sequence[tuple[float, float]], width: int, height: int
+) -> float:
+    """The share of the face's core that lies outside the photograph.
+
+    The core is dlib's template square — eyes, nose and mouth, without the
+    chip's padding — mapped back into the photograph from the five points.
+    Azure clamps a face *rectangle* to the edge of the image, so the rectangle
+    cannot say a face was cut off; its landmarks, though, are extrapolated
+    beyond the edge, so the points can. Measured on an 11x11 grid: coarse,
+    exact enough for "is a real part of this face missing", and cheap.
+    """
+    src = np.asarray(points, dtype=np.float64)
+    to_photo = _similarity(_TEMPLATE_CHIP, src)
+    lo = CHIP_PADDING / (2 * CHIP_PADDING + 1) * CHIP_SIZE
+    hi = (1 + CHIP_PADDING) / (2 * CHIP_PADDING + 1) * CHIP_SIZE
+    grid = np.linspace(lo, hi, 11)
+    xs, ys = np.meshgrid(grid, grid)
+    square = np.stack([xs.ravel(), ys.ravel(), np.ones(xs.size)])
+    px, py = to_photo @ square
+    outside = (px < 0) | (py < 0) | (px >= width) | (py >= height)
+    return float(outside.mean())

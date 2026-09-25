@@ -538,8 +538,8 @@ def test_a_rejected_face_still_says_where_it_was():
 
 
 def test_a_low_quality_face_is_flagged_but_still_embedded():
-    # Refusing it outright would make a blurry student indistinguishable from
-    # an absent one. Flagged, it reaches a teacher instead.
+    # Refusing it outright would make a poor capture of a student
+    # indistinguishable from an absent one. Flagged, it reaches a teacher.
     fake = FakeDetect()
     provider = make_provider(fake)
     fake.faces = [face(quality="low", blur="high")]
@@ -547,7 +547,11 @@ def test_a_low_quality_face_is_flagged_but_still_embedded():
     analysis = provider.analyze_image(session_image(photo()))
 
     assert len(analysis.faces) == 1
-    assert set(analysis.faces[0].quality_flags) >= {"blurred", "low_quality"}
+    assert "low_quality" in analysis.faces[0].quality_flags
+    # Azure's blur rating alone no longer flags a classroom face: it tracks
+    # face size and darkness as much as focus. This photograph is sharp, and
+    # blur is now judged from its pixels (see the classroom tests below).
+    assert "blurred" not in analysis.faces[0].quality_flags
 
 
 def test_a_heavily_rolled_face_is_flagged():
@@ -1207,3 +1211,138 @@ def test_the_enroll_route_reports_blur_and_accepts_a_sharp_face(routed):
     assert blurred["accepted"] is False
     assert blurred["assessment"]["reason"] == "blurred"
     assert "embedding" not in blurred
+
+
+# ---------------------------------------------------------------------------
+# Classroom quality flags (dlib backend)
+# ---------------------------------------------------------------------------
+#
+# A flag caps a classroom match at "needs review". It should fire only when a
+# face is outside the conditions the thresholds were validated on — not, as
+# Azure's blur and exposure ratings did, on dark, backlit or small faces the
+# recogniser matches correctly (docs/CALIBRATION.md, "Classroom quality").
+
+
+def classroom_flags_for(frame, detection):
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    fake.faces = [detection]
+    analysis = provider.analyze_image(session_image(encoded(frame, 82)))
+    assert len(analysis.faces) == 1, "the face is still embedded, whatever its flags"
+    return analysis.faces[0].quality_flags
+
+
+def test_the_severe_blur_threshold_rises_for_faces_smaller_than_the_chip():
+    from app.models.azure_dlib_provider import severe_blur_threshold
+
+    assert severe_blur_threshold(200) == pytest.approx(0.72)
+    assert severe_blur_threshold(80) == pytest.approx(0.72)
+    assert severe_blur_threshold(60) == pytest.approx(0.75)
+    assert severe_blur_threshold(40) == pytest.approx(0.78)
+    assert severe_blur_threshold(20) == pytest.approx(0.78)
+
+
+@pytest.mark.parametrize("face_px", [60, 100, 200])
+def test_a_sharp_classroom_face_is_not_flagged(face_px):
+    frame, detection = render_face(face_px)
+    assert classroom_flags_for(frame, detection) == []
+
+
+@pytest.mark.parametrize("face_px", [100, 200])
+def test_azures_blur_and_exposure_ratings_no_longer_flag_a_good_face(face_px):
+    # What Azure says about small or dark faces: blurred, underexposed. The
+    # pixels say otherwise, and the pixels decide.
+    frame, detection = render_face(face_px)
+    rated = as_azure_rates_it(detection, blur=("high", 0.9), exposure="underExposure")
+    assert classroom_flags_for(frame, rated) == []
+
+
+@pytest.mark.parametrize("gain", [0.45, 0.3])
+def test_a_dark_face_is_not_flagged(gain):
+    # Darkened to x0.3 the recogniser still matched as reliably as clean.
+    frame, detection = render_face(160)
+    dark = np.clip(frame.astype(np.float64) * gain, 0, 255).astype(np.uint8)
+    assert classroom_flags_for(dark, detection) == []
+
+
+def test_a_face_darker_than_anything_validated_is_flagged():
+    frame, detection = render_face(160)
+    black = np.clip(frame.astype(np.float64) * 0.08, 0, 255).astype(np.uint8)
+    assert "too_dark" in classroom_flags_for(black, detection)
+
+
+def test_a_blown_out_face_is_flagged():
+    frame, detection = render_face(160)
+    blown = np.clip(frame.astype(np.float64) * 3.0 + 60, 0, 255).astype(np.uint8)
+    assert "too_bright" in classroom_flags_for(blown, detection)
+
+
+@pytest.mark.parametrize("face_px", [60, 100, 200])
+def test_severe_blur_is_flagged_at_every_size(face_px):
+    frame, detection = render_face(face_px)
+    assert "blurred" in classroom_flags_for(blur_face(frame, face_px, 3.0), detection)
+
+
+def test_severe_camera_shake_is_flagged():
+    from tests.synthetic_face import motion_blur
+
+    frame, detection = render_face(160)
+    assert "blurred" in classroom_flags_for(motion_blur(frame, 160, 16, 45), detection)
+
+
+@pytest.mark.parametrize("sigma", [0.5, 1.0])
+def test_mild_blur_is_left_to_the_score(sigma):
+    # Mild blur costs the match a little; it does not make it unsafe. The
+    # score falls by itself — the flag is for when the evidence is too poor
+    # to trust whatever the score says.
+    frame, detection = render_face(160)
+    assert "blurred" not in classroom_flags_for(blur_face(frame, 160, sigma), detection)
+
+
+def _cut_left(frame, detection, fraction):
+    """The face with ``fraction`` of its box cut off by the left edge, and
+    what Azure reports for it: the rectangle clamped to the photograph, the
+    landmarks extrapolated beyond it (as observed live)."""
+    rect = detection["faceRectangle"]
+    offset = int(rect["left"] + fraction * rect["width"])
+    cut = frame[:, offset:].copy()
+    shifted = copy.deepcopy(detection)
+    r = shifted["faceRectangle"]
+    left = r["left"] - offset
+    r["left"], r["width"] = max(0.0, left), r["width"] + min(0.0, left)
+    for point in shifted["faceLandmarks"].values():
+        point["x"] -= offset
+    return cut, shifted
+
+
+def test_a_face_cut_off_by_the_frame_edge_is_sent_to_review():
+    frame, detection = render_face(200)
+    cut, reported = _cut_left(frame, detection, 0.35)
+    assert reported["faceRectangle"]["left"] == 0.0
+    assert min(p["x"] for p in reported["faceLandmarks"].values()) < 0
+    assert "occluded" in classroom_flags_for(cut, reported)
+
+
+def test_a_whole_face_touching_the_frame_edge_is_not_flagged():
+    frame, detection = render_face(200)
+    cut, reported = _cut_left(frame, detection, 0.0)
+    assert "occluded" not in classroom_flags_for(cut, reported)
+
+
+@pytest.mark.parametrize(
+    "rating, flag",
+    [
+        ({"yaw": 60.0}, "bad_angle"),
+        ({"quality": "low"}, "low_quality"),
+    ],
+)
+def test_the_other_classroom_flags_are_unchanged(rating, flag):
+    frame, detection = render_face(160)
+    assert flag in classroom_flags_for(frame, as_azure_rates_it(detection, **rating))
+
+
+def test_an_occluded_face_is_still_flagged():
+    frame, detection = render_face(160)
+    covered = copy.deepcopy(detection)
+    covered["faceAttributes"]["occlusion"]["eyeOccluded"] = True
+    assert "occluded" in classroom_flags_for(frame, covered)

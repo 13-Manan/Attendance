@@ -114,6 +114,9 @@ class AzureQualityProfile:
     max_abs_yaw_deg: float
     max_abs_pitch_deg: float
     max_abs_roll_deg: float
+    #: Whether Azure's exposure level decides ``too_dark``/``too_bright``.
+    #: False when the backend measures exposure on the face itself.
+    judge_exposure: bool = True
 
 
 #: Enrolment refuses anything that would make a weak permanent template.
@@ -184,9 +187,9 @@ def evaluate_face(
     ):
         failed.add("bad_angle")
     exposure = (attrs.get("exposure") or {}).get("exposureLevel")
-    if exposure == "underExposure":
+    if profile.judge_exposure and exposure == "underExposure":
         failed.add("too_dark")
-    elif exposure == "overExposure":
+    elif profile.judge_exposure and exposure == "overExposure":
         failed.add("too_bright")
     blur = (attrs.get("blur") or {}).get("blurLevel")
     if (

@@ -437,6 +437,55 @@ export function assignFacesOneToOne(
 }
 
 /**
+ * Students in this pool whom the recogniser cannot reliably tell apart —
+ * identical twins, in practice — found from their own templates.
+ *
+ * Two students are lookalikes when a template of one would be a *confident*
+ * match for the other: calibrated similarity at or above `presentMin`, the
+ * same line the enrollment duplicate check draws. Measured on public-domain
+ * photographs (services/face-ai/docs/CALIBRATION.md, "Twins"): for identical
+ * twins, 17-29% of cross-twin comparisons reached it, so a pair with a few
+ * samples each is found almost surely; for unrelated people, none of 59,587
+ * comparisons did. Such a pair only exists at all because a member of staff
+ * confirmed at enrollment that they are different people.
+ *
+ * The consequence is in `runRecognitionForSession`: a match to either of them
+ * is never PRESENT on the recogniser's word alone, however wide the margin,
+ * because the margin between identical twins is not evidence of which one it
+ * is. Only students in this pool count — a twin in another class cannot be
+ * confused with one in this photograph.
+ */
+export function findLookalikeStudents(
+  candidates: readonly CandidateTemplate[],
+  embeddingDim: number,
+  policy: RecognitionPolicy,
+): Map<string, Set<string>> {
+  const usable = candidates.filter((c) => c.embedding.length === embeddingDim);
+  const lookalikes = new Map<string, Set<string>>();
+  const note = (a: string, b: string) => {
+    const set = lookalikes.get(a) ?? new Set<string>();
+    set.add(b);
+    lookalikes.set(a, set);
+  };
+  for (let i = 0; i < usable.length; i++) {
+    for (let j = i + 1; j < usable.length; j++) {
+      const a = usable[i];
+      const b = usable[j];
+      if (a.studentId === b.studentId) continue;
+      const similarity = calibrateScore(
+        cosineSimilarity(a.embedding, b.embedding),
+        policy.calibration,
+      );
+      if (similarity >= policy.presentMin) {
+        note(a.studentId, b.studentId);
+        note(b.studentId, a.studentId);
+      }
+    }
+  }
+  return lookalikes;
+}
+
+/**
  * How many distinct unknown people a run saw.
  *
  * An unknown face in photo 1 and one in photo 2 may be the same visitor.
@@ -711,6 +760,8 @@ interface FrontHalf {
   rejectedFaces: readonly Pick<RejectedFace, "reason">[];
   durationMs: number;
   gallery?: { identification: IdentificationStatus; galleryReady: boolean };
+  /** Vector path only: see `findLookalikeStudents`. */
+  lookalikes?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 type RunSession = Pick<AttendanceSession, "id" | "cohortId" | "cohortSubjectId">;
@@ -867,6 +918,7 @@ async function scoreAgainstEmbeddings(
     faces,
     rejectedFaces: response.rejectedFaces ?? [],
     durationMs,
+    lookalikes: findLookalikeStudents(candidates, EMBEDDING_DIMENSION, policy),
   };
 }
 
@@ -1165,6 +1217,16 @@ export async function runRecognitionForSession(
       runnerUp = scored.runnerUp;
       if (scored.wasAmbiguous) demotions.push("ambiguous");
     }
+    if (
+      decision === "MATCHED" &&
+      (run.lookalikes?.get(given.studentId)?.size ?? 0) > 0
+    ) {
+      // Somebody else in this class whose own enrolled face the recogniser
+      // would confidently call this student's — an identical twin. It cannot
+      // tell them apart reliably, so it does not choose between them.
+      demotions.push("ambiguous");
+      decision = "UNCERTAIN";
+    }
     if (qualityFlags.length > 0 && classifyBySimilarity(given.similarity, runPolicy) === "MATCHED") {
       // A small, blurred or badly lit face can resemble anybody. It may still
       // point a reviewer at a student; it may not suggest them present.
@@ -1236,7 +1298,7 @@ export async function runRecognitionForSession(
       : {}),
   };
 
-  logRecognitionRun(summary);
+  logRecognitionRun(summary, { lookalikeStudents: run.lookalikes?.size ?? 0 });
   return summary;
 }
 
@@ -1251,7 +1313,10 @@ export async function runRecognitionForSession(
  * sitting in a log aggregator with a different retention policy from the
  * database — see ADR-0008.
  */
-function logRecognitionRun(summary: RecognitionRunSummary): void {
+function logRecognitionRun(
+  summary: RecognitionRunSummary,
+  extra: { lookalikeStudents: number },
+): void {
   const matched = summary.perStudent.filter((s) => s.matchStatus === "MATCHED").length;
   const uncertain = summary.perStudent.filter((s) => s.matchStatus === "UNCERTAIN").length;
   console.info(
@@ -1279,6 +1344,9 @@ function logRecognitionRun(summary: RecognitionRunSummary): void {
       productionEligible: summary.productionEligible,
       templateKind: summary.templateKind ?? "embedding",
       identification: summary.identification,
+      // How many students in the pool have a lookalike in it (see
+      // findLookalikeStudents) — a count, never who.
+      lookalikeStudents: extra.lookalikeStudents,
       durationMs: summary.durationMs,
     }),
   );

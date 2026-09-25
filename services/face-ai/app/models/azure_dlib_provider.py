@@ -92,6 +92,9 @@ from app.models.dlib_recognition import (
 from app.models.face_sharpness import (
     MAX_ENROLLMENT_BLUR,
     MEASURE_VERSION,
+    blur_effect,
+    canonical_face,
+    face_core_outside,
     measure_blur,
 )
 from app.models.model_files import DLIB_ARTIFACTS, DLIB_RESNET, verify_all
@@ -159,6 +162,81 @@ DLIB_CALIBRATION = ScoreCalibration(
 DLIB_ENROLLMENT_PROFILE = replace(
     ENROLLMENT_PROFILE, name="enrollment-dlib", accepted_blur=None
 )
+
+#: The classroom, for this backend. A flag here does not refuse a face: it is
+#: still embedded and matched, and apps/web caps any match on it at "needs
+#: review". So a flag should mean one thing — this face is outside the range
+#: of conditions the thresholds were validated on — and nothing broader.
+#:
+#: Azure's blur and exposure ratings meant something broader. On composed
+#: classroom photographs (docs/CALIBRATION.md, "Classroom quality") Azure's
+#: blur flag fired on 98% of faces that had only been darkened, and its
+#: exposure flags on 20-75% of dark faces the recogniser matched correctly.
+#: Between them they sent four out of five dark or backlit students to review
+#: and cut automatic recognition across all conditions to 21%. Replaced by
+#: measurements of the face itself, the rate is 43% — and in neither case,
+#: nor with no flags at all, was a single student marked present as somebody
+#: else. Size, pose, occlusion and Azure's recognition-quality rating are
+#: applied exactly as before.
+DLIB_GROUP_PROFILE = replace(
+    GROUP_PROFILE, name="group-dlib", accepted_blur=None, judge_exposure=False
+)
+
+#: Blur that sends a classroom face to review whatever it scores: severe, not
+#: mild. Set so that at least 95% of faces blurred by 2 recogniser pixels (a
+#: template cost over 0.011) are flagged, on half the calibration identities;
+#: on the other half that flagged 92-97% of them, 19-37% of moderately blurred
+#: faces, and none of the unblurred ones at 60px and above. Mild and moderate
+#: blur are left to the score, which falls with blur by itself.
+#:
+#: Size-aware below 80px because a face smaller than the recogniser's chip is
+#: enlarged into it, and enlargement reads as blur: a sharp 40px face measures
+#: about what a sharp 100px face does blurred.
+SEVERE_BLUR_AT_80PX = 0.72
+SEVERE_BLUR_AT_40PX = 0.78
+
+#: Exposure outside anything the thresholds were validated on. The darkest
+#: validated condition (luminance x0.3) left faces at a median brightness of
+#: 41 and contrast 11, and they were recognised as reliably as clean ones.
+#: Only a face darker and flatter than that — or more than 60% blown out,
+#: beyond the brightest validated condition — is flagged.
+TOO_DARK_MEAN = 25.0
+TOO_DARK_CONTRAST = 8.0
+TOO_BRIGHT_BLOWN = 0.6
+
+#: A face with more than this share of its core outside the photograph is
+#: partly missing. dlib fills what is missing with black rather than
+#: inventing it; the face is still matched, and sent to review.
+MAX_FACE_CORE_OUTSIDE = 0.10
+
+
+def severe_blur_threshold(face_px: float) -> float:
+    """``SEVERE_BLUR_AT_80PX`` from 80px up, rising linearly to
+    ``SEVERE_BLUR_AT_40PX`` at 40px."""
+    shortfall = min(max((80.0 - face_px) / 40.0, 0.0), 1.0)
+    span = SEVERE_BLUR_AT_40PX - SEVERE_BLUR_AT_80PX
+    return SEVERE_BLUR_AT_80PX + shortfall * span
+
+
+def classroom_flags(
+    face: dict[str, Any],
+    prepared: PreparedImage,
+    points: list[tuple[float, float]],
+    face_px: float,
+) -> list[FaceQualityReason]:
+    """The quality flags for one classroom face. See ``DLIB_GROUP_PROFILE``."""
+    failed = set(evaluate_face(face, DLIB_GROUP_PROFILE))
+    region = canonical_face(prepared.rgb, points)
+    if blur_effect(region) > severe_blur_threshold(face_px):
+        failed.add("blurred")
+    if region.mean() < TOO_DARK_MEAN and region.std() < TOO_DARK_CONTRAST:
+        failed.add("too_dark")
+    if float(np.mean(region >= 245)) > TOO_BRIGHT_BLOWN:
+        failed.add("too_bright")
+    outside = face_core_outside(points, prepared.width, prepared.height)
+    if outside > MAX_FACE_CORE_OUTSIDE:
+        failed.add("occluded")
+    return [r for r in _REASON_ORDER if r in failed]
 
 
 # ---------------------------------------------------------------------------
@@ -670,14 +748,15 @@ class AzureDetectionOwnRecognitionProvider(FaceModelProvider):
                 continue
             started = time.perf_counter()
             try:
-                chip = self._chip(prepared, face)
+                points = _five_points(face)
+                chip = embedder.extract_chip(prepared.rgb, points)
             except LandmarkError:
                 rejected.append(_rejected(image, face, "alignment_failed"))
                 continue
             finally:
                 timings.align_ms += _ms_since(started)
             started = time.perf_counter()
-            flags = evaluate_face(face, GROUP_PROFILE)
+            flags = classroom_flags(face, prepared, points, size)
             timings.quality_ms += _ms_since(started)
             pending.append((face, chip, flags))
 
