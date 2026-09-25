@@ -142,19 +142,28 @@ function toListRow(row: ListRow): StudentListRow {
  * asking for page 7 of a list that now has two happens every time somebody
  * narrows a filter without clearing the page, and honouring it would show an
  * empty table under a heading that says there are forty results.
+ *
+ * `scope.cohortId` narrows the tally — not the rows, which the filters decide
+ * — to the students currently placed in one class group, for a directory that
+ * lists a single section and should say "33 students, 32 on roll" about that
+ * section rather than about the whole institution.
  */
 export async function searchStudents(
   institutionId: string,
   filters: StudentFilters,
   pageSize: number = STUDENT_PAGE_SIZE,
+  scope: { cohortId?: string } = {},
 ): Promise<StudentPage> {
   const where = buildStudentWhere(institutionId, filters);
+  const tallyWhere = scope.cohortId
+    ? { institutionId, enrollments: { some: { cohortId: scope.cohortId, status: "ACTIVE" as const } } }
+    : { institutionId };
 
   const [total, tally] = await Promise.all([
     prisma.student.count({ where }),
     prisma.student.groupBy({
       by: ["status"],
-      where: { institutionId },
+      where: tallyWhere,
       _count: { _all: true },
     }),
   ]);

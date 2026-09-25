@@ -24,6 +24,7 @@ import {
 import { STUDENT_STATUS_LABEL, StudentError, type StudentStatus } from "./directory-types";
 import { provisionStudentLogin, resetStudentLoginPassword } from "./login-provisioning";
 import { studentDisplayName } from "./types";
+import { parseSectionReturnPath } from "./class-navigation-paths";
 
 /** Every field of the student form, as strings, for redisplay after a refusal. */
 export interface StudentFormValues {
@@ -94,6 +95,11 @@ export async function createStudentAction(
   //
   // To the new record rather than back to the list: the next thing a clerk
   // does is place them in a class or enroll their face, and both are there.
+  // Added from a section, they were placed already, so back to that section,
+  // where the new student is listed with both links. `returnTo` is a form
+  // field, so only an exact section-page path is followed.
+  const section = parseSectionReturnPath(formData.get("returnTo"));
+  if (section) redirect(`${section}?added=${encodeURIComponent(studentId)}`);
   redirect(`/dashboard/students/${studentId}?created=1`);
 }
 

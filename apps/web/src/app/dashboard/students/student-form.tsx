@@ -53,12 +53,18 @@ export function StudentForm({
   student,
   options,
   canPlace,
+  defaultCohortId,
+  returnTo,
 }: {
   mode: "create" | "edit";
   student?: StudentDetail;
   options: StudentFormOptions;
   /** Whether this administrator may also place the new student in a class. */
   canPlace: boolean;
+  /** The class the placement starts on — the section the form was opened from. */
+  defaultCohortId?: string;
+  /** The section page to go back to once the student is added. Checked again by the action. */
+  returnTo?: string;
 }) {
   const [state, formAction, pending] = useActionState(
     mode === "create" ? createStudentAction : updateStudentAction,
@@ -70,6 +76,7 @@ export function StudentForm({
   return (
     <form action={formAction} className="flex w-full max-w-2xl flex-col gap-5">
       {student ? <input type="hidden" name="id" value={student.id} /> : null}
+      {mode === "create" && returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}
 
       <fieldset className="flex flex-col gap-4">
         <legend className="mb-2 text-sm font-semibold text-neutral-900">Who they are</legend>
@@ -201,7 +208,7 @@ export function StudentForm({
               key={`cohortId-${key}`}
               id="cohortId"
               name="cohortId"
-              defaultValue={values?.cohortId ?? ""}
+              defaultValue={values?.cohortId ?? defaultCohortId ?? ""}
             >
               <option value="">Not placed yet</option>
               {options.cohorts.map((cohort) => (

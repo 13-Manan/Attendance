@@ -6,71 +6,22 @@ import {
   listStudentsForRequest,
 } from "@/modules/students/directory-service";
 import {
-  NO_CAMPUS,
-  NO_COHORT,
-  STUDENT_SORTS,
-  hasActiveStudentFilters,
-  parseStudentFilters,
-  studentFilterQuery,
-} from "@/modules/students/directory-filters";
-import {
-  STUDENT_STATUSES,
-  STUDENT_STATUS_LABEL,
-  type StudentListRow,
-  type StudentStatus,
-} from "@/modules/students/directory-types";
-import { studentDisplayName } from "@/modules/students/types";
-import { Badge, type BadgeTone } from "@/components/ui/badge";
+  classNavigationAvailable,
+  getStudentClassesForRequest,
+} from "@/modules/students/class-navigation-service";
+import { studentClassesHref } from "@/modules/students/class-navigation-paths";
+import type { StudentClassesView } from "@/modules/students/class-navigation-types";
+import { hasActiveStudentFilters, parseStudentFilters } from "@/modules/students/directory-filters";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { EmptyState, Panel } from "@/components/ui/panel";
-import { Select } from "@/components/ui/select";
-import { TableScroll } from "@/components/ui/table-scroll";
+import { ClassGrid } from "./classes/class-navigation";
+import { StudentDirectoryPager, StudentDirectoryTable, StudentFilterFields } from "./student-directory";
 
 interface PageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
 const BASE = "/dashboard/students";
-
-/**
- * Formatted in UTC because an admission date is stored as UTC midnight — the
- * calendar day somebody typed. Formatting it in the reader's zone would show
- * the day before to anybody west of Greenwich.
- */
-const DATE_FORMAT = new Intl.DateTimeFormat("en-GB", {
-  day: "numeric",
-  month: "short",
-  year: "numeric",
-  timeZone: "UTC",
-});
-
-const STATUS_TONE: Record<StudentStatus, BadgeTone> = {
-  ACTIVE: "positive",
-  INACTIVE: "neutral",
-  TRANSFERRED: "neutral",
-  COMPLETED: "info",
-};
-
-function ClassCell({ student }: { student: StudentListRow }) {
-  if (student.classes.length === 0) {
-    return <span className="text-sm text-amber-700">Not placed</span>;
-  }
-  return (
-    <ul className="flex flex-col gap-0.5">
-      {student.classes.map((link) => (
-        <li key={link.enrollmentId} className="text-sm text-neutral-600">
-          {link.cohortName}
-          {link.termLabel ? ` · ${link.termLabel}` : ""}
-          <span className="block text-xs text-neutral-400">
-            {link.academicSessionName}
-            {link.academicSessionIsCurrent ? " (current year)" : ""}
-          </span>
-        </li>
-      ))}
-    </ul>
-  );
-}
 
 /**
  * The student directory.
@@ -109,9 +60,15 @@ export default async function StudentsPage({ searchParams }: PageProps) {
 
   const params = await searchParams;
   const filters = parseStudentFilters(params);
-  const [page, options] = await Promise.all([
+  const [page, options, classes] = await Promise.all([
     listStudentsForRequest(user, filters),
     getStudentFormOptionsForRequest(user),
+    // The class panel is a second way in, and never the reason the directory
+    // fails to load: a failure here leaves the panel saying so and the rest of
+    // the page working.
+    classNavigationAvailable(user)
+      .then((available) => (available ? getStudentClassesForRequest(user) : null))
+      .catch((): "unavailable" => "unavailable"),
   ]);
 
   const filtered = hasActiveStudentFilters(filters);
@@ -120,8 +77,6 @@ export default async function StudentsPage({ searchParams }: PageProps) {
 
   const firstOnPage = page.total === 0 ? 0 : (page.page - 1) * page.pageSize + 1;
   const lastOnPage = Math.min(page.page * page.pageSize, page.total);
-
-  const labelClass = "flex flex-col gap-1.5 text-xs font-medium text-neutral-600";
 
   return (
     <div className="flex w-full max-w-6xl flex-col gap-5">
@@ -145,6 +100,20 @@ export default async function StudentsPage({ searchParams }: PageProps) {
         </p>
       ) : null}
 
+      {classes === "unavailable" ? (
+        <Panel title="Classes">
+          <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+            The classes could not be loaded just now.{" "}
+            <Link href={BASE} className="font-medium underline">
+              Try again
+            </Link>
+            . The directory below is unaffected.
+          </p>
+        </Panel>
+      ) : classes ? (
+        <ClassesPanel classes={classes} canSetUp={hasPermission(user, "academicStructure.manage")} />
+      ) : null}
+
       <Panel
         title="Find a student"
         description="Search by name, student code, email or admission number. Terms are matched separately, so “priya sharma” finds Priya Sharma."
@@ -157,67 +126,7 @@ export default async function StudentsPage({ searchParams }: PageProps) {
         }
       >
         <form method="get" action={BASE} className="flex flex-col gap-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <label className={labelClass}>
-              Search
-              <Input
-                type="search"
-                name="q"
-                defaultValue={filters.q}
-                placeholder="Name, code, email, admission no."
-                autoComplete="off"
-              />
-            </label>
-            <label className={labelClass}>
-              Status
-              <Select name="status" defaultValue={filters.status}>
-                <option value="">Every status</option>
-                {STUDENT_STATUSES.map((status) => (
-                  <option key={status} value={status}>
-                    {STUDENT_STATUS_LABEL[status]}
-                  </option>
-                ))}
-              </Select>
-            </label>
-            <label className={labelClass}>
-              Class
-              <Select name="cohortId" defaultValue={filters.cohortId}>
-                <option value="">Any class</option>
-                <option value={NO_COHORT}>Not placed in any class</option>
-                {options.cohorts.map((cohort) => (
-                  <option key={cohort.id} value={cohort.id}>
-                    {cohort.name}
-                    {cohort.termLabel ? ` · ${cohort.termLabel}` : ""} —{" "}
-                    {cohort.academicSessionName}
-                  </option>
-                ))}
-              </Select>
-            </label>
-            <label className={labelClass}>
-              Sort by
-              <Select name="sort" defaultValue={filters.sort}>
-                {STUDENT_SORTS.map((option) => (
-                  <option key={option.key} value={option.key}>
-                    {option.label}
-                  </option>
-                ))}
-              </Select>
-            </label>
-            {options.campuses.length > 0 ? (
-              <label className={labelClass}>
-                Campus
-                <Select name="campusId" defaultValue={filters.campusId}>
-                  <option value="">Any campus</option>
-                  <option value={NO_CAMPUS}>No campus</option>
-                  {options.campuses.map((campus) => (
-                    <option key={campus.id} value={campus.id}>
-                      {campus.name} ({campus.code})
-                    </option>
-                  ))}
-                </Select>
-              </label>
-            ) : null}
-          </div>
+          <StudentFilterFields filters={filters} options={options} showClass />
           <div className="flex flex-wrap items-center gap-3">
             <Button type="submit">Search</Button>
             {filtered ? (
@@ -267,107 +176,86 @@ export default async function StudentsPage({ searchParams }: PageProps) {
           </EmptyState>
         ) : (
           <>
-            <TableScroll minWidth="min-w-[52rem]">
-              <table className="w-full border-collapse text-left">
-                <thead className="bg-neutral-50">
-                  <tr className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
-                    <th className="py-2.5 pr-4 pl-3 font-medium">Student</th>
-                    <th className="py-2.5 pr-4 font-medium">Class</th>
-                    <th className="py-2.5 pr-4 font-medium">Admission</th>
-                    <th className="py-2.5 pr-4 font-medium">Status</th>
-                    <th className="py-2.5 pr-3 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-neutral-100">
-                  {page.rows.map((student) => (
-                    <tr key={student.id} className="align-top transition-colors hover:bg-neutral-50/60">
-                      <td className="py-3 pr-4 first:pl-3">
-                        <Link
-                          href={`${BASE}/${student.id}`}
-                          className="text-sm font-medium text-neutral-900 hover:underline"
-                        >
-                          {studentDisplayName(student)}
-                        </Link>
-                        <p className="font-mono text-xs text-neutral-500">{student.studentCode}</p>
-                        {student.campusName ? (
-                          <p className="text-xs text-neutral-400">{student.campusName}</p>
-                        ) : null}
-                      </td>
-                      <td className="py-3 pr-4 first:pl-3">
-                        <ClassCell student={student} />
-                      </td>
-                      <td className="py-3 pr-4 text-sm text-neutral-600">
-                        {student.admissionNumber ?? (
-                          <span className="text-neutral-400">No number</span>
-                        )}
-                        {student.admissionDate ? (
-                          <span className="block text-xs text-neutral-400">
-                            {DATE_FORMAT.format(student.admissionDate)}
-                          </span>
-                        ) : null}
-                      </td>
-                      <td className="py-3 pr-4 first:pl-3">
-                        <Badge tone={STATUS_TONE[student.status]}>
-                          {STUDENT_STATUS_LABEL[student.status]}
-                        </Badge>
-                      </td>
-                      <td className="py-3 pr-3">
-                        <div className="flex flex-col items-start gap-2">
-                          <Link href={`${BASE}/${student.id}`}>
-                            <Button type="button" variant="secondary">
-                              View
-                            </Button>
-                          </Link>
-                          {canEnrollFace ? (
-                            <Link
-                              href={`${BASE}/${student.id}/enroll-face`}
-                              className="text-xs text-neutral-600 underline underline-offset-2 hover:text-neutral-900"
-                            >
-                              Enroll face
-                            </Link>
-                          ) : null}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </TableScroll>
-
-            {page.pageCount > 1 ? (
-              <nav
-                aria-label="Directory pages"
-                className="mt-3 flex flex-wrap items-center justify-between gap-2"
-              >
-                {/* Links rather than buttons: a page of a list is a place, and
-                    a reader should be able to open page 3 in a new tab or come
-                    back to it from history. */}
-                {page.page > 1 ? (
-                  <Link href={`${BASE}${studentFilterQuery(filters, { page: page.page - 1 })}`}>
-                    <Button type="button" variant="secondary">
-                      ← Previous
-                    </Button>
-                  </Link>
-                ) : (
-                  <span className="px-3 py-2 text-sm text-neutral-400">← Previous</span>
-                )}
-                <p className="text-xs tabular-nums text-neutral-500">
-                  Page {page.page} of {page.pageCount}
-                </p>
-                {page.page < page.pageCount ? (
-                  <Link href={`${BASE}${studentFilterQuery(filters, { page: page.page + 1 })}`}>
-                    <Button type="button" variant="secondary">
-                      Next →
-                    </Button>
-                  </Link>
-                ) : (
-                  <span className="px-3 py-2 text-sm text-neutral-400">Next →</span>
-                )}
-              </nav>
-            ) : null}
+            <StudentDirectoryTable rows={page.rows} canEnrollFace={canEnrollFace} />
+            <StudentDirectoryPager
+              page={page}
+              filters={filters}
+              baseHref={BASE}
+              label="Directory pages"
+            />
           </>
         )}
       </Panel>
     </div>
+  );
+}
+
+/**
+ * The way in by class: every class of the current academic year, each opening
+ * onto its sections. The directory below stays exactly as it was — this is a
+ * second way to the same students, for when you know the class and not the
+ * name.
+ */
+function ClassesPanel({ classes, canSetUp }: { classes: StudentClassesView; canSetUp: boolean }) {
+  const { year, years, classes: cards, otherGroups } = classes;
+  return (
+    <Panel
+      title="Classes"
+      description={
+        year
+          ? `Manage students by class and section — ${year.name}${year.isCurrent ? " (current year)" : ""}.`
+          : "Manage students by class and section."
+      }
+      action={
+        years.length > 1 ? (
+          <Link
+            href={studentClassesHref(year?.id)}
+            className="rounded-sm text-xs text-neutral-600 underline underline-offset-2 hover:text-neutral-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900"
+          >
+            Other academic years
+          </Link>
+        ) : null
+      }
+    >
+      {!year ? (
+        <EmptyState>
+          No academic year is set up yet, so there are no classes to show.
+          {canSetUp ? (
+            <>
+              {" "}
+              <Link href="/dashboard/academic/sessions" className="font-medium text-neutral-900 underline">
+                Set up an academic year
+              </Link>
+              .
+            </>
+          ) : null}
+        </EmptyState>
+      ) : cards.length === 0 ? (
+        <EmptyState>
+          No classes found for {year.name}.
+          {canSetUp ? (
+            <>
+              {" "}
+              <Link href="/dashboard/academic/classes" className="font-medium text-neutral-900 underline">
+                Set up classes and sections
+              </Link>
+              .
+            </>
+          ) : null}
+        </EmptyState>
+      ) : (
+        <>
+          <ClassGrid classes={cards} yearId={year.id} />
+          {otherGroups > 0 ? (
+            <p className="text-xs text-neutral-500">
+              {otherGroups} {otherGroups === 1 ? "group" : "groups"} in {year.name}{" "}
+              {otherGroups === 1 ? "is" : "are"} not under a class, so{" "}
+              {otherGroups === 1 ? "it is" : "they are"} not shown here. Use the Class filter in the
+              directory to find {otherGroups === 1 ? "its" : "their"} students.
+            </p>
+          ) : null}
+        </>
+      )}
+    </Panel>
   );
 }
