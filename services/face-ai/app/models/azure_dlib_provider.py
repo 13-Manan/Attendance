@@ -48,7 +48,7 @@ import base64
 import binascii
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -62,10 +62,14 @@ from app.azure_face import (
     AzureFaceUnavailableError,
 )
 from app.models.azure_provider import (
+    _REASON_ORDER,
+    ENROLLMENT_PROFILE,
     GROUP_PROFILE,
     ClientFactory,
+    _attrs,
     _box,
     _face_size,
+    _metrics,
     assess_enrollment,
     evaluate_face,
     landmarks_from_azure,
@@ -85,6 +89,11 @@ from app.models.dlib_recognition import (
     LandmarkError,
     golden_chip,
 )
+from app.models.face_sharpness import (
+    MAX_ENROLLMENT_BLUR,
+    MEASURE_VERSION,
+    measure_blur,
+)
 from app.models.model_files import DLIB_ARTIFACTS, DLIB_RESNET, verify_all
 from app.models.opencv_provider import ImageDecodeError, ModelNotLoadedError
 from app.models.pipeline import COSINE_MATCHER, PipelineTimings, StageDescriptor
@@ -96,6 +105,8 @@ from app.schemas import (
     DetectEmbedImageSummary,
     FaceLandmarks,
     FaceQualityAssessment,
+    FaceQualityMetric,
+    FaceQualityReason,
     RejectedFace,
     ScoreCalibration,
     SessionImageInput,
@@ -135,6 +146,18 @@ DLIB_CALIBRATION = ScoreCalibration(
         CalibrationKnot(raw=1.0, calibrated=1.0),
     ],
     rawAmbiguityMargin=0.01,
+)
+
+
+#: Enrolment for this backend: Azure's enrolment profile, unchanged, except
+#: that Azure's blur rating no longer decides. It rises as a face gets
+#: smaller whether or not the face is blurred, so it refused ordinary webcam
+#: captures as blurry; blur is measured here instead, on the face, at the
+#: recogniser's scale (face_sharpness.py). Size, pose, exposure, occlusion
+#: and Azure's recognition-quality rating all still apply — and that last one
+#: still falls for real blur.
+DLIB_ENROLLMENT_PROFILE = replace(
+    ENROLLMENT_PROFILE, name="enrollment-dlib", accepted_blur=None
 )
 
 
@@ -506,10 +529,12 @@ class AzureDetectionOwnRecognitionProvider(FaceModelProvider):
 
     def assess_quality(self, image_base64: str) -> FaceQualityAssessment:
         try:
-            _, faces, _, _ = self._detect(image_base64)
+            prepared, faces, _, _ = self._detect(image_base64)
         except ImageDecodeError as error:
             return _refusal(str(error), face_count=0)
-        return assess_enrollment(faces)
+        assessment, blur = assess_dlib_enrollment(prepared, faces)
+        _log_enrollment_quality("quality", prepared, faces, assessment, blur)
+        return assessment
 
     # -- alignment and embedding --------------------------------------------
 
@@ -590,9 +615,11 @@ class AzureDetectionOwnRecognitionProvider(FaceModelProvider):
     def enroll_image(self, image_base64: str) -> EnrollmentOutcome:
         """One decode, one Detect, one embedding.
 
-        The quality gate is the azure backend's enrolment profile, applied
-        in original pixels. A face that passes it and still cannot be
-        aligned or embedded is refused as ``low_quality``, with no vector.
+        The quality gate is ``assess_dlib_enrollment``: Azure's attributes
+        for size, pose, exposure, occlusion and recognition quality, and this
+        service's own measurement of blur, all in original pixels. A face that
+        passes it and still cannot be embedded is refused as ``low_quality``,
+        with no vector.
         """
         try:
             prepared, faces, _, _ = self._detect(image_base64)
@@ -602,7 +629,8 @@ class AzureDetectionOwnRecognitionProvider(FaceModelProvider):
                 embedding=None,
                 aligned=False,
             )
-        assessment = assess_enrollment(faces)
+        assessment, blur = assess_dlib_enrollment(prepared, faces)
+        _log_enrollment_quality("enroll", prepared, faces, assessment, blur)
         if assessment.reason != "ok":
             return EnrollmentOutcome(
                 assessment=assessment, embedding=None, aligned=False
@@ -692,6 +720,115 @@ class AzureDetectionOwnRecognitionProvider(FaceModelProvider):
 
     def detect_and_embed(self, image: SessionImageInput) -> list[DetectedFace]:
         return self.analyze_image(image).faces
+
+
+def assess_dlib_enrollment(
+    prepared: PreparedImage, faces: list[dict[str, Any]]
+) -> tuple[FaceQualityAssessment, float | None]:
+    """Exactly one usable face, or a refusal naming the thing to fix.
+
+    Returns the assessment and the measured blur (None when it was not
+    measured). The order matters for what a person is told:
+
+    * Too small is decided before blur and blur is then not measured. A small
+      face has little detail at any focus, and "hold the camera steady" does
+      not fix a face that is too far away; "move closer" fixes both.
+    * Blur is measured on the face, at the recogniser's scale, against a
+      threshold calibrated on what blur costs the template. Not Azure's blur
+      rating: that tracks face size as much as focus.
+    * Everything else Azure reports is applied exactly as before.
+    """
+    if len(faces) != 1:
+        return assess_enrollment(faces), None
+    face = faces[0]
+    failed: set[FaceQualityReason] = set(
+        evaluate_face(face, DLIB_ENROLLMENT_PROFILE)
+    )
+    blur: float | None = None
+    detail: str | None = None
+    if "face_too_small" not in failed:
+        try:
+            blur = measure_blur(prepared.rgb, _five_points(face))
+        except LandmarkError as error:
+            # Enrolment could not embed this face either; say why now.
+            failed.add("low_quality")
+            detail = f"The face could not be aligned: {error}."
+        else:
+            if blur > MAX_ENROLLMENT_BLUR:
+                failed.add("blurred")
+    reasons = [r for r in _REASON_ORDER if r in failed]
+    metrics = _metrics(face).model_copy(
+        update={
+            "blur": (
+                FaceQualityMetric.measured(blur, f"blur_effect_v{MEASURE_VERSION}")
+                if blur is not None
+                else FaceQualityMetric.unavailable()
+            )
+        }
+    )
+    return (
+        FaceQualityAssessment(
+            reason=reasons[0] if reasons else "ok",
+            qualityScore=quality_score(face),
+            faceCount=1,
+            metrics=metrics,
+            reasons=reasons,
+            detail=detail,
+        ),
+        blur,
+    )
+
+
+def _log_enrollment_quality(
+    route: str,
+    prepared: PreparedImage,
+    faces: list[dict[str, Any]],
+    assessment: FaceQualityAssessment,
+    blur: float | None,
+) -> None:
+    """One line per enrolment decision, so a refusal can be explained from
+    the logs instead of guessed at.
+
+    Sizes, levels and scores only. No pixels, no landmark positions, no
+    vector, nothing that identifies anybody — and apps/web does not audit
+    quality refusals, so without this line nobody could tell a strict
+    threshold from a bad camera.
+    """
+    sent_w = round(prepared.width / prepared.scale_x)
+    sent_h = round(prepared.height / prepared.scale_y)
+    face_part = "face=-"
+    if len(faces) == 1:
+        face = faces[0]
+        rect = face.get("faceRectangle") or {}
+        attrs = _attrs(face)
+        pose = attrs.get("headPose") or {}
+        azure_blur = attrs.get("blur") or {}
+        width, height = float(rect.get("width", 0)), float(rect.get("height", 0))
+        face_part = (
+            f"face={width:.0f}x{height:.0f} "
+            f"blur={'-' if blur is None else f'{blur:.3f}'} "
+            f"max_blur={MAX_ENROLLMENT_BLUR:.2f} measure=v{MEASURE_VERSION} "
+            f"azure_blur={azure_blur.get('blurLevel', '-')}"
+            f"({float(azure_blur.get('value', 0.0)):.2f}) "
+            f"azure_quality={attrs.get('qualityForRecognition', '-')} "
+            f"exposure={(attrs.get('exposure') or {}).get('exposureLevel', '-')} "
+            f"yaw={float(pose.get('yaw', 0.0)):.0f} "
+            f"pitch={float(pose.get('pitch', 0.0)):.0f} "
+            f"roll={float(pose.get('roll', 0.0)):.0f}"
+        )
+    logger.info(
+        "enrolment quality: route=%s decision=%s reasons=%s image=%dx%d "
+        "sent=%dx%d faces=%d %s",
+        route,
+        assessment.reason,
+        ",".join(assessment.reasons) or "-",
+        prepared.width,
+        prepared.height,
+        sent_w,
+        sent_h,
+        len(faces),
+        face_part,
+    )
 
 
 def _five_points(face: dict[str, Any]) -> list[tuple[float, float]]:

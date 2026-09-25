@@ -124,7 +124,7 @@ export const HUMAN_REASON: Record<FaceQualityReason, string> = {
   no_face: "No face was detected. Look at the camera and try again.",
   multiple_faces: "More than one face was detected. Make sure only the student is in frame.",
   face_too_small: "Face is too small in the frame. Move closer to the camera.",
-  blurred: "Image is too blurred. Hold the camera steady.",
+  blurred: "The face is blurred. Hold the camera steady and let it focus before capturing.",
   too_dark: "Image is too dark. Move to a well-lit area.",
   too_bright: "Image is too bright. Move out of direct light or away from a window.",
   occluded: "Face is partially covered. Remove any mask, hair, or object blocking the face.",

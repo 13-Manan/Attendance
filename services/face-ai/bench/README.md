@@ -301,6 +301,15 @@ That model is **not production-approved**; the calibration does not change
 that. The manifest-driven accuracy harness (`python -m bench`) still has no
 consented classroom dataset to run on.
 
+**Enrolment sharpness (2026-09-25):** `bench/calibrate_enrollment_sharpness.py`
+calibrates the blur threshold the production backend
+(`azure_detection_own_recognition`) enrols against, through the production
+measure and the production recogniser, on 346 portraits kept outside the
+repository with their Azure detections recorded alongside. Its criterion —
+refuse 95% of captures blurred by 1.5 recogniser pixels, the first level that
+measurably costs a template — gave 0.6525; the threshold is 0.65. Results and
+limits: [`../docs/CALIBRATION.md`](../docs/CALIBRATION.md#enrolment-sharpness).
+
 The mock backend is a deterministic hash stub: running the harness against it
 produces ~100% false rejection, which is the correct result for a stub and
 proves only that the harness works. See

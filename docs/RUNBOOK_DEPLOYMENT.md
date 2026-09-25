@@ -572,6 +572,24 @@ cleared for production logs a warning on every boot as well — deliberately
 loud, because a stub running where people believe real recognition is
 happening is the failure worth shouting about.
 
+Every enrolment decision is logged on one line too — sizes, levels and
+scores, never pixels, landmark positions or a vector:
+
+```
+INFO app.models.azure_dlib_provider enrolment quality: route=enroll
+  decision=blurred reasons=blurred image=1280x720 sent=1280x720 faces=1
+  face=214x214 blur=0.702 max_blur=0.65 measure=v1 azure_blur=medium(0.31)
+  azure_quality=high exposure=goodExposure yaw=-3 pitch=4 roll=1
+```
+
+When somebody reports "it keeps saying blurry", this line answers whether it
+was: `blur` against `max_blur` is the decision; `face` says whether they were
+simply too far away (under 100px is refused as too small, not blurred);
+`azure_blur` is recorded only to compare with, and no longer decides. Quality
+refusals are not written to the audit log in apps/web, so this is the only
+record of them. How the threshold was set:
+`services/face-ai/docs/CALIBRATION.md`, "Enrolment sharpness".
+
 | Symptom in the logs | What it means | What to do |
 |---|---|---|
 | Weights checksum mismatch | The image's model layer is not the one that was built and verified | Roll back to the previous face-ai digest; rebuild. Do not "re-pull" |

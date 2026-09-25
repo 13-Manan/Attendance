@@ -18,6 +18,7 @@ the fake decides which faces are "in" them.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import io
 import logging
@@ -56,6 +57,8 @@ from app.models.model_files import (
 )
 from app.models.opencv_provider import ImageDecodeError, ModelNotLoadedError
 from app.schemas import BoundingBox, SessionImageInput
+from tests.synthetic_face import gaussian_blur as blur_face
+from tests.synthetic_face import render_face
 from tests.test_dlib_recognition import landmarks as face_landmarks
 
 ENDPOINT = "https://unit-test-face.cognitiveservices.azure.com/"
@@ -1015,3 +1018,192 @@ def _at_cosine(vector: list[float], target: float) -> list[float]:
     perpendicular /= np.linalg.norm(perpendicular)
     out = target * base + math.sqrt(1 - target**2) * perpendicular
     return (out / np.linalg.norm(out)).tolist()
+
+
+# ---------------------------------------------------------------------------
+# The enrolment blur gate, end to end
+# ---------------------------------------------------------------------------
+#
+# The regression this section exists for: enrolment used to refuse any face
+# Azure did not rate blur "low", and Azure's rating rises as a face gets
+# smaller whatever its focus — so ordinary webcam captures were refused with
+# "hold the camera steady". Blur is now measured on the face itself
+# (app/models/face_sharpness.py). Azure is faked; the pixels are real.
+
+
+def encoded(frame: np.ndarray, quality: int = 92) -> str:
+    ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    assert ok
+    return base64.b64encode(buffer.tobytes()).decode()
+
+
+def as_azure_rates_it(
+    detection: dict[str, Any],
+    *,
+    blur: tuple[str, float] = ("low", 0.0),
+    quality: str = "high",
+    exposure: str = "goodExposure",
+    yaw: float = 0.0,
+) -> dict[str, Any]:
+    rated = copy.deepcopy(detection)
+    attributes = rated["faceAttributes"]
+    attributes["blur"] = {"blurLevel": blur[0], "value": blur[1]}
+    attributes["qualityForRecognition"] = quality
+    attributes["exposure"]["exposureLevel"] = exposure
+    attributes["headPose"]["yaw"] = yaw
+    return rated
+
+
+def test_a_sharp_face_azure_rates_blurred_is_enrolled():
+    # A 130px face: the size where Azure rated sharp faces "medium" most of
+    # the time. This is the capture that used to be refused.
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    frame, detection = render_face(130)
+    fake.faces = [as_azure_rates_it(detection, blur=("medium", 0.45))]
+
+    outcome = provider.enroll_image(encoded(frame))
+
+    assert outcome.assessment.reason == "ok"
+    assert outcome.embedding is not None and len(outcome.embedding) == 128
+    blur = outcome.assessment.metrics.blur
+    assert blur.status == "measured" and blur.unit == "blur_effect_v1"
+    assert blur.value <= 0.65
+
+
+def test_a_blurred_face_is_refused_even_when_azure_rates_it_sharp():
+    # The gate was not loosened, it was moved: this one only a measurement
+    # of the face itself catches.
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    frame, detection = render_face(220)
+    fake.faces = [as_azure_rates_it(detection, blur=("low", 0.0))]
+
+    outcome = provider.enroll_image(encoded(blur_face(frame, 220, 2.5)))
+
+    assert outcome.assessment.reason == "blurred"
+    assert outcome.embedding is None
+    assert outcome.assessment.metrics.blur.value > 0.65
+
+
+def test_camera_shake_is_refused():
+    from tests.synthetic_face import motion_blur
+
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    frame, detection = render_face(220)
+    fake.faces = [detection]
+
+    outcome = provider.enroll_image(encoded(motion_blur(frame, 220, 16, 45)))
+
+    assert outcome.assessment.reason == "blurred"
+
+
+def test_a_small_face_is_told_to_move_closer_not_to_hold_still():
+    # Blurred AND small. "Hold the camera steady" does not fix a face that
+    # is too far away; "move closer" fixes both — so blur is not judged.
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    frame, detection = render_face(80)
+    fake.faces = [as_azure_rates_it(detection, blur=("high", 0.9))]
+
+    outcome = provider.enroll_image(encoded(blur_face(frame, 80, 2.5)))
+
+    assert outcome.assessment.reasons == ["face_too_small"]
+    assert outcome.assessment.metrics.blur.status == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "rating, reason",
+    [
+        ({"quality": "medium"}, "low_quality"),
+        ({"exposure": "underExposure"}, "too_dark"),
+        ({"exposure": "overExposure"}, "too_bright"),
+        ({"yaw": 45.0}, "bad_angle"),
+    ],
+)
+def test_every_other_enrolment_check_still_applies(rating, reason):
+    # Only the blur decision moved. Azure's recognition-quality rating, which
+    # also falls for real blur, still has to be "high" to enrol.
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    frame, detection = render_face(200)
+    fake.faces = [as_azure_rates_it(detection, **rating)]
+
+    outcome = provider.enroll_image(encoded(frame))
+
+    assert outcome.assessment.reason == reason
+    assert outcome.embedding is None
+
+
+def test_two_faces_are_still_refused_before_anything_is_measured():
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    frame, detection = render_face(200)
+    fake.faces = [detection, copy.deepcopy(detection)]
+
+    outcome = provider.enroll_image(encoded(frame))
+
+    assert outcome.assessment.reason == "multiple_faces"
+
+
+@pytest.mark.parametrize("sigma", [0.0, 2.5])
+def test_the_quality_check_and_enrolment_agree(sigma):
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    frame, detection = render_face(180)
+    fake.faces = [detection]
+    image = encoded(blur_face(frame, 180, sigma) if sigma else frame)
+
+    assert provider.assess_quality(image).reason == (
+        provider.enroll_image(image).assessment.reason
+    )
+
+
+def test_each_enrolment_decision_is_logged_without_biometric_data(caplog):
+    fake = FakeDetect()
+    provider = make_provider(fake)
+    frame, detection = render_face(200)
+    fake.faces = [as_azure_rates_it(detection, blur=("medium", 0.31))]
+    image = encoded(blur_face(frame, 200, 2.5))
+
+    with caplog.at_level(logging.INFO, logger="app.models.azure_dlib_provider"):
+        provider.enroll_image(image)
+
+    messages = [record.getMessage() for record in caplog.records]
+    lines = [m for m in messages if "enrolment quality" in m]
+    assert len(lines) == 1
+    line = lines[0]
+    for expected in (
+        "route=enroll",
+        "decision=blurred",
+        "image=1280x720",
+        "sent=1280x720",
+        "face=200x200",
+        "max_blur=0.65",
+        "measure=v1",
+        "azure_blur=medium(0.31)",
+        "azure_quality=high",
+    ):
+        assert expected in line, expected
+    # What it must never carry: the key, the pixels, the landmark positions.
+    assert DUMMY_KEY not in line
+    assert image[:40] not in line
+    for name, point in detection["faceLandmarks"].items():
+        assert name not in line
+        assert f"{point['x']:.1f}" not in line
+
+
+def test_the_enroll_route_reports_blur_and_accepts_a_sharp_face(routed):
+    fake, client = routed
+    frame, detection = render_face(160)
+    fake.faces = [as_azure_rates_it(detection, blur=("medium", 0.4))]
+
+    sharp = client.post("/v1/enroll", json={"imageBase64": encoded(frame)}).json()
+    assert sharp["accepted"] is True
+
+    blurred_image = encoded(blur_face(frame, 160, 2.5))
+    blurred = client.post("/v1/enroll", json={"imageBase64": blurred_image}).json()
+    assert blurred["accepted"] is False
+    assert blurred["assessment"]["reason"] == "blurred"
+    assert "embedding" not in blurred

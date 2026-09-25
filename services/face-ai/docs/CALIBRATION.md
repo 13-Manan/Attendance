@@ -247,6 +247,152 @@ marked present as somebody else — is preserved with the same margin, and the
 one ranking change lands below the review floor, which is where an uncertain
 face is supposed to land.
 
+## Enrolment sharpness
+
+Enrolment refuses a blurred photograph, because a template is compared every
+day for a term and a blurred one costs the student every one of those days.
+This section is about how "blurred" is decided, because until 2026-09-25 it
+was decided wrongly.
+
+### What went wrong
+
+Enrolment accepted a face only if Azure rated its `blur` attribute `low`.
+That rating turns out to track **how many pixels the face occupies**, not
+whether it is in focus. Sharp portraits, merely resampled smaller (no blur
+added), as rated by live Azure:
+
+| Face width | Azure rated blur `low` | Median Azure blur value |
+| --- | --- | --- |
+| 96px | 37% | 0.47 |
+| 64px | 0% | 0.44 |
+| 48px | 0% | 0.63 |
+
+It also rises for things that are not blur: a backlit face scored 0.74, a
+dark one 0.52, heavy JPEG 0.57. Enrolment's size floor is 100px, so faces from
+100px to about 200px — a webcam capture from a normal distance — passed the
+size check and were then refused as "blurry", with the advice "hold the camera
+steady". On live Azure, with real portraits prepared the way the browser
+prepares a camera capture (JPEG quality 92):
+
+| Capture | Refused as blurred |
+| --- | --- |
+| Sharp face, 120px | **28 of 60** |
+| Sharp face, 180px | 4 of 60 |
+| Sharp face, 260px | 0 of 60 |
+
+Azure's `qualityForRecognition` does not share the bias — sharp 96px faces
+were rated `high` 151 times out of 151 — and it still falls for real blur (a
+1.2px blur at 64px: `medium` 249 times out of 251). It still has to be
+`high` to enrol.
+
+### What is measured instead
+
+`app/models/face_sharpness.py`, on the decoded original — never the preview,
+never the copy re-encoded for Azure:
+
+1. The face is aligned into dlib's template frame from the same five points
+   the recogniser uses, **after** being reduced to the recogniser's scale by
+   area averaging. Measuring on dlib's own chip was tried first and rejected:
+   its extraction samples from a power-of-two pyramid, and a Laplacian of the
+   chip read 243, 769 and 227 at faces of 100, 200 and 256px — a measurement
+   of the resampler.
+2. Only an ellipse inside the face is measured, brows to mouth. A rectangle's
+   lower corners reach past the jaw, and a busy background there moved the
+   measure of one face by 0.06; inside the ellipse, 0.002.
+3. The **blur effect** (Crete-Roffet et al., 2007): the share of the face's
+   gradient that survives being blurred again. It is a ratio of the image
+   with itself, so exposure and contrast cancel.
+4. Over the strongest tenth of the gradients only — lids, brows, nostrils,
+   lips. Over every pixel, skin smoothing (a phone's beauty mode; plausibly a
+   child's face) was read as blur 17% of the time; over the strongest edges,
+   4%.
+5. In four directions, the worst of which decides. Along the two axes alone,
+   an 8px diagonal shake was caught about 70% of the time, against 100%
+   horizontally.
+
+A face under 100px is refused as **too small** before blur is measured. A
+small face has little detail at any focus, and "move closer" fixes both.
+
+### What blur costs a template, and the threshold
+
+The threshold is set by what blur costs recognition, not by how blur looks.
+Each of the 101 enrolment photographs with a second photograph of the same
+person was resized to a capture-sized face (100 to 400px), degraded at that
+scale, JPEG-encoded and embedded; the loss of genuine similarity against the
+untouched second photograph is the cost. Blur is given in recogniser pixels,
+so a level means the same at every face size. 346 photographs in all were
+measured (`bench/calibrate_enrollment_sharpness.py`).
+
+| Condition | Mean cost (raw) | Refused at 0.65 |
+| --- | --- | --- |
+| clean, JPEG 92 / 75 / 50 | −0.0001 / −0.0002 / −0.0005 | 0.5% / 0.5% / 0.4% |
+| dark (×0.45) / bright (×1.35) | −0.0011 / −0.0053 | 0.4% / 0.2% |
+| skin smoothing | −0.0023 | 3.5% |
+| Gaussian blur 0.75px | −0.0010 | 12% |
+| Gaussian blur 1.0px | −0.0023 | 41% |
+| Gaussian blur 1.25px | −0.0042 | 79% |
+| **Gaussian blur 1.5px** | **−0.0065** | **96%** |
+| Gaussian blur 2.0px / 3.0px | −0.0113 / −0.0208 | 100% / 100% |
+| camera shake 5px / 8px, any direction | −0.0047 / −0.0119 | 80% / 99.5% |
+| defocus 2.5px | −0.0054 | 89% |
+| blur under sensor noise | −0.0095 | 96% |
+
+The criterion was fixed before the number was read: **refuse 95% of captures
+blurred by 1.5 recogniser pixels**, the first level that costs a template more
+than 0.005 of genuine similarity — about 0.034 on the product's calibrated
+scale, and 6.6 points of present-rate. That lands at 0.6525; the threshold is
+**0.65**. Below 1.5px, blur is refused in proportion to what it costs, and
+0.75px — a cost of 0.001 — is mostly accepted.
+
+The decision does not move with face size:
+
+| Face | Clean refused | Clean at JPEG 50 | Dark | Blur 1.5px refused | Blur 2.0px | Shake 8px |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100px | 0.6% | 0.6% | 0.6% | 96.5% | 100% | 98.5% |
+| 128px | 0.6% | 0.6% | 0.6% | 96.0% | 100% | 99.7% |
+| 160px | 0.7% | 0.7% | 0.7% | 95.7% | 100% | 99.7% |
+| 200px | 0.7% | 0.4% | 0.4% | 95.6% | 100% | 100% |
+| 256px | 0% | 0% | 0% | 95.1% | 100% | 100% |
+| 400px | 0% | 0% | 0% | 97.4% | 100% | 99.1% |
+
+Every clean capture refused came from **two** source photographs, refused
+alike at every size. One Azure also rates blurred (0.45 at full resolution);
+the other, inspected by eye, is a heavily noise-reduced photograph with no
+crisp edge on the face. On the rest, nothing clean was refused.
+
+A blurred enrolment template does not drift towards other students — at 3px
+of blur the highest impostor score was 0.937 against 0.937 unblurred, and none
+reached the present knot. The harm is to the student: their genuine score
+falls (median 0.970 sharp, 0.959 at 2px), and they are sent to review.
+
+### Verified on live Azure, through the production code
+
+Real portraits, prepared as the browser prepares a capture, one live Detect
+call each; old and new decisions taken from the same Azure response:
+
+| Capture | Old gate accepted | New gate accepted |
+| --- | --- | --- |
+| sharp, 120px | 32 / 60 | **60 / 60** |
+| sharp, 180px | 56 / 60 | **60 / 60** |
+| sharp, 260px | 60 / 60 | 60 / 60 |
+| blurred 2px, 180px | 0 / 60 | **0 / 60** |
+| shaken 8px at 40°, 180px | 0 / 60 | **0 / 60** |
+
+### What this does not establish
+
+Everything in "What this does NOT establish" above applies here too — adult
+portraits only, no children, no real classroom or webcam captures. Two things
+specific to this measure:
+
+- **Children.** A child's skin is smoother than an adult's. Measuring over the
+  strongest edges was chosen partly for this, and simulated skin smoothing is
+  refused 3.5% of the time — but no child's photograph has been measured.
+- **Real camera softness is simulated.** Webcam optics, noise reduction and
+  focus hunting were approximated by Gaussian, motion and disc blurs, sensor
+  noise and bilateral smoothing. The line every refusal writes to the logs
+  (`enrolment quality: …`, docs/RUNBOOK_DEPLOYMENT.md) exists so that real
+  captures can be checked against this table.
+
 ## Reproducing this
 
 The evaluation scripts and corpora live outside this repository (they contain
@@ -259,6 +405,9 @@ photographs). What is committed here is what production depends on:
   every knot;
 - the alignment offset and the golden self-test values, in
   `app/models/dlib_recognition.py`.
+- the enrolment blur measure and its threshold, in
+  `app/models/face_sharpness.py`, and the sweep that calibrates it, in
+  `bench/calibrate_enrollment_sharpness.py`.
 
 To recalibrate: measure on your own population, change the two middle knots,
 change the calibration `id`, and expect to re-examine every result recorded

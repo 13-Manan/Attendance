@@ -107,7 +107,10 @@ class AzureQualityProfile:
     name: str
     min_face_px: float
     accepted_recognition_quality: frozenset[str]
-    accepted_blur: frozenset[str]
+    #: Azure blur levels accepted. ``None`` when the backend measures blur
+    #: itself and Azure's rating must not decide — see face_sharpness.py for
+    #: why the dlib backend's enrolment does exactly that.
+    accepted_blur: frozenset[str] | None
     max_abs_yaw_deg: float
     max_abs_pitch_deg: float
     max_abs_roll_deg: float
@@ -186,7 +189,11 @@ def evaluate_face(
     elif exposure == "overExposure":
         failed.add("too_bright")
     blur = (attrs.get("blur") or {}).get("blurLevel")
-    if blur is not None and blur not in profile.accepted_blur:
+    if (
+        profile.accepted_blur is not None
+        and blur is not None
+        and blur not in profile.accepted_blur
+    ):
         failed.add("blurred")
     occlusion = attrs.get("occlusion") or {}
     mask = attrs.get("mask") or {}

@@ -120,6 +120,19 @@ people score above 0.85. The service publishes a measured map
 threshold sees a score. A production embedding backend that publishes no map
 is refused rather than read raw. See [CALIBRATION.md](CALIBRATION.md).
 
+### Enrolment quality
+
+A photograph is enrolled only if it holds exactly one face, at least 100px,
+facing the camera, properly exposed, uncovered, rated `high` for recognition
+by Azure — and not blurred. **Blur is the one quality this service measures
+itself** rather than taking Azure's rating: Azure's `blur` attribute rises as
+a face gets smaller whatever its focus, and refused sharp webcam captures as
+"blurry" (28 of 60 at 120px). The measure (`app/models/face_sharpness.py`) is
+taken on the face alone, at the recogniser's scale, over its strongest edges,
+in four directions; its threshold is set by what blur costs a template. A face
+that is too small is told to move closer before blur is judged at all. The
+evidence is in [CALIBRATION.md](CALIBRATION.md#enrolment-sharpness).
+
 ## Failure behaviour
 
 The rule: **an outage is an outage.** It never becomes "no faces found", which
