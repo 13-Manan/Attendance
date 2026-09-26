@@ -38,7 +38,18 @@ const ERROR_ID = "login-error";
  * error surfaces. The server action, aria wiring, `attempt` remount trick,
  * `autoFocus` policy and `readOnly` gating are unchanged from what shipped.
  */
-export function LoginForm({ next }: { next: string }) {
+export function LoginForm({
+  next,
+  school = null,
+}: {
+  next: string;
+  /**
+   * Set on a school's student sign-in: the field asks for the student ID, and
+   * the institution it is read within travels with the form. Null for the
+   * email sign-in staff use.
+   */
+  school?: { id: string; name: string } | null;
+}) {
   const [state, formAction, pending] = useActionState(login, initialState);
   const [showPassword, setShowPassword] = useState(false);
 
@@ -60,28 +71,55 @@ export function LoginForm({ next }: { next: string }) {
           trusted one. */}
       <input type="hidden" name="next" value={next} />
 
-      <Field label="Email" htmlFor="email">
-        <Input
-          key={`email-${attempt}`}
-          id="email"
-          name="email"
-          type="email"
-          autoComplete="email"
-          inputMode="email"
-          autoCapitalize="none"
-          spellCheck={false}
-          required
-          defaultValue={state.email ?? ""}
-          placeholder="you@institution.edu"
-          // On arrival, the cursor belongs here. After a failure it belongs in
-          // the password box below, which is the field there is any point
-          // changing.
-          autoFocus={!hasError}
-          readOnly={pending}
-          aria-invalid={fieldsInvalid || undefined}
-          aria-describedby={hasError ? ERROR_ID : undefined}
-        />
-      </Field>
+      {school ? (
+        <>
+          {/* Which institution the student ID is read within. Checked again on
+              the server, which looks the ID up inside it and nowhere else. */}
+          <input type="hidden" name="school" value={school.id} />
+          <Field label="Student ID" htmlFor="studentId">
+            <Input
+              key={`studentId-${attempt}`}
+              id="studentId"
+              name="studentId"
+              type="text"
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              required
+              maxLength={64}
+              defaultValue={state.studentId ?? ""}
+              placeholder="e.g. 013"
+              autoFocus={!hasError}
+              readOnly={pending}
+              aria-invalid={fieldsInvalid || undefined}
+              aria-describedby={hasError ? ERROR_ID : undefined}
+            />
+          </Field>
+        </>
+      ) : (
+        <Field label="Email" htmlFor="email">
+          <Input
+            key={`email-${attempt}`}
+            id="email"
+            name="email"
+            type="email"
+            autoComplete="email"
+            inputMode="email"
+            autoCapitalize="none"
+            spellCheck={false}
+            required
+            defaultValue={state.email ?? ""}
+            placeholder="you@institution.edu"
+            // On arrival, the cursor belongs here. After a failure it belongs in
+            // the password box below, which is the field there is any point
+            // changing.
+            autoFocus={!hasError}
+            readOnly={pending}
+            aria-invalid={fieldsInvalid || undefined}
+            aria-describedby={hasError ? ERROR_ID : undefined}
+          />
+        </Field>
+      )}
 
       <Field label="Password" htmlFor="password">
         <Input

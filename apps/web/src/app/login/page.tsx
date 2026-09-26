@@ -1,7 +1,14 @@
+import Link from "next/link";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { getCurrentUser } from "@/modules/auth-tenancy/session";
 import { safeNextPath } from "@/modules/auth-tenancy/redirect";
+import {
+  SCHOOL_COOKIE_NAME,
+  normalizeSchoolId,
+} from "@/modules/auth-tenancy/student-login-policy";
+import { getInstitutionIdentity } from "@/modules/institutions/repository";
 import { InstallAppButton } from "@/components/pwa/install-app-button";
 import { LoginForm } from "./login-form";
 
@@ -10,7 +17,7 @@ export const metadata: Metadata = {
 };
 
 interface PageProps {
-  searchParams: Promise<{ next?: string; signedOut?: string }>;
+  searchParams: Promise<{ next?: string; signedOut?: string; school?: string; staff?: string }>;
 }
 
 /**
@@ -27,13 +34,28 @@ interface PageProps {
  * and status region semantics below are exactly what shipped before.
  */
 export default async function LoginPage({ searchParams }: PageProps) {
-  const { next, signedOut } = await searchParams;
+  const { next, signedOut, school, staff } = await searchParams;
   const safeNext = safeNextPath(next);
 
   // Already signed in: honour the same `next` rather than always landing on
   // the dashboard, so a bookmarked deep link survives a visit to /login.
   const user = await getCurrentUser();
   if (user) redirect(safeNext);
+
+  // A student signs in with their student ID, read within one institution:
+  // the school's student sign-in link names it, and a browser that has signed
+  // a student in before remembers it. Staff sign in with their email exactly
+  // as before; `?staff=1` asks for that form on a browser that remembers a
+  // school. The name shown is the only thing a link reveals, and a link is
+  // what the school hands out.
+  const linked = normalizeSchoolId(school);
+  const remembered = normalizeSchoolId((await cookies()).get(SCHOOL_COOKIE_NAME)?.value);
+  const schoolId = linked ?? (staff === "1" ? null : remembered);
+  const institution = schoolId ? await getInstitutionIdentity(schoolId) : null;
+  const studentScope = institution && schoolId ? { id: schoolId, name: institution.name } : null;
+  const badLink = Boolean(school) && !(linked && institution);
+  const withNext = (query: string) =>
+    `/login?${query}${next ? `&next=${encodeURIComponent(safeNext)}` : ""}`;
 
   return (
     <main
@@ -106,13 +128,15 @@ export default async function LoginPage({ searchParams }: PageProps) {
                 className="text-2xl font-semibold tracking-tight text-neutral-900"
                 style={{ color: "var(--color-text-primary)" }}
               >
-                Sign in
+                {studentScope ? "Student sign-in" : "Sign in"}
               </h1>
               <p
                 className="text-sm text-neutral-500"
                 style={{ color: "var(--color-text-secondary)" }}
               >
-                Use your institution account to continue.
+                {studentScope
+                  ? `${studentScope.name} · for students and parents`
+                  : "Use your institution account to continue."}
               </p>
             </div>
           </header>
@@ -129,6 +153,15 @@ export default async function LoginPage({ searchParams }: PageProps) {
             </p>
           ) : null}
 
+          {badLink ? (
+            <p
+              role="status"
+              className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+            >
+              This student sign-in link is not valid. Ask your school for the link.
+            </p>
+          ) : null}
+
           <div
             className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm sm:p-6"
             style={{
@@ -137,8 +170,23 @@ export default async function LoginPage({ searchParams }: PageProps) {
               boxShadow: "var(--elev-1)",
             }}
           >
-            <LoginForm next={safeNext} />
+            <LoginForm next={safeNext} school={studentScope} />
           </div>
+
+          <p className="text-center text-sm lg:text-left">
+            {studentScope ? (
+              <Link href={withNext("staff=1")} className="text-neutral-600 underline underline-offset-2">
+                Staff sign-in with email
+              </Link>
+            ) : remembered && !badLink ? (
+              <Link
+                href={withNext(`school=${encodeURIComponent(remembered)}`)}
+                className="text-neutral-600 underline underline-offset-2"
+              >
+                Student or parent? Sign in with the student ID
+              </Link>
+            ) : null}
+          </p>
 
           <p
             className="text-center text-xs leading-relaxed text-neutral-500 lg:text-left"

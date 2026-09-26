@@ -281,7 +281,13 @@ test("reading a login is tenant-scoped and never returns a secret", { skip: SKIP
 
   const own = await mod.getStudentLogin(admin(), "slp-stu-1");
   assert.equal(own?.email, "read@student.test");
-  assert.equal(Object.keys(own!).sort().join(","), "email,status,userId");
+  // An allowlist, so a new field is a decision rather than an accident: what
+  // the panel shows about a login, and never a password, hash or token.
+  assert.equal(
+    Object.keys(own!).sort().join(","),
+    "email,institutionId,lastLoginAt,loginId,status,studentOnRoll,userId",
+  );
+  assert.ok(!/password|hash|token/i.test(JSON.stringify(own)), "a secret-shaped field was returned");
 
   const foreign = await mod.getStudentLogin(admin(), "slp-stu-x");
   assert.equal(foreign, null, "another institution's student must read as null");

@@ -94,3 +94,34 @@ test("the clock is a parameter, so expiry is testable without waiting a week", (
   assert.equal(checkSessionUsable(session, NOW), null);
   assert.equal(checkSessionUsable(session, new Date(LATER.getTime() + 1)), "expired");
 });
+
+test("a student's account stops working while the student is archived", () => {
+  // The login itself is untouched and the history with it; the student being
+  // off roll is enough, on the very next request, on every device.
+  for (const status of ["INACTIVE", "TRANSFERRED", "COMPLETED"]) {
+    assert.equal(
+      checkSessionUsable(
+        { expiresAt: LATER, revokedAt: null, user: { status: "ACTIVE", studentProfile: { status } } },
+        NOW,
+      ),
+      "account_inactive",
+      status,
+    );
+  }
+  assert.equal(
+    checkSessionUsable(
+      { expiresAt: LATER, revokedAt: null, user: { status: "ACTIVE", studentProfile: { status: "ACTIVE" } } },
+      NOW,
+    ),
+    null,
+  );
+});
+
+test("a staff account, which has no student profile, is judged exactly as before", () => {
+  for (const studentProfile of [undefined, null]) {
+    assert.equal(
+      checkSessionUsable({ expiresAt: LATER, revokedAt: null, user: { status: "ACTIVE", studentProfile } }, NOW),
+      null,
+    );
+  }
+});

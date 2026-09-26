@@ -1,4 +1,5 @@
 import type { SessionUser } from "@/modules/auth-tenancy/types";
+import { isPlaceholderLoginEmail } from "@/modules/auth-tenancy/student-login-policy";
 import { SyncStatusBadge } from "@/components/offline/sync-status-badge";
 import { UserMenu } from "./user-menu";
 
@@ -19,10 +20,13 @@ import { UserMenu } from "./user-menu";
 export function Topbar({
   user,
   institutionName = null,
+  accountLabel,
 }: {
   user: SessionUser;
   /** `null` for a platform-level account, which is not one institution's. */
   institutionName?: string | null;
+  /** Shown under the name instead of the email — a student account's ID. */
+  accountLabel?: string;
 }) {
   // `print:hidden` — app chrome is not part of a printed report. Affects the
   // print stylesheet only; the screen is unchanged.
@@ -44,7 +48,9 @@ export function Topbar({
         <SyncStatusBadge />
         <UserMenu
           name={user.name}
-          email={user.email}
+          email={
+            accountLabel ?? (isPlaceholderLoginEmail(user.email) ? "Student account" : user.email)
+          }
           roleNames={user.roles.map((role) => role.name)}
           institutionName={institutionName}
         />

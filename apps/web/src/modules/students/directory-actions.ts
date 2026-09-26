@@ -23,7 +23,12 @@ import {
   updateStudentForRequest,
 } from "./directory-service";
 import { STUDENT_STATUS_LABEL, StudentError, type StudentStatus } from "./directory-types";
-import { provisionStudentLogin, resetStudentLoginPassword } from "./login-provisioning";
+import {
+  getStudentLogin,
+  provisionStudentLogin,
+  resetStudentLoginPassword,
+  setStudentLoginEnabled,
+} from "./login-provisioning";
 import { studentDisplayName } from "./types";
 import { parseSectionReturnPath } from "./class-navigation-paths";
 import { studentOriginPath } from "./record-origin";
@@ -203,7 +208,8 @@ export async function removeStudentClassAction(
  */
 export interface StudentLoginFormState {
   error: string | null;
-  issued: { email: string; password: string; notice: string } | null;
+  /** `loginId` is the student ID the password goes with; `email` a real address, if the account has one. */
+  issued: { loginId: string; email: string | null; password: string; notice: string } | null;
 }
 
 export async function provisionStudentLoginAction(
@@ -219,7 +225,12 @@ export async function provisionStudentLoginAction(
     refresh();
     return {
       error: null,
-      issued: { email: result.account.email, password: result.password, notice: result.notice },
+      issued: {
+        loginId: result.account.loginId,
+        email: result.account.email,
+        password: result.password,
+        notice: result.notice,
+      },
     };
   } catch (error) {
     if (error instanceof StudentError) return { error: error.message, issued: null };
@@ -236,17 +247,51 @@ export async function resetStudentLoginAction(
 ): Promise<StudentLoginFormState> {
   const user = await requireUser();
   const studentId = String(formData.get("studentId") ?? "");
-  const email = String(formData.get("email") ?? "");
 
   try {
     const result = await resetStudentLoginPassword(user, studentId);
+    // Which ID the password goes with, read back rather than taken from the
+    // form: the notice is the one place the two are shown together.
+    const account = await getStudentLogin(user, studentId);
     refresh();
-    return { error: null, issued: { email, password: result.password, notice: result.notice } };
+    return {
+      error: null,
+      issued: {
+        loginId: account?.loginId ?? "",
+        email: account?.email ?? null,
+        password: result.password,
+        notice: result.notice,
+      },
+    };
   } catch (error) {
     if (error instanceof StudentError) return { error: error.message, issued: null };
     if (error instanceof ForbiddenError) {
       return { error: "You do not have permission to do that.", issued: null };
     }
+    throw error;
+  }
+}
+
+export interface StudentLoginToggleState {
+  error: string | null;
+}
+
+/** Switches a student's login off (ending its sessions) or back on. */
+export async function setStudentLoginEnabledAction(
+  _previous: StudentLoginToggleState,
+  formData: FormData,
+): Promise<StudentLoginToggleState> {
+  const user = await requireUser();
+  const studentId = String(formData.get("studentId") ?? "");
+  const enabled = formData.get("enabled") === "1";
+
+  try {
+    await setStudentLoginEnabled(user, studentId, enabled);
+    refresh();
+    return { error: null };
+  } catch (error) {
+    if (error instanceof StudentError) return { error: error.message };
+    if (error instanceof ForbiddenError) return { error: "You do not have permission to do that." };
     throw error;
   }
 }

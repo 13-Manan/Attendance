@@ -187,6 +187,30 @@ export async function updateStudent(
       }
     }
 
+    // A student account works only while its student is on roll — the
+    // session check reads the status on every request. Archiving also ends the
+    // sessions the account has open, so restoring the student later asks each
+    // device to sign in again rather than waking old sessions up.
+    if (action === "student.archived" && existing.userId) {
+      const ended = await tx.session.updateMany({
+        where: { userId: existing.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      if (ended.count > 0) {
+        await recordAuditLog(
+          {
+            action: "user.updated",
+            entityType: "User",
+            entityId: existing.userId,
+            institutionId: existing.institutionId,
+            actorUserId: actor.userId,
+            afterJson: { studentId: updated.id, reason: "student_archived", sessionsEnded: ended.count },
+          },
+          tx,
+        );
+      }
+    }
+
     return { previousStatus: existing.status, updated };
   });
 

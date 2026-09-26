@@ -12,7 +12,11 @@ export type SessionRejection = "revoked" | "expired" | "account_inactive";
 export interface SessionForPolicy {
   expiresAt: Date;
   revokedAt: Date | null;
-  user: { status: string };
+  user: {
+    status: string;
+    /** Present when the account is a student's; a staff account has none. */
+    studentProfile?: { status: string } | null;
+  };
 }
 
 /**
@@ -35,5 +39,11 @@ export function checkSessionUsable(
   // `<=`: a session is dead at its expiry instant, not one millisecond after.
   if (session.expiresAt <= now) return "expired";
   if (session.user.status !== "ACTIVE") return "account_inactive";
+  // A student account works only while its student is on roll. Archiving a
+  // student ends their portal on the next request — the account itself is
+  // untouched, and their attendance history with it.
+  if (session.user.studentProfile && session.user.studentProfile.status !== "ACTIVE") {
+    return "account_inactive";
+  }
   return null;
 }

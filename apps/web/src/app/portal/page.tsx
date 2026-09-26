@@ -8,14 +8,13 @@ import type {
   AttendanceTrendPoint,
   StudentAttendanceItem,
 } from "@/modules/attendance-analytics/types";
+import { AttendanceGauge } from "@/components/portal/attendance-gauge";
 import {
   RateBar,
   RatePercent,
   ResultBadge,
   StatCard,
-  StatGrid,
   formatSessionDate,
-  rateTone,
 } from "@/components/ui/attendance-stat";
 import { EmptyState, Panel } from "@/components/ui/panel";
 
@@ -86,29 +85,35 @@ export default async function StudentPortalHome() {
         ) : null}
       </header>
 
-      <StatGrid>
-        <StatCard
-          label="Overall attendance"
-          value={overall.percentage === null ? "—" : `${overall.percentage.toFixed(1)}%`}
-          hint={
-            overall.total === 0
-              ? "No classes recorded yet"
-              : `${overall.present} of ${overall.total} classes`
-          }
-          tone={rateTone(overall.percentage, dashboard.lowAttendanceThreshold)}
+      {/* The headline: the same overall figure as before, as a gauge, beside
+          the counts it is made of. */}
+      <section
+        aria-label="Attendance summary"
+        className="grid items-center gap-5 rounded-xl border border-neutral-200 bg-white p-4 sm:p-6 md:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]"
+      >
+        <AttendanceGauge
+          percentage={overall.percentage}
+          threshold={dashboard.lowAttendanceThreshold}
         />
-        <StatCard label="Present" value={String(overall.present)} hint="Confirmed by faculty" />
-        <StatCard label="Absent" value={String(overall.absent)} tone="neutral" />
-        <StatCard
-          label="Today"
-          value={String(dashboard.today.length)}
-          hint={
-            dashboard.todayAwaitingConfirmation > 0
-              ? `${dashboard.todayAwaitingConfirmation} awaiting confirmation`
-              : "classes recorded"
-          }
-        />
-      </StatGrid>
+        <div className="grid grid-cols-2 gap-3">
+          <StatCard label="Present" value={String(overall.present)} hint="Confirmed by faculty" />
+          <StatCard label="Absent" value={String(overall.absent)} tone="neutral" />
+          <StatCard
+            label="Total classes"
+            value={String(overall.total)}
+            hint={overall.total === 0 ? "None recorded yet" : "Counted in the percentage"}
+          />
+          <StatCard
+            label="Today"
+            value={String(dashboard.today.length)}
+            hint={
+              dashboard.todayAwaitingConfirmation > 0
+                ? `${dashboard.todayAwaitingConfirmation} awaiting confirmation`
+                : "classes recorded"
+            }
+          />
+        </div>
+      </section>
 
       <Panel
         title="Today"
@@ -172,7 +177,8 @@ export default async function StudentPortalHome() {
                     </div>
                     <RateBar rate={subject.rate} threshold={dashboard.lowAttendanceThreshold} />
                     <span className="text-xs text-neutral-500">
-                      Present: {subject.rate.present} · Total: {subject.rate.total}
+                      Present: {subject.rate.present} · Absent: {subject.rate.absent} · Total:{" "}
+                      {subject.rate.total}
                       {subject.facultyName ? ` · ${subject.facultyName}` : ""}
                     </span>
                   </Link>

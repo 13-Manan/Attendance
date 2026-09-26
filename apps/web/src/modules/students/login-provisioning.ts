@@ -2,6 +2,10 @@ import { randomBytes } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/modules/audit/service";
 import { hashPassword } from "@/modules/auth-tenancy/password";
+import {
+  isPlaceholderLoginEmail,
+  placeholderLoginEmail,
+} from "@/modules/auth-tenancy/student-login-policy";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { requirePermission } from "@/modules/authorization/service";
 import { TEMP_PASSWORD_NOTICE, type IssuedPassword } from "@/modules/faculty/directory-types";
@@ -36,8 +40,17 @@ import { StudentError } from "./directory-types";
 
 export interface StudentLoginAccount {
   userId: string;
-  email: string;
+  /** What the student signs in with, on their school's student sign-in link: their student code. */
+  loginId: string;
+  /** A real address they can also sign in with, or null when the account has none. */
+  email: string | null;
+  /** Whether the login is switched on. A disabled login cannot sign in. */
   status: "ACTIVE" | "INACTIVE";
+  /** False while the student is archived: the login cannot be used until they are back on roll. */
+  studentOnRoll: boolean;
+  lastLoginAt: Date | null;
+  /** The institution whose student sign-in link this login uses. */
+  institutionId: string;
 }
 
 export interface ProvisionedStudentLogin extends IssuedPassword {
@@ -64,9 +77,21 @@ function requireInstitution(actor: SessionUser): string {
   return actor.institutionId;
 }
 
+/**
+ * An optional sign-in address, normalised, or null when none was given. The
+ * student ID is always a way in; an address is a second one, for a student
+ * who has one.
+ */
+function optionalEmail(raw: string | undefined): string | null {
+  const email = (raw ?? "").trim().toLowerCase();
+  if (email === "") return null;
+  return requireEmail(email);
+}
+
 function requireEmail(raw: string): string {
   const email = raw.trim().toLowerCase();
   if (email === "") throw new StudentError("Enter an email address for the student to sign in with.");
+  if (isPlaceholderLoginEmail(email)) throw new StudentError("That does not look like an email address.");
   if (email.length > 255) throw new StudentError("The email must be 255 characters or fewer.");
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new StudentError("That does not look like an email address.");
@@ -85,23 +110,40 @@ function requireEmail(raw: string): string {
 export async function provisionStudentLogin(
   actor: SessionUser,
   studentId: string,
-  input: { email: string },
+  input: { email?: string },
 ): Promise<ProvisionedStudentLogin> {
   const institutionId = requireInstitution(actor);
-  const email = requireEmail(input.email);
+  const realEmail = optionalEmail(input.email);
 
   const student = await prisma.student.findFirst({
     where: { id: studentId, institutionId },
-    select: { id: true, firstName: true, lastName: true, userId: true, status: true },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      userId: true,
+      status: true,
+      studentCode: true,
+    },
   });
   if (!student) {
     throw new StudentError("That student is not in this institution.");
+  }
+  if (student.status !== "ACTIVE") {
+    throw new StudentError(
+      "This student is not on roll, so a login could not be used. Bring them back on roll first.",
+    );
   }
   if (student.userId) {
     throw new StudentError(
       "This student already has a login. Issue a new password from here instead of creating a second account.",
     );
   }
+
+  // Without an address of their own, the account gets a reserved stand-in
+  // that is never shown and never accepted as a sign-in email; the student ID
+  // is how they sign in. See auth-tenancy/student-login-policy.ts.
+  const email = realEmail ?? placeholderLoginEmail(student.id);
 
   const existing = await prisma.user.findUnique({ where: { email }, select: { id: true } });
   if (existing) {
@@ -157,11 +199,25 @@ export async function provisionStudentLogin(
     entityId: userId,
     institutionId,
     actorUserId: actor.userId,
-    afterJson: { name, email, roleKey: STUDENT_ROLE_KEY, studentId: student.id },
+    afterJson: {
+      name,
+      email: realEmail,
+      loginId: student.studentCode,
+      roleKey: STUDENT_ROLE_KEY,
+      studentId: student.id,
+    },
   });
 
   return {
-    account: { userId, email, status: "ACTIVE" },
+    account: {
+      userId,
+      loginId: student.studentCode,
+      email: realEmail,
+      status: "ACTIVE",
+      studentOnRoll: true,
+      lastLoginAt: null,
+      institutionId,
+    },
     password,
     notice: TEMP_PASSWORD_NOTICE,
   };
@@ -214,13 +270,73 @@ export async function getStudentLogin(
 
   const student = await prisma.student.findFirst({
     where: { id: studentId, institutionId: actor.institutionId },
-    select: { user: { select: { id: true, email: true, status: true } } },
+    select: {
+      studentCode: true,
+      status: true,
+      institutionId: true,
+      user: { select: { id: true, email: true, status: true, lastLoginAt: true } },
+    },
   });
   if (!student?.user) return null;
 
   return {
     userId: student.user.id,
-    email: student.user.email,
+    loginId: student.studentCode,
+    email: isPlaceholderLoginEmail(student.user.email) ? null : student.user.email,
     status: student.user.status === "ACTIVE" ? "ACTIVE" : "INACTIVE",
+    studentOnRoll: student.status === "ACTIVE",
+    lastLoginAt: student.user.lastLoginAt,
+    institutionId: student.institutionId,
   };
+}
+
+/**
+ * Switches a student's login off or back on.
+ *
+ * Off ends every session the login has open, on every device; on lets it sign
+ * in again with the password it already has — nothing is reissued or shown.
+ * The student, their record and their attendance are untouched either way.
+ */
+export async function setStudentLoginEnabled(
+  actor: SessionUser,
+  studentId: string,
+  enabled: boolean,
+): Promise<StudentLoginAccount> {
+  const institutionId = requireInstitution(actor);
+
+  const student = await prisma.student.findFirst({
+    where: { id: studentId, institutionId },
+    select: { userId: true },
+  });
+  if (!student) throw new StudentError("That student is not in this institution.");
+  if (!student.userId) throw new StudentError("This student does not have a login yet.");
+  const userId = student.userId;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id: userId },
+      data: { status: enabled ? "ACTIVE" : "INACTIVE" },
+    });
+    const ended = enabled
+      ? { count: 0 }
+      : await tx.session.updateMany({
+          where: { userId, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+    await recordAuditLog(
+      {
+        action: enabled ? "user.reactivated" : "user.deactivated",
+        entityType: "User",
+        entityId: userId,
+        institutionId,
+        actorUserId: actor.userId,
+        afterJson: { studentId, studentLogin: enabled ? "enabled" : "disabled", sessionsEnded: ended.count },
+      },
+      tx,
+    );
+  });
+
+  const account = await getStudentLogin(actor, studentId);
+  if (!account) throw new StudentError("This student does not have a login yet.");
+  return account;
 }

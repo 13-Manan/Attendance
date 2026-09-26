@@ -293,6 +293,9 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
         studentId={student.id}
         studentName={`${student.firstName} ${student.lastName}`.trim()}
         login={login}
+        studentOnRoll={student.status === "ACTIVE"}
+        institutionId={user.institutionId ?? ""}
+        lastSignIn={login?.lastLoginAt ? MOMENT_FORMAT.format(login.lastLoginAt) : null}
         canManage={canManageLogin}
       />
 
