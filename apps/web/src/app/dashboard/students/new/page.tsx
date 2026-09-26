@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { hasPermission } from "@/modules/authorization/service";
 import { getStudentFormOptionsForRequest } from "@/modules/students/directory-service";
@@ -8,6 +7,7 @@ import {
 } from "@/modules/students/class-navigation-service";
 import { studentSectionHref } from "@/modules/students/class-navigation-paths";
 import type { StudentSectionView } from "@/modules/students/class-navigation-types";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { StudentForm } from "../student-form";
 
 interface PageProps {
@@ -62,14 +62,10 @@ export default async function NewStudentPage({ searchParams }: PageProps) {
 
   return (
     <div className="flex w-full max-w-2xl flex-col gap-5">
-      <div>
-        <Link
-          href={sectionHref ?? "/dashboard/students"}
-          className="text-xs text-neutral-500 hover:text-neutral-900"
-        >
-          {section ? `← ${section.className} · ${section.section.label}` : "← All students"}
-        </Link>
-      </div>
+      <BackToParent
+        href={sectionHref ?? "/dashboard/students"}
+        label={section ? `${section.className} · ${section.section.label}` : "Students"}
+      />
 
       <header className="flex flex-col gap-1">
         <h1 className="text-xl font-semibold text-neutral-900">Add student</h1>

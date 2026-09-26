@@ -107,3 +107,18 @@ test("repeated and trailing slashes do not produce empty crumbs", () => {
     ["/dashboard", "/dashboard/students"],
   );
 });
+
+test("a word that names two different pages is labelled by its whole path", () => {
+  // "sessions" under Attendance is the list of registers, not academic sessions.
+  assert.equal(buildBreadcrumbs("/dashboard/attendance/sessions").at(-1)?.label, "Sessions");
+  assert.equal(buildBreadcrumbs("/dashboard/academic/sessions").at(-1)?.label, "Academic sessions");
+  // "institutions" under Platform is the list; under Settings it is this one.
+  assert.deepEqual(
+    buildBreadcrumbs("/dashboard/platform/institutions/new").map((crumb) => crumb.label),
+    ["Dashboard", "Platform", "Institutions", "New"],
+  );
+  assert.deepEqual(
+    buildBreadcrumbs("/dashboard/institutions/settings").map((crumb) => crumb.label),
+    ["Dashboard", "Institution", "Settings"],
+  );
+});

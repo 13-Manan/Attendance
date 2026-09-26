@@ -63,6 +63,17 @@ const SEGMENT_LABELS: Record<string, string> = {
 };
 
 /**
+ * Whole paths whose segment label would be wrong, because the same word means
+ * a different page elsewhere: `sessions` is academic sessions under Academic
+ * but registers under Attendance, and `institutions` is this institution under
+ * Settings but the list of them under Platform.
+ */
+const PATH_LABELS: Record<string, string> = {
+  "/dashboard/attendance/sessions": "Sessions",
+  "/dashboard/platform/institutions": "Institutions",
+};
+
+/**
  * An opaque identifier standing in for a record — a cuid, a uuid, or anything
  * else long and unpronounceable.
  *
@@ -104,7 +115,7 @@ export function buildBreadcrumbs(pathname: string): Crumb[] {
   for (const [index, segment] of segments.entries()) {
     href += `/${segment}`;
     crumbs.push({
-      label: labelFor(segment),
+      label: PATH_LABELS[href] ?? labelFor(segment),
       href,
       current: index === segments.length - 1,
     });

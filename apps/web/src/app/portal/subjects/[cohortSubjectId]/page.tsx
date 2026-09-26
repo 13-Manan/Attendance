@@ -12,6 +12,7 @@ import {
   formatSessionDate,
   rateTone,
 } from "@/components/ui/attendance-stat";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { EmptyState, Panel } from "@/components/ui/panel";
 
 interface PageProps {
@@ -50,9 +51,7 @@ export default async function StudentSubjectPage({ params }: PageProps) {
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-5">
       <div className="flex flex-col gap-2">
-        <Link href="/portal" className="text-xs text-neutral-500 hover:underline">
-          ← Back to my attendance
-        </Link>
+        <BackToParent href="/portal" label="My attendance" />
         <h1 className="text-xl font-semibold text-neutral-900">{detail.subjectName}</h1>
         <p className="text-xs text-neutral-500">
           {detail.subjectCode ? `${detail.subjectCode} · ` : ""}

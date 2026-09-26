@@ -1,13 +1,16 @@
-import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getAttendanceReviewBoard } from "@/modules/attendance-review/service";
 import { hasPermission } from "@/modules/authorization/service";
 import { ForbiddenError } from "@/modules/authorization/types";
+import { RETURN_PARAM } from "@/lib/return-path";
+import { registerOrigin } from "@/components/attendance/session-origin";
+import { PageTrail } from "@/components/nav/page-trail";
 import { ReviewBoard } from "./review-client";
 
 interface PageProps {
   params: Promise<{ cohortId: string; sessionId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
 /**
@@ -22,7 +25,7 @@ interface PageProps {
  * caller never renders the screen) and again inside every Server Action the
  * client calls (so the screen is not the security boundary).
  */
-export default async function AttendanceReviewPage({ params }: PageProps) {
+export default async function AttendanceReviewPage({ params, searchParams }: PageProps) {
   const { cohortId, sessionId } = await params;
   const user = await requirePermissionOrRedirect("attendanceRecord.read");
 
@@ -53,15 +56,25 @@ export default async function AttendanceReviewPage({ params }: PageProps) {
         }`
       : null;
 
+  // Opened from a list of registers, back to that list; otherwise to the class.
+  const origin = registerOrigin((await searchParams)[RETURN_PARAM], cohortId);
+  const day = new Date(board.session.sessionDate).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-4">
+      <PageTrail
+        items={[
+          { label: "Attendance", href: "/dashboard/attendance" },
+          { label: board.session.cohortName, href: `/dashboard/attendance/${cohortId}` },
+          { label: `Review · ${day}` },
+        ]}
+        back={origin ?? undefined}
+      />
       <div className="flex flex-col gap-1">
-        <Link
-          href={`/dashboard/attendance/${cohortId}`}
-          className="text-xs text-neutral-500 hover:underline"
-        >
-          ← Back to class
-        </Link>
         <h1 className="text-xl font-semibold text-neutral-900">
           {board.session.cohortName}
           {board.session.subjectName ? ` · ${board.session.subjectName}` : ""}

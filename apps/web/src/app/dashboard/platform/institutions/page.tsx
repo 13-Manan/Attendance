@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { listInstitutions } from "@/modules/platform/service";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -63,12 +64,7 @@ export default async function PlatformInstitutionsPage({ searchParams }: PagePro
     <div className="flex w-full max-w-5xl flex-col gap-5">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="flex flex-col gap-1">
-          <Link
-            href="/dashboard/platform"
-            className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
-          >
-            ← Platform
-          </Link>
+          <BackToParent href="/dashboard/platform" label="Platform" />
           <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
             Institutions
           </h1>

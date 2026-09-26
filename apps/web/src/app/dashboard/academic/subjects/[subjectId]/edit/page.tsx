@@ -1,8 +1,8 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getSubjectForRequest } from "@/modules/subjects/directory-service";
 import { SubjectError, type SubjectRow } from "@/modules/subjects/directory-types";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Panel } from "@/components/ui/panel";
 import { SubjectForm } from "../../subject-form";
 
@@ -31,14 +31,13 @@ export default async function EditSubjectPage({ params }: PageProps) {
 
   return (
     <div className="flex w-full max-w-3xl flex-col gap-5">
-      <div>
-        <Link
-          href="/dashboard/academic/subjects"
-          className="text-xs text-neutral-500 hover:text-neutral-900"
-        >
-          ← Back to subjects
-        </Link>
-      </div>
+      <PageTrail
+        items={[
+          { label: "Academic", href: "/dashboard/academic" },
+          { label: "Subjects", href: "/dashboard/academic/subjects" },
+          { label: subject.name },
+        ]}
+      />
 
       <header className="flex flex-col gap-1">
         <h2 className="text-lg font-semibold text-neutral-900">{subject.name}</h2>

@@ -16,6 +16,8 @@ import {
   removeStudentFromClassForRequest,
 } from "./directory-service";
 import { EMPTY_STUDENT_FILTERS, type StudentFilters } from "./directory-filters";
+import { studentSectionHref } from "./class-navigation-paths";
+import { resolveStudentOrigin } from "./record-origin";
 
 /**
  * Students by class and section, against the real database: the queries the
@@ -361,4 +363,32 @@ test("the whole-school directory is unchanged: search, status, class filter and 
   const sorted = await listStudentsForRequest(A1, { ...EMPTY_STUDENT_FILTERS, cohortId: C2A, sort: "code" });
   const codes = sorted.rows.map((r) => r.studentCode);
   assert.deepEqual(codes, [id("new-1"), S.bela, S.chand], "Gita, Bela, Chand — by code");
+});
+
+// ---------------------------------------------------------------------------
+// "Back to …" from a student's record: the list it was opened from, named
+// through that list's own checks, or nothing — never another school's name.
+// ---------------------------------------------------------------------------
+
+test("a record opened from a section leads back to it, by name, filters kept", { skip: SKIP }, async () => {
+  const section = `${studentSectionHref(U2, C2A)}?q=aarav`;
+  assert.deepEqual(await resolveStudentOrigin(A1, section), { label: "2nd · Section A", href: section });
+});
+
+test("another school's section, or one reached through the wrong class, is no origin", { skip: SKIP }, async () => {
+  assert.equal(await resolveStudentOrigin(A2, studentSectionHref(U2, C2A)), null);
+  assert.equal(await resolveStudentOrigin(A1, studentSectionHref(U10, C2A)), null);
+  assert.equal(await resolveStudentOrigin(A3, studentSectionHref(U2, C2A)), null);
+  assert.equal(await resolveStudentOrigin(A1, studentSectionHref(U2, id("no-such-section"))), null);
+});
+
+test("a class roster is an origin only for someone who may open it", { skip: SKIP }, async () => {
+  const roster = `/dashboard/academic/cohorts/${C2A}`;
+  const { name } = await prisma.cohort.findUniqueOrThrow({ where: { id: C2A }, select: { name: true } });
+  assert.deepEqual(await resolveStudentOrigin(A1, roster), { label: name, href: roster });
+  assert.equal(await resolveStudentOrigin(A2, roster), null, "another school's roster");
+
+  const readOnly: SessionUser = { ...A1, roles: [{ ...A1.roles[0], permissions: ["student.read"] }] };
+  assert.equal(await resolveStudentOrigin(readOnly, roster), null, "no cohort.read");
+  assert.equal(await resolveStudentOrigin(readOnly, studentSectionHref(U2, C2A)), null, "no cohort.read");
 });

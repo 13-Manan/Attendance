@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { ForbiddenError } from "@/modules/authorization/types";
@@ -21,6 +20,7 @@ import {
   RollupTable,
   windowLabel,
 } from "@/components/reports/report-views";
+import { BackToParent } from "@/components/nav/back-to-parent";
 
 interface PageProps {
   searchParams: Promise<SearchParams>;
@@ -107,12 +107,7 @@ export default async function ReportPrintPage({ searchParams }: PageProps) {
       {/* Screen-only: the way back, and a reminder of what this page is for.
           Gone on paper, where a "Print" button would be a wasted line. */}
       <div className="flex flex-wrap items-center justify-between gap-2 print:hidden">
-        <Link
-          href={reportHref("/dashboard/reports", parsed, {})}
-          className="text-xs text-neutral-500 hover:underline"
-        >
-          ← Back to reports
-        </Link>
+        <BackToParent href={reportHref("/dashboard/reports", parsed, {})} label="Reports" />
         <p className="text-xs text-neutral-500">
           Use your browser&rsquo;s print command (⌘P / Ctrl-P) and choose Save as PDF.
         </p>

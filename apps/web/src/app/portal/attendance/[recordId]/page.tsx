@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getOwnAttendanceDetail } from "@/modules/attendance-analytics/service";
@@ -9,6 +8,7 @@ import {
   formatSessionDate,
   formatTime,
 } from "@/components/ui/attendance-stat";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { Panel } from "@/components/ui/panel";
 
 interface PageProps {
@@ -44,12 +44,7 @@ export default async function StudentAttendanceDetailPage({ params }: PageProps)
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-5">
       <div className="flex flex-col gap-2">
-        <Link
-          href="/portal"
-          className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
-        >
-          ← Back to my attendance
-        </Link>
+        <BackToParent href="/portal" label="My attendance" />
         <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
           Attendance record
         </span>

@@ -9,6 +9,7 @@ import {
   hasActiveAuditFilters,
   type AuditFilters,
 } from "@/modules/audit/query";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState, Panel } from "@/components/ui/panel";
@@ -139,12 +140,7 @@ export default async function AuditLogsPage({ searchParams }: PageProps) {
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <Link
-          href="/dashboard"
-          className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
-        >
-          ← Overview
-        </Link>
+        <BackToParent href="/dashboard" label="Dashboard" />
         <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
           Audit log
         </h1>

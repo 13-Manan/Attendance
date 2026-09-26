@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { FacultySessionSummary } from "@/modules/attendance-analytics/types";
+import { withReturnPath } from "@/lib/return-path";
 import { formatSessionDate, formatTime } from "@/components/ui/attendance-stat";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -41,10 +42,16 @@ export function SessionStatusBadge({ status }: { status: string }) {
  * where capture starts. The link never jumps straight into capture: starting
  * a capture is an action, and an action should not be something you arrive at
  * by tapping a list.
+ *
+ * `returnTo` is the list the row sits in, so the review board it opens can
+ * lead back to that list rather than to the class.
  */
-export function sessionHref(session: FacultySessionSummary): string {
+export function sessionHref(session: FacultySessionSummary, returnTo?: string): string {
   if (session.status === "REVIEW" || session.status === "FINALIZED") {
-    return `/dashboard/attendance/${session.cohortId}/review/${session.sessionId}`;
+    return withReturnPath(
+      `/dashboard/attendance/${session.cohortId}/review/${session.sessionId}`,
+      returnTo,
+    );
   }
   return `/dashboard/attendance/${session.cohortId}`;
 }
@@ -59,15 +66,18 @@ export function sessionHref(session: FacultySessionSummary): string {
 export function SessionRow({
   session,
   showDate = true,
+  returnTo,
 }: {
   session: FacultySessionSummary;
   showDate?: boolean;
+  /** The list this row sits in; see `sessionHref`. */
+  returnTo?: string;
 }) {
   const { counts } = session;
   return (
     <li>
       <Link
-        href={sessionHref(session)}
+        href={sessionHref(session, returnTo)}
         className="-mx-2 flex min-h-11 flex-col gap-1.5 rounded-md px-2 py-3 transition-colors hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
       >
         <span className="flex min-w-0 flex-col gap-0.5">

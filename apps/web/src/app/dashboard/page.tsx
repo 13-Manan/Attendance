@@ -187,7 +187,7 @@ export default async function DashboardHomePage() {
         >
           <ul className="flex flex-col divide-y divide-neutral-100">
             {dashboard.pendingReview.map((session) => (
-              <SessionRow key={session.sessionId} session={session} />
+              <SessionRow key={session.sessionId} session={session} returnTo="/dashboard" />
             ))}
           </ul>
         </Panel>
@@ -213,7 +213,12 @@ export default async function DashboardHomePage() {
         ) : (
           <ul className="flex flex-col divide-y divide-neutral-100">
             {dashboard.today.map((session) => (
-              <SessionRow key={session.sessionId} session={session} showDate={false} />
+              <SessionRow
+                key={session.sessionId}
+                session={session}
+                showDate={false}
+                returnTo="/dashboard"
+              />
             ))}
           </ul>
         )}
@@ -312,7 +317,7 @@ export default async function DashboardHomePage() {
         ) : (
           <ul className="flex flex-col divide-y divide-neutral-100">
             {dashboard.recent.map((session) => (
-              <SessionRow key={session.sessionId} session={session} />
+              <SessionRow key={session.sessionId} session={session} returnTo="/dashboard" />
             ))}
           </ul>
         )}

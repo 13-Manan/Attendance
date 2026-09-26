@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { subjectsApplyForRequest } from "@/modules/subjects/directory-service";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { Panel } from "@/components/ui/panel";
 import { SubjectForm } from "../subject-form";
 
@@ -43,12 +44,7 @@ export default async function NewSubjectPage() {
   return (
     <div className="flex w-full max-w-3xl flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <Link
-          href="/dashboard/academic/subjects"
-          className="text-xs text-neutral-500 hover:text-neutral-900"
-        >
-          ← Back to subjects
-        </Link>
+        <BackToParent href="/dashboard/academic/subjects" label="Subjects" />
         <h2 className="text-lg font-semibold text-neutral-900">New subject</h2>
         <p className="max-w-2xl text-sm text-neutral-500">
           The subject as the college lists it. Which sections offer it, and who teaches each one,

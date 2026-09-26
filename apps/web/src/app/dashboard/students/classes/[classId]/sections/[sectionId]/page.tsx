@@ -18,12 +18,18 @@ import {
   getStudentForRequest,
   getStudentFormOptionsForRequest,
 } from "@/modules/students/directory-service";
-import { hasActiveStudentFilters, parseStudentFilters } from "@/modules/students/directory-filters";
+import {
+  hasActiveStudentFilters,
+  parseStudentFilters,
+  studentFilterQuery,
+} from "@/modules/students/directory-filters";
 import { studentDisplayName } from "@/modules/students/types";
+import { withReturnPath } from "@/lib/return-path";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Button } from "@/components/ui/button";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { LINK_PRIMARY, LINK_SECONDARY } from "../../../../../academic/classes/shared";
-import { ClassTeacherName, StudentsTrail } from "../../../class-navigation";
+import { ClassTeacherName } from "../../../class-navigation";
 import { first, requireClassNavigation } from "../../../guard";
 import {
   StudentDirectoryPager,
@@ -66,6 +72,9 @@ export default async function StudentSectionPage({ params, searchParams }: PageP
   ]);
 
   const here = studentSectionHref(classId, section.id);
+  // Where a student opened from this list comes back to: this section, as
+  // filtered and paged now.
+  const listPath = `${here}${studentFilterQuery(filters)}`;
   const filtered = hasActiveStudentFilters(filters);
   const canEnrollFace = hasPermission(user, "faceEmbedding.manage");
   // Adding here places the new student in this section, which is its own
@@ -79,7 +88,8 @@ export default async function StudentSectionPage({ params, searchParams }: PageP
 
   return (
     <div className="flex w-full max-w-6xl flex-col gap-5">
-      <StudentsTrail
+      {/* Back to the class, in the section's academic year. */}
+      <PageTrail
         items={[
           { label: "Students", href: STUDENTS_BASE },
           { label: "Classes", href: studentClassesHref(year.id) },
@@ -126,7 +136,9 @@ export default async function StudentSectionPage({ params, searchParams }: PageP
         </p>
       ) : null}
 
-      {added ? <AddedNotice added={added} view={view} canEnrollFace={canEnrollFace} /> : null}
+      {added ? (
+        <AddedNotice added={added} view={view} canEnrollFace={canEnrollFace} returnTo={here} />
+      ) : null}
 
       <Panel
         title="Students"
@@ -180,7 +192,11 @@ export default async function StudentSectionPage({ params, searchParams }: PageP
           </EmptyState>
         ) : (
           <>
-            <StudentDirectoryTable rows={page.rows} canEnrollFace={canEnrollFace} />
+            <StudentDirectoryTable
+              rows={page.rows}
+              canEnrollFace={canEnrollFace}
+              returnTo={listPath}
+            />
             <StudentDirectoryPager
               page={page}
               filters={filters}
@@ -227,10 +243,12 @@ function AddedNotice({
   added,
   view,
   canEnrollFace,
+  returnTo,
 }: {
   added: AddedStudent;
   view: StudentSectionView;
   canEnrollFace: boolean;
+  returnTo: string;
 }) {
   const record = `${STUDENTS_BASE}/${encodeURIComponent(added.id)}`;
   return (
@@ -243,13 +261,13 @@ function AddedNotice({
       {added.inSection
         ? `${added.name} was added to ${view.section.groupName}.`
         : `${added.name} was added, but is not placed in ${view.section.groupName}.`}{" "}
-      <Link href={record} className="font-medium underline">
+      <Link href={withReturnPath(record, returnTo)} className="font-medium underline">
         Open their record
       </Link>
       {canEnrollFace ? (
         <>
           {" · "}
-          <Link href={`${record}/enroll-face`} className="font-medium underline">
+          <Link href={withReturnPath(`${record}/enroll-face`, returnTo)} className="font-medium underline">
             Enroll face
           </Link>
         </>

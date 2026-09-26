@@ -1,7 +1,7 @@
-import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { hasPermission } from "@/modules/authorization/service";
 import { getIntegrationCenter } from "@/modules/integrations/center-service";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { ImportWizard } from "./import-wizard";
 
 /**
@@ -35,18 +35,13 @@ export default async function ImportPage() {
   return (
     <div className="flex flex-col gap-5">
       <header className="flex flex-col gap-1">
+        <BackToParent href="/dashboard/integrations" label="Integrations" />
         <h1 className="text-xl font-semibold text-neutral-900">Import students</h1>
         <p className="max-w-3xl text-sm text-neutral-500">
           Upload a CSV or Excel export. You will see exactly what would change before anything is
           written — how many students would be created, how many updated, and which rows have
           problems.
         </p>
-        <Link
-          href="/dashboard/integrations"
-          className="text-sm text-neutral-900 underline underline-offset-4"
-        >
-          ← Back to integrations
-        </Link>
       </header>
 
       <ImportWizard targetFields={view.targetFields} />

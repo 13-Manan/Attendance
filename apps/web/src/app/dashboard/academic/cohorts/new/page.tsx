@@ -1,7 +1,7 @@
-import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getCohortFormOptionsForRequest } from "@/modules/cohorts/directory-service";
 import { COHORT_WORDS } from "@/modules/cohorts/directory-types";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Panel } from "@/components/ui/panel";
 import { CohortForm } from "../cohort-form";
 
@@ -28,13 +28,14 @@ export default async function NewCohortPage() {
 
   return (
     <div className="flex w-full max-w-3xl flex-col gap-5">
+      <PageTrail
+        items={[
+          { label: "Academic", href: "/dashboard/academic" },
+          { label: words.Plural, href: "/dashboard/academic/cohorts" },
+          { label: "New" },
+        ]}
+      />
       <header className="flex flex-col gap-1">
-        <Link
-          href="/dashboard/academic/cohorts"
-          className="text-xs text-neutral-500 hover:text-neutral-900"
-        >
-          ← Back to {words.plural}
-        </Link>
         <h2 className="text-lg font-semibold text-neutral-900">New {words.singular}</h2>
         <p className="max-w-2xl text-sm text-neutral-500">
           {options.institutionType === "COLLEGE"

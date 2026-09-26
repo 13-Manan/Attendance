@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { requireCohortAccess } from "@/modules/authorization/cohort-access";
@@ -6,6 +5,7 @@ import { hasPermission, requireSameInstitution } from "@/modules/authorization/s
 import { getCohortById } from "@/modules/cohorts/repository";
 import { getInstitutionById } from "@/modules/institutions/repository";
 import { resolveAttendanceMode } from "@/modules/institutions/service";
+import { PageTrail } from "@/components/nav/page-trail";
 import { CaptureWizard } from "./capture-client";
 
 interface PageProps {
@@ -60,13 +60,14 @@ export default async function AttendanceCapturePage({ params, searchParams }: Pa
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <PageTrail
+        items={[
+          { label: "Attendance", href: "/dashboard/attendance" },
+          { label: cohort.name, href: `/dashboard/attendance/${cohort.id}` },
+          { label: "Take attendance" },
+        ]}
+      />
       <div className="flex flex-col gap-1">
-        <Link
-          href={`/dashboard/attendance/${cohort.id}`}
-          className="text-xs text-neutral-500 hover:underline"
-        >
-          ← Back to class
-        </Link>
         <h1 className="text-xl font-semibold text-neutral-900">{cohort.name}</h1>
         <p className="text-sm text-neutral-500">
           {mode === "DAILY" ? "Daily attendance" : "Subject-wise attendance"}

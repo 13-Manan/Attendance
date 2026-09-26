@@ -63,7 +63,11 @@ export function StudentForm({
   canPlace: boolean;
   /** The class the placement starts on — the section the form was opened from. */
   defaultCohortId?: string;
-  /** The section page to go back to once the student is added. Checked again by the action. */
+  /**
+   * Where this form was opened from, for the page after saving to lead back to:
+   * the section a student is added from, or the list their record was opened
+   * from. Each action checks it again.
+   */
   returnTo?: string;
 }) {
   const [state, formAction, pending] = useActionState(
@@ -76,7 +80,7 @@ export function StudentForm({
   return (
     <form action={formAction} className="flex w-full max-w-2xl flex-col gap-5">
       {student ? <input type="hidden" name="id" value={student.id} /> : null}
-      {mode === "create" && returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}
+      {returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}
 
       <fieldset className="flex flex-col gap-4">
         <legend className="mb-2 text-sm font-semibold text-neutral-900">Who they are</legend>

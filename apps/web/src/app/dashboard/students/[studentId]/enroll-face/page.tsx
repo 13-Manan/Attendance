@@ -1,11 +1,13 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { requireSameInstitution } from "@/modules/authorization/service";
 import { getStudentById } from "@/modules/students/repository";
+import { studentOriginPath } from "@/modules/students/record-origin";
 import { studentDisplayName } from "@/modules/students/types";
 import { getStudentFaceEnrollment } from "@/modules/face-enrollment/service";
 import type { FaceSampleRecord } from "@/modules/face-enrollment/types";
+import { RETURN_PARAM, withReturnPath } from "@/lib/return-path";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { TableScroll } from "@/components/ui/table-scroll";
@@ -80,11 +82,15 @@ function SampleState({ sample }: { sample: FaceSampleRecord }) {
 
 export default async function StaffEnrollFacePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ studentId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const user = await requirePermissionOrRedirect("faceEmbedding.manage");
   const { studentId } = await params;
+  // Opened from a section, the way back to the record keeps the way back there.
+  const origin = studentOriginPath((await searchParams)[RETURN_PARAM]);
   const student = await getStudentById(studentId);
   if (!student) notFound();
   requireSameInstitution(user, student.institutionId);
@@ -98,13 +104,18 @@ export default async function StaffEnrollFacePage({
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
+      <PageTrail
+        items={[
+          { label: "Students", href: "/dashboard/students" },
+          {
+            label: studentDisplayName(student),
+            href: withReturnPath(`/dashboard/students/${student.id}`, origin),
+          },
+          { label: "Face enrollment" },
+        ]}
+      />
+
       <header className="flex flex-col gap-1">
-        <Link
-          href={`/dashboard/students/${student.id}`}
-          className="text-sm text-neutral-500 hover:text-neutral-900"
-        >
-          ← {studentDisplayName(student)}
-        </Link>
         <h1 className="text-xl font-semibold text-neutral-900">
           Face enrollment · {studentDisplayName(student)}
         </h1>

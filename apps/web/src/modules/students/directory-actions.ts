@@ -14,6 +14,7 @@ import { refresh } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { ForbiddenError } from "@/modules/authorization/types";
+import { withReturnPath } from "@/lib/return-path";
 import {
   assignStudentToClassForRequest,
   createStudentForRequest,
@@ -25,6 +26,7 @@ import { STUDENT_STATUS_LABEL, StudentError, type StudentStatus } from "./direct
 import { provisionStudentLogin, resetStudentLoginPassword } from "./login-provisioning";
 import { studentDisplayName } from "./types";
 import { parseSectionReturnPath } from "./class-navigation-paths";
+import { studentOriginPath } from "./record-origin";
 
 /** Every field of the student form, as strings, for redisplay after a refusal. */
 export interface StudentFormValues {
@@ -118,7 +120,10 @@ export async function updateStudentAction(
     return { error: describe(error, "The changes could not be saved."), values, attempt };
   }
 
-  redirect(`/dashboard/students/${id}?saved=1`);
+  // Back to the record — still leading back to the section it was opened from,
+  // if it was. `returnTo` is a form field, so it is checked again here.
+  const origin = studentOriginPath(formData.get("returnTo"));
+  redirect(withReturnPath(`/dashboard/students/${id}?saved=1`, origin));
 }
 
 /**

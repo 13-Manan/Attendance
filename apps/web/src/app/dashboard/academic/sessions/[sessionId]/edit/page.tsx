@@ -1,7 +1,7 @@
-import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getAcademicSessionForRequest } from "@/modules/academic-sessions/service";
 import { AcademicSessionError } from "@/modules/academic-sessions/types";
+import { PageTrail } from "@/components/nav/page-trail";
 import { EmptyState } from "@/components/ui/panel";
 import { AcademicSessionForm } from "./academic-session-form";
 
@@ -10,6 +10,15 @@ interface PageProps {
 }
 
 const BASE = "/dashboard/academic/sessions";
+
+/** Academic / Academic sessions / this year — or "Academic year" where it could not be loaded. */
+function trail(name: string) {
+  return [
+    { label: "Academic", href: "/dashboard/academic" },
+    { label: "Academic sessions", href: BASE },
+    { label: name },
+  ];
+}
 
 /**
  * Edit one academic year.
@@ -31,10 +40,13 @@ export default async function EditAcademicSessionPage({ params }: PageProps) {
 
   if (!user.institutionId) {
     return (
-      <p className="text-sm text-neutral-500">
-        Platform-level accounts aren&apos;t scoped to an institution, so there is no academic year
-        to edit here.
-      </p>
+      <div className="flex w-full max-w-3xl flex-col gap-4">
+        <PageTrail items={trail("Academic year")} />
+        <p className="text-sm text-neutral-500">
+          Platform-level accounts aren&apos;t scoped to an institution, so there is no academic year
+          to edit here.
+        </p>
+      </div>
     );
   }
 
@@ -45,9 +57,7 @@ export default async function EditAcademicSessionPage({ params }: PageProps) {
     if (error instanceof AcademicSessionError) {
       return (
         <div className="flex w-full max-w-3xl flex-col gap-4">
-          <Link href={BASE} className="text-xs text-neutral-500 hover:underline">
-            ← Academic years
-          </Link>
+          <PageTrail items={trail("Academic year")} />
           <EmptyState>{error.message}</EmptyState>
         </div>
       );
@@ -57,10 +67,8 @@ export default async function EditAcademicSessionPage({ params }: PageProps) {
 
   return (
     <div className="flex w-full max-w-3xl flex-col gap-5">
+      <PageTrail items={trail(session.name)} />
       <header className="flex flex-col gap-1">
-        <Link href={BASE} className="text-xs text-neutral-500 hover:underline">
-          ← Academic years
-        </Link>
         <h1 className="text-xl font-semibold text-neutral-900">{session.name}</h1>
         <p className="max-w-2xl text-sm text-neutral-500">
           Renaming a year or moving its dates does not move a class or a register. Everything

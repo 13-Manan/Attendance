@@ -6,6 +6,7 @@ import { getInstitutionType } from "@/modules/institutions/repository";
 import { sectionKey, sectionLabel, suggestSectionName } from "@/modules/school-setup/policy";
 import { getClassDetail } from "@/modules/school-setup/service";
 import { SECTION_STATUS_LABEL, SchoolSetupError } from "@/modules/school-setup/types";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { AddSectionForm, QuickAssignTeacher, RenameClassForm } from "../class-controls";
@@ -37,7 +38,18 @@ export default async function ClassPage({ params, searchParams }: PageProps) {
     detail = await getClassDetail(user, classId, first(query.year));
   } catch (error) {
     if (error instanceof SchoolSetupError) {
-      return <EmptyState>{error.message}</EmptyState>;
+      return (
+        <div className="flex w-full max-w-5xl flex-col gap-5">
+          <PageTrail
+            items={[
+              { label: "Academic", href: "/dashboard/academic" },
+              { label: "Classes", href: BASE },
+              { label: "Class" },
+            ]}
+          />
+          <EmptyState>{error.message}</EmptyState>
+        </div>
+      );
     }
     throw error;
   }
@@ -63,14 +75,16 @@ export default async function ClassPage({ params, searchParams }: PageProps) {
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
+      {/* Back to Classes, in this class's academic year. */}
+      <PageTrail
+        items={[
+          { label: "Academic", href: "/dashboard/academic" },
+          { label: "Classes", href: `${BASE}?${yearQuery}` },
+          { label: detail.name },
+        ]}
+      />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="flex flex-col gap-1">
-          <Link
-            href={`${BASE}?${yearQuery}`}
-            className="text-sm text-neutral-500 hover:text-neutral-900 hover:underline"
-          >
-            &larr; All classes
-          </Link>
           <h2 className="text-lg font-semibold text-neutral-900">{detail.name}</h2>
           <p className="text-sm text-neutral-500">
             Academic year {year.name} · {sections.length}{" "}

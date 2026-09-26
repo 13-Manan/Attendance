@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import {
@@ -10,6 +9,7 @@ import {
   STRUCTURE_WORDS,
   type UnitRow,
 } from "@/modules/academic-structure/directory-types";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Panel } from "@/components/ui/panel";
 import { UnitForm } from "../../unit-form";
 
@@ -44,14 +44,13 @@ export default async function EditAcademicUnitPage({ params }: PageProps) {
 
   return (
     <div className="flex w-full max-w-3xl flex-col gap-5">
-      <div>
-        <Link
-          href="/dashboard/academic/units"
-          className="text-xs text-neutral-500 hover:text-neutral-900"
-        >
-          ← Back to {words.title.toLowerCase()}
-        </Link>
-      </div>
+      <PageTrail
+        items={[
+          { label: "Academic", href: "/dashboard/academic" },
+          { label: words.title, href: "/dashboard/academic/units" },
+          { label: unit.name },
+        ]}
+      />
 
       <header className="flex flex-col gap-1">
         <h2 className="text-lg font-semibold text-neutral-900">{unit.name}</h2>

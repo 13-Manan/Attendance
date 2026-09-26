@@ -7,9 +7,10 @@ import {
   studentClassHref,
   studentClassesHref,
 } from "@/modules/students/class-navigation-paths";
+import { PageTrail } from "@/components/nav/page-trail";
 import { EmptyState } from "@/components/ui/panel";
 import { YearSwitcher } from "../../../academic/classes/shared";
-import { SectionCards, StudentsTrail } from "../class-navigation";
+import { SectionCards } from "../class-navigation";
 import { first, requireClassNavigation } from "../guard";
 
 interface PageProps {
@@ -36,7 +37,8 @@ export default async function StudentClassPage({ params, searchParams }: PagePro
 
   return (
     <div className="flex w-full max-w-6xl flex-col gap-5">
-      <StudentsTrail
+      {/* Back to Classes, in this class's academic year. */}
+      <PageTrail
         items={[
           { label: "Students", href: STUDENTS_BASE },
           { label: "Classes", href: studentClassesHref(year?.id) },

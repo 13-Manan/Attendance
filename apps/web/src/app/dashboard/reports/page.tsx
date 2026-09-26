@@ -24,6 +24,7 @@ import {
   RollupTable,
   windowLabel,
 } from "@/components/reports/report-views";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { Panel } from "@/components/ui/panel";
 
 interface PageProps {
@@ -134,12 +135,7 @@ export default async function InstitutionReportsPage({ searchParams }: PageProps
     <div className="flex w-full max-w-5xl flex-col gap-5">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
-          <Link
-            href="/dashboard"
-            className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
-          >
-            ← Overview
-          </Link>
+          <BackToParent href="/dashboard" label="Dashboard" />
           <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
             Reports
           </span>

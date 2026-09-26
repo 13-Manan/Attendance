@@ -6,6 +6,7 @@ import { getInstitutionType } from "@/modules/institutions/repository";
 import { getSectionDetail } from "@/modules/school-setup/service";
 import { sectionLabel } from "@/modules/school-setup/policy";
 import { SECTION_STATUS_LABEL } from "@/modules/school-setup/types";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Badge } from "@/components/ui/badge";
 import { Panel } from "@/components/ui/panel";
 import {
@@ -46,10 +47,16 @@ export default async function SectionPage({ params }: PageProps) {
 
   return (
     <div className="flex w-full max-w-4xl flex-col gap-5">
+      {/* Back to the class, in the section's academic year. */}
+      <PageTrail
+        items={[
+          { label: "Academic", href: "/dashboard/academic" },
+          { label: "Classes", href: `/dashboard/academic/classes?year=${encodeURIComponent(year.id)}` },
+          { label: detail.className, href: classHref },
+          { label: sectionLabel(section.name) },
+        ]}
+      />
       <div className="flex flex-col gap-1">
-        <Link href={classHref} className="text-sm text-neutral-500 hover:text-neutral-900 hover:underline">
-          &larr; Back to {detail.className}
-        </Link>
         <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-lg font-semibold text-neutral-900">
             {detail.className} · {sectionLabel(section.name)}

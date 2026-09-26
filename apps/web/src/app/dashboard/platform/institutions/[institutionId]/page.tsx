@@ -1,7 +1,7 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getInstitutionDetail } from "@/modules/platform/service";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Badge } from "@/components/ui/badge";
 import { StatCard, StatGrid, formatSessionDate } from "@/components/ui/attendance-stat";
 import { EmptyState, Panel } from "@/components/ui/panel";
@@ -49,13 +49,14 @@ export default async function PlatformInstitutionDetailPage({ params }: PageProp
 
   return (
     <div className="flex w-full max-w-4xl flex-col gap-5">
+      <PageTrail
+        items={[
+          { label: "Platform", href: "/dashboard/platform" },
+          { label: "Institutions", href: "/dashboard/platform/institutions" },
+          { label: institution.name },
+        ]}
+      />
       <header className="flex flex-col gap-2">
-        <Link
-          href="/dashboard/platform/institutions"
-          className="text-xs text-neutral-500 hover:underline"
-        >
-          ← Institutions
-        </Link>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-xl font-semibold text-neutral-900">{institution.name}</h1>
           {suspended ? <Badge tone="neutral">Suspended</Badge> : <Badge tone="positive">Active</Badge>}

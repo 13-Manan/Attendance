@@ -14,7 +14,10 @@ import {
   type StudentClassLink,
   type StudentStatus,
 } from "@/modules/students/directory-types";
+import { resolveStudentOrigin } from "@/modules/students/record-origin";
 import { studentDisplayName } from "@/modules/students/types";
+import { RETURN_PARAM, withReturnPath } from "@/lib/return-path";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { StudentLogin } from "./student-login";
@@ -118,16 +121,20 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
   const canManageLogin = hasPermission(user, "user.invite");
   const login = await getStudentLogin(user, studentId);
 
+  // Opened from a section or a class roster, the record leads back there —
+  // named through that list's own checks — and its Edit and face pages carry
+  // the way back along. Anything else leads back to Students.
+  const origin = await resolveStudentOrigin(user, query[RETURN_PARAM]);
+
   const currentIds = new Set(student.classes.map((link) => link.enrollmentId));
   const pastClasses = student.allClasses.filter((link) => !currentIds.has(link.enrollmentId));
 
   return (
     <div className="flex w-full max-w-4xl flex-col gap-5">
-      <div>
-        <Link href={BASE} className="text-xs text-neutral-500 hover:text-neutral-900">
-          ← All students
-        </Link>
-      </div>
+      <PageTrail
+        items={[{ label: "Students", href: BASE }, { label: studentDisplayName(student) }]}
+        back={origin ?? undefined}
+      />
 
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
@@ -143,7 +150,7 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
         </div>
         {canUpdate ? (
           <Link
-            href={`${BASE}/${student.id}/edit`}
+            href={withReturnPath(`${BASE}/${student.id}/edit`, origin?.href)}
             className="inline-flex items-center justify-center rounded-md border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-neutral-50"
           >
             Edit details
@@ -257,7 +264,7 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
         action={
           canManageFace ? (
             <Link
-              href={`${BASE}/${student.id}/enroll-face`}
+              href={withReturnPath(`${BASE}/${student.id}/enroll-face`, origin?.href)}
               className="inline-flex items-center justify-center rounded-md border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-neutral-50"
             >
               {student.faceSampleCount === 0 ? "Enrol face" : "Manage face data"}

@@ -6,9 +6,10 @@ import {
   STUDENTS_BASE,
   STUDENT_CLASSES_BASE,
 } from "@/modules/students/class-navigation-paths";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { EmptyState } from "@/components/ui/panel";
 import { YearSwitcher } from "../../academic/classes/shared";
-import { ClassGrid, StudentsTrail } from "./class-navigation";
+import { ClassGrid } from "./class-navigation";
 import { first, requireClassNavigation } from "./guard";
 
 interface PageProps {
@@ -34,7 +35,7 @@ export default async function StudentClassesPage({ searchParams }: PageProps) {
 
   return (
     <div className="flex w-full max-w-6xl flex-col gap-5">
-      <StudentsTrail items={[{ label: "Students", href: STUDENTS_BASE }, { label: "Classes" }]} />
+      <BackToParent href={STUDENTS_BASE} label="Students" />
 
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="flex flex-col gap-1">

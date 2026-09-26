@@ -12,6 +12,8 @@ import {
   CohortError,
   type CohortDetail,
 } from "@/modules/cohorts/directory-types";
+import { withReturnPath } from "@/lib/return-path";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { TableScroll } from "@/components/ui/table-scroll";
@@ -67,13 +69,14 @@ export default async function CohortDetailPage({ params, searchParams }: PagePro
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
+      <PageTrail
+        items={[
+          { label: "Academic", href: "/dashboard/academic" },
+          { label: words.Plural, href: "/dashboard/academic/cohorts" },
+          { label: cohort.name },
+        ]}
+      />
       <header className="flex flex-col gap-2">
-        <Link
-          href="/dashboard/academic/cohorts"
-          className="text-xs text-neutral-500 hover:text-neutral-900"
-        >
-          ← Back to {words.plural}
-        </Link>
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-lg font-semibold text-neutral-900">{cohort.name}</h2>
           {cohort.academicSessionIsCurrent ? <Badge tone="positive">Current year</Badge> : null}
@@ -304,7 +307,10 @@ export default async function CohortDetailPage({ params, searchParams }: PagePro
                       <td className="py-2.5 pr-4 text-sm text-neutral-900">
                         {canSeeStudents ? (
                           <Link
-                            href={`/dashboard/students/${entry.studentId}`}
+                            href={withReturnPath(
+                              `/dashboard/students/${entry.studentId}`,
+                              `/dashboard/academic/cohorts/${cohort.id}`,
+                            )}
                             className="hover:underline"
                           >
                             {entry.lastName}, {entry.firstName}

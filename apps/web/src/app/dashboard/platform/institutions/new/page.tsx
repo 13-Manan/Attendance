@@ -1,6 +1,6 @@
-import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { NewInstitutionForm } from "./new-institution-form";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { Panel } from "@/components/ui/panel";
 
 /**
@@ -20,12 +20,7 @@ export default async function NewInstitutionPage() {
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-5">
       <header className="flex flex-col gap-1">
-        <Link
-          href="/dashboard/platform/institutions"
-          className="text-xs text-neutral-500 hover:underline"
-        >
-          ← Institutions
-        </Link>
+        <BackToParent href="/dashboard/platform/institutions" label="Institutions" />
         <h1 className="text-xl font-semibold text-neutral-900">Add institution</h1>
         <p className="text-sm text-neutral-500">
           Creates the tenant. Its first administrator is provisioned separately

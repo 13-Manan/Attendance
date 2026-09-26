@@ -1,7 +1,7 @@
-import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getCampusForRequest } from "@/modules/campuses/service";
 import { CampusError } from "@/modules/campuses/types";
+import { PageTrail } from "@/components/nav/page-trail";
 import { EmptyState } from "@/components/ui/panel";
 import { CampusForm } from "../../campus-form";
 
@@ -41,9 +41,9 @@ export default async function EditCampusPage({ params }: PageProps) {
     if (error instanceof CampusError) {
       return (
         <div className="flex w-full max-w-3xl flex-col gap-4">
-          <Link href="/dashboard/campuses" className="text-xs text-neutral-500 hover:underline">
-            ← Campuses
-          </Link>
+          <PageTrail
+            items={[{ label: "Campuses", href: "/dashboard/campuses" }, { label: "Campus" }]}
+          />
           <EmptyState>{error.message}</EmptyState>
         </div>
       );
@@ -53,10 +53,10 @@ export default async function EditCampusPage({ params }: PageProps) {
 
   return (
     <div className="flex w-full max-w-3xl flex-col gap-5">
+      <PageTrail
+        items={[{ label: "Campuses", href: "/dashboard/campuses" }, { label: campus.name }]}
+      />
       <header className="flex flex-col gap-1">
-        <Link href="/dashboard/campuses" className="text-xs text-neutral-500 hover:underline">
-          ← Campuses
-        </Link>
         <h1 className="text-xl font-semibold text-neutral-900">{campus.name}</h1>
         <p className="max-w-2xl text-sm text-neutral-500">
           Renaming a campus or changing its code does not move anybody. Everything already assigned

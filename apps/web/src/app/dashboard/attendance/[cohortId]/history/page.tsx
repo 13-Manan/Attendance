@@ -4,6 +4,8 @@ import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getCohortAttendanceHistory } from "@/modules/attendance-analytics/service";
 import { ForbiddenError } from "@/modules/authorization/types";
 import { SessionStatusBadge, sessionHref } from "@/components/attendance/session-list";
+import { historyPath } from "@/components/attendance/session-origin";
+import { PageTrail } from "@/components/nav/page-trail";
 import {
   RateBar,
   RatePercent,
@@ -53,13 +55,14 @@ export default async function CohortAttendanceHistoryPage({ params }: PageProps)
 
   return (
     <div className="flex w-full max-w-4xl flex-col gap-5">
+      <PageTrail
+        items={[
+          { label: "Attendance", href: "/dashboard/attendance" },
+          { label: history.cohortName, href: `/dashboard/attendance/${cohortId}` },
+          { label: "History" },
+        ]}
+      />
       <header className="flex flex-col gap-1">
-        <Link
-          href={`/dashboard/attendance/${cohortId}`}
-          className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
-        >
-          ← Back to class
-        </Link>
         <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
           Attendance history
         </span>
@@ -109,7 +112,7 @@ export default async function CohortAttendanceHistoryPage({ params }: PageProps)
               <li key={session.sessionId} className="flex flex-col gap-2 py-3">
                 <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
                   <Link
-                    href={sessionHref(session)}
+                    href={sessionHref(session, historyPath(cohortId))}
                     className="flex min-w-0 flex-col gap-0.5 hover:underline"
                   >
                     <span className="truncate text-sm font-medium text-neutral-900">

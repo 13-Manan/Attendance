@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import {
@@ -6,6 +5,7 @@ import {
   getCohortFormOptionsForRequest,
 } from "@/modules/cohorts/directory-service";
 import { COHORT_WORDS, CohortError, type CohortDetail } from "@/modules/cohorts/directory-types";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Panel } from "@/components/ui/panel";
 import { CohortForm } from "../../cohort-form";
 
@@ -41,14 +41,14 @@ export default async function EditCohortPage({ params }: PageProps) {
 
   return (
     <div className="flex w-full max-w-3xl flex-col gap-5">
-      <div>
-        <Link
-          href={`/dashboard/academic/cohorts/${cohort.id}`}
-          className="text-xs text-neutral-500 hover:text-neutral-900"
-        >
-          ← Back to {cohort.name}
-        </Link>
-      </div>
+      <PageTrail
+        items={[
+          { label: "Academic", href: "/dashboard/academic" },
+          { label: words.Plural, href: "/dashboard/academic/cohorts" },
+          { label: cohort.name, href: `/dashboard/academic/cohorts/${cohort.id}` },
+          { label: "Edit" },
+        ]}
+      />
 
       <header className="flex flex-col gap-1">
         <h2 className="text-lg font-semibold text-neutral-900">Rename {words.singular}</h2>

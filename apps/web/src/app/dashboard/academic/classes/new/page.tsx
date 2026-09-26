@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getInstitutionType } from "@/modules/institutions/repository";
 import { getNewClassContext } from "@/modules/school-setup/service";
+import { BackToParent } from "@/components/nav/back-to-parent";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { NewClassForm } from "../class-controls";
 import { first } from "../shared";
@@ -32,9 +33,7 @@ export default async function NewClassPage({ searchParams }: PageProps) {
   return (
     <div className="flex w-full max-w-3xl flex-col gap-5">
       <div className="flex flex-col gap-1">
-        <Link href={back} className="text-sm text-neutral-500 hover:text-neutral-900 hover:underline">
-          &larr; Back to classes
-        </Link>
+        <BackToParent href={back} label="Classes" />
         <h2 className="text-lg font-semibold text-neutral-900">
           {from ? `Set up ${from.name}` : "Add class"}
         </h2>

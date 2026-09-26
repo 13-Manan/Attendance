@@ -8,6 +8,7 @@ import { getInstitutionById } from "@/modules/institutions/repository";
 import { resolveAttendanceMode } from "@/modules/institutions/service";
 import { listCohortSubjectsForCapture } from "@/modules/attendance-capture/service";
 import { listRecentSessionsForCohort } from "@/modules/attendance-review/repository";
+import { PageTrail } from "@/components/nav/page-trail";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState, Panel } from "@/components/ui/panel";
@@ -113,14 +114,11 @@ export default async function AttendanceCohortLandingPage({ params }: PageProps)
   if (mode === "DAILY") {
     return (
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
+        <PageTrail
+          items={[{ label: "Attendance", href: "/dashboard/attendance" }, { label: cohort.name }]}
+        />
         <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
           <div className="flex flex-col gap-1">
-            <Link
-              href="/dashboard/attendance"
-              className="w-fit text-xs text-neutral-500 hover:text-neutral-900 hover:underline"
-            >
-              ← All classes
-            </Link>
             <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
               {cohort.name}
             </h1>
@@ -158,11 +156,11 @@ export default async function AttendanceCohortLandingPage({ params }: PageProps)
   const subjects = await listCohortSubjectsForCapture(user, cohort.id);
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-6">
+      <PageTrail
+        items={[{ label: "Attendance", href: "/dashboard/attendance" }, { label: cohort.name }]}
+      />
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
-          <Link href="/dashboard/attendance" className="text-xs text-neutral-500 hover:underline">
-            ← All classes
-          </Link>
           <h1 className="text-xl font-semibold text-neutral-900">{cohort.name}</h1>
           <p className="text-sm text-neutral-500">
             Subject-wise attendance{cohort.termLabel ? ` · ${cohort.termLabel}` : ""}

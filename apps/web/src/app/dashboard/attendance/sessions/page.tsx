@@ -9,6 +9,7 @@ import {
 import { SESSION_STATUSES } from "@/modules/attendance-analytics/types";
 import type { FacultySessionFilters } from "@/modules/attendance-analytics/types";
 import { SessionRow } from "@/components/attendance/session-list";
+import { sessionsListPath } from "@/components/attendance/session-origin";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState, Panel } from "@/components/ui/panel";
@@ -219,7 +220,11 @@ export default async function FacultySessionsPage({ searchParams }: PageProps) {
         ) : (
           <ul className="flex flex-col divide-y divide-neutral-100">
             {list.sessions.map((session) => (
-              <SessionRow key={session.sessionId} session={session} />
+              <SessionRow
+                key={session.sessionId}
+                session={session}
+                returnTo={sessionsListPath(filters)}
+              />
             ))}
           </ul>
         )}

@@ -15,6 +15,7 @@ import {
   type StudentStatus,
 } from "@/modules/students/directory-types";
 import { studentDisplayName } from "@/modules/students/types";
+import { withReturnPath } from "@/lib/return-path";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -153,13 +154,22 @@ export function StudentFilterFields({
   );
 }
 
-/** One page of students: who they are, their class, admission, status and the actions. */
+/**
+ * One page of students: who they are, their class, admission, status and the actions.
+ *
+ * `returnTo` is the list this table sits in, when that is somewhere other
+ * than the whole directory — a section — so a student opened from it offers
+ * the way back there. The whole directory passes none: its students lead back
+ * to Students, their own parent.
+ */
 export function StudentDirectoryTable({
   rows,
   canEnrollFace,
+  returnTo,
 }: {
   rows: StudentListRow[];
   canEnrollFace: boolean;
+  returnTo?: string;
 }) {
   return (
     <TableScroll minWidth="min-w-[52rem]">
@@ -178,7 +188,7 @@ export function StudentDirectoryTable({
             <tr key={student.id} className="align-top transition-colors hover:bg-neutral-50/60">
               <td className="py-3 pr-4 first:pl-3">
                 <Link
-                  href={`${BASE}/${student.id}`}
+                  href={withReturnPath(`${BASE}/${student.id}`, returnTo)}
                   className="text-sm font-medium text-neutral-900 hover:underline"
                 >
                   {studentDisplayName(student)}
@@ -208,14 +218,14 @@ export function StudentDirectoryTable({
               </td>
               <td className="py-3 pr-3">
                 <div className="flex flex-col items-start gap-2">
-                  <Link href={`${BASE}/${student.id}`}>
+                  <Link href={withReturnPath(`${BASE}/${student.id}`, returnTo)}>
                     <Button type="button" variant="secondary">
                       View
                     </Button>
                   </Link>
                   {canEnrollFace ? (
                     <Link
-                      href={`${BASE}/${student.id}/enroll-face`}
+                      href={withReturnPath(`${BASE}/${student.id}/enroll-face`, returnTo)}
                       className="text-xs text-neutral-600 underline underline-offset-2 hover:text-neutral-900"
                     >
                       Enroll face

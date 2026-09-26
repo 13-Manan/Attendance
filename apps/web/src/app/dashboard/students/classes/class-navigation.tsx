@@ -20,46 +20,6 @@ import { LINK_SECONDARY } from "../../academic/classes/shared";
 const FOCUS =
   "rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2";
 
-export interface TrailItem {
-  label: string;
-  /** Omitted for the page being viewed. */
-  href?: string;
-}
-
-/**
- * Where this page sits, by name: Students / Classes / 2nd / Section A.
- *
- * The shell's breadcrumb above it is built from the URL alone and says
- * "Details" for a record; this one names the class and section, which is what
- * someone finding their way around a school needs to read.
- */
-export function StudentsTrail({ items }: { items: TrailItem[] }) {
-  return (
-    <nav aria-label="Class and section">
-      <ol className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-neutral-500">
-        {items.map((item, index) => (
-          <li key={`${index}-${item.label}`} className="flex items-center gap-1.5">
-            {item.href ? (
-              <Link href={item.href} className={`${FOCUS} hover:text-neutral-900 hover:underline`}>
-                {item.label}
-              </Link>
-            ) : (
-              <span aria-current="page" className="font-medium text-neutral-900">
-                {item.label}
-              </span>
-            )}
-            {index < items.length - 1 ? (
-              <span aria-hidden className="text-neutral-300">
-                /
-              </span>
-            ) : null}
-          </li>
-        ))}
-      </ol>
-    </nav>
-  );
-}
-
 function plural(count: number, one: string, many: string): string {
   return `${count.toLocaleString()} ${count === 1 ? one : many}`;
 }
