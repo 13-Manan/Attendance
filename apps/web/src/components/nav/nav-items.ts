@@ -36,7 +36,26 @@ export interface NavItem {
   collegeLabel?: string;
   /** Hide entirely at the other kind of institution. */
   only?: "SCHOOL" | "COLLEGE";
+  /**
+   * This link's step in setting up a school — Academic year, Faculty, Classes,
+   * Students — for someone who does that. See `SCHOOL_SETUP_GROUP`.
+   */
+  schoolSetupStep?: number;
 }
+
+/**
+ * Where a school's setup links are shown, together and in the order the work
+ * is done, to anyone who sets the school up (`academicStructure.manage`): the
+ * academic year, the teachers, the classes — whose sections need those
+ * teachers — and then the students placed in them. Split between People and
+ * Academic, the principal read Students first and the year last.
+ *
+ * Only the heading and the position move. Each link keeps its own permission,
+ * so nobody is offered a page they were not offered before; a teacher, who
+ * sets nothing up, keeps Students under People; and a college's navigation is
+ * unchanged.
+ */
+const SCHOOL_SETUP_GROUP: NavGroup = "Academic";
 
 /**
  * Declarative, permission-filtered navigation.
@@ -101,8 +120,20 @@ export const NAV_ITEMS: NavItem[] = [
 
   { href: "/dashboard", label: "Overview", group: "Today" },
 
-  { href: "/dashboard/students", label: "Students", group: "People", permission: "student.read" },
-  { href: "/dashboard/faculty", label: "Faculty", group: "People", permission: "institution.read" },
+  {
+    href: "/dashboard/students",
+    label: "Students",
+    group: "People",
+    permission: "student.read",
+    schoolSetupStep: 4,
+  },
+  {
+    href: "/dashboard/faculty",
+    label: "Faculty",
+    group: "People",
+    permission: "institution.read",
+    schoolSetupStep: 2,
+  },
 
   {
     href: "/dashboard/academic/cohorts",
@@ -131,6 +162,7 @@ export const NAV_ITEMS: NavItem[] = [
     collegeLabel: "Academic sessions",
     group: "Academic",
     permission: "academicStructure.manage",
+    schoolSetupStep: 1,
   },
   {
     // A school sets up its classes, sections and their teachers on one screen,
@@ -142,6 +174,7 @@ export const NAV_ITEMS: NavItem[] = [
     group: "Academic",
     permission: "academicStructure.manage",
     only: "SCHOOL",
+    schoolSetupStep: 3,
   },
 
   {
@@ -254,6 +287,14 @@ export function buildNavSections(
   kind: InstitutionKind,
   isPlatform = false,
 ): NavSection[] {
+  // Someone who sets a school up reads its setup as one run, in order; see
+  // SCHOOL_SETUP_GROUP. Everyone else sees each link under its own group.
+  const setsUpSchool = kind === "SCHOOL" && can("academicStructure.manage");
+  const groupOf = (item: NavItem): NavGroup =>
+    setsUpSchool && item.schoolSetupStep !== undefined ? SCHOOL_SETUP_GROUP : item.group;
+  const setupStep = (item: NavItem) =>
+    setsUpSchool ? (item.schoolSetupStep ?? Number.MAX_SAFE_INTEGER) : 0;
+
   const sections: NavSection[] = [];
   for (const group of NAV_GROUPS) {
     // A platform account gets the platform groups only; everyone else gets
@@ -263,15 +304,18 @@ export function buildNavSections(
 
     const items = NAV_ITEMS.filter(
       (item) =>
-        item.group === group &&
+        groupOf(item) === group &&
         (!item.permission || can(item.permission)) &&
         // An unknown institution kind only reaches here for a non-platform
         // account with no institution, which the routes themselves handle.
         (!item.only || kind === null || item.only === kind),
-    ).map((item) => ({
-      href: item.href,
-      label: kind === "COLLEGE" && item.collegeLabel ? item.collegeLabel : item.label,
-    }));
+    )
+      // A stable sort: setup steps in order, anything else where it was.
+      .sort((a, b) => setupStep(a) - setupStep(b))
+      .map((item) => ({
+        href: item.href,
+        label: kind === "COLLEGE" && item.collegeLabel ? item.collegeLabel : item.label,
+      }));
     if (items.length > 0) sections.push({ group, items });
   }
   return sections;

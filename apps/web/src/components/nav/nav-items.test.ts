@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { PermissionKey } from "@/modules/authorization/permissions";
+import { SYSTEM_ROLES, type PermissionKey } from "@/modules/authorization/permissions";
 import { NAV_GROUPS, NAV_ITEMS, buildNavSections } from "./nav-items.ts";
 
 /**
@@ -163,4 +163,101 @@ test("offline attendance survived the regrouping", () => {
   // It is the one link a teacher needs when the network is gone, and it has no
   // replacement elsewhere in the dashboard.
   assert.ok(hrefs(buildNavSections(() => true, "SCHOOL")).includes("/dashboard/offline"));
+});
+
+// ---------------------------------------------------------------------------
+// A principal sets a school up in order — the year, the teachers, the classes,
+// then the students placed in them — and the sidebar reads the same way.
+// ---------------------------------------------------------------------------
+
+/** A seeded role's own permission set, not a hand-picked one. */
+function role(key: string) {
+  const found = SYSTEM_ROLES.find((candidate) => candidate.key === key);
+  assert.ok(found, `no seeded role ${key}`);
+  return allowing(...found.permissions);
+}
+
+const SCHOOL_SETUP = [
+  { href: "/dashboard/academic/sessions", label: "Academic year" },
+  { href: "/dashboard/faculty", label: "Faculty" },
+  { href: "/dashboard/academic/classes", label: "Classes" },
+  { href: "/dashboard/students", label: "Students" },
+];
+
+test("a principal reads Academic year, Faculty, Classes, Students — in that order, before Attendance", () => {
+  // INSTITUTION_ADMIN holds exactly the school admin's permissions.
+  for (const key of ["SCHOOL_ADMIN", "INSTITUTION_ADMIN"]) {
+    const sections = buildNavSections(role(key), "SCHOOL");
+    const groups = sections.map((section) => section.group);
+    assert.deepEqual(groups.slice(0, 3), ["Today", "Academic", "Attendance"], key);
+    assert.ok(!groups.includes("People"), `${key}: an empty People heading`);
+    assert.deepEqual(sections.find((section) => section.group === "Academic")?.items, SCHOOL_SETUP, key);
+
+    const all = hrefs(sections);
+    const at = (href: string) => all.indexOf(href);
+    assert.ok(
+      at("/dashboard") < at("/dashboard/academic/sessions") &&
+        at("/dashboard/academic/sessions") < at("/dashboard/faculty") &&
+        at("/dashboard/faculty") < at("/dashboard/academic/classes") &&
+        at("/dashboard/academic/classes") < at("/dashboard/students") &&
+        at("/dashboard/students") < at("/dashboard/attendance"),
+      `${key}: ${all.join(" ")}`,
+    );
+  }
+});
+
+test("each of the four is offered once, at its own address", () => {
+  const all = hrefs(buildNavSections(role("SCHOOL_ADMIN"), "SCHOOL"));
+  for (const { href } of SCHOOL_SETUP) {
+    assert.equal(all.filter((candidate) => candidate === href).length, 1, href);
+    assert.ok(NAV_ITEMS.some((item) => item.href === href), `${href} is not a declared link`);
+  }
+});
+
+test("a teacher's sidebar is as it was: Students under People, no setup", () => {
+  for (const key of ["FACULTY", "CLASS_TEACHER"]) {
+    const sections = buildNavSections(role(key), "SCHOOL");
+    assert.deepEqual(
+      sections.find((section) => section.group === "People")?.items,
+      [{ href: "/dashboard/students", label: "Students" }],
+      key,
+    );
+    assert.equal(sections.find((section) => section.group === "Academic"), undefined, key);
+  }
+});
+
+test("a college's sidebar is as it was", () => {
+  const sections = buildNavSections(role("COLLEGE_ADMIN"), "COLLEGE");
+  assert.deepEqual(sections.find((section) => section.group === "People")?.items, [
+    { href: "/dashboard/students", label: "Students" },
+    { href: "/dashboard/faculty", label: "Faculty" },
+  ]);
+  assert.deepEqual(sections.find((section) => section.group === "Academic")?.items, [
+    { href: "/dashboard/academic/cohorts", label: "Classes" },
+    { href: "/dashboard/academic/units", label: "Programs & semesters" },
+    { href: "/dashboard/academic/subjects", label: "Subjects" },
+    { href: "/dashboard/academic/sessions", label: "Academic sessions" },
+  ]);
+});
+
+test("the order moves links, never access: every role sees exactly what its permissions allow", () => {
+  // Worked out from the item list alone, without any grouping or ordering:
+  // if the setup order ever offered a page a role may not open, or hid one it
+  // may, the two sets would differ.
+  for (const definition of SYSTEM_ROLES) {
+    const can = allowing(...definition.permissions);
+    const isPlatform = definition.key === "PLATFORM_SUPER_ADMIN";
+    for (const kind of ["SCHOOL", "COLLEGE", null] as const) {
+      const expected = NAV_ITEMS.filter(
+        (item) =>
+          (item.group === "Platform" || item.group === "Platform administration") === isPlatform &&
+          (!item.permission || can(item.permission)) &&
+          (!item.only || kind === null || item.only === kind),
+      )
+        .map((item) => item.href)
+        .sort();
+      const shown = hrefs(buildNavSections(can, kind, isPlatform)).sort();
+      assert.deepEqual(shown, [...new Set(expected)], `${definition.key} at ${kind}`);
+    }
+  }
 });
