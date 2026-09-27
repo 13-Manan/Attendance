@@ -1,6 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "@/lib/prisma";
+import { PERMISSIONS } from "./permissions.ts";
 import { assignRole } from "./role-management.ts";
 import { ForbiddenError } from "./types.ts";
 import type { SessionUser } from "../auth-tenancy/types.ts";
@@ -181,10 +182,9 @@ test("nothing is written when a grant is refused", { skip: SKIP }, async () => {
 test("a platform user may grant PLATFORM_SUPER_ADMIN", { skip: SKIP }, async () => {
   // The capability still exists for whoever legitimately holds it — the guard
   // narrows who may use it, it does not remove it.
-  const platform = actor(
-    [...INSTITUTION_ADMIN_PERMISSIONS, "platform.institution.create", "platform.institution.suspend"],
-    null,
-  );
+  // What the platform role holds: the whole catalogue (`SYSTEM_ROLES`), so a
+  // permission added to it later is one this actor holds too.
+  const platform = actor([...PERMISSIONS], null);
   const assignment = await assignRole(platform, {
     targetUserId,
     roleId: roleIds.PLATFORM_SUPER_ADMIN,

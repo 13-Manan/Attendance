@@ -274,6 +274,7 @@ export async function changeOwnPasswordService(
     select: {
       id: true,
       institutionId: true,
+      email: true,
       passwordHash: true,
       studentProfile: { select: { studentCode: true } },
     },
@@ -282,7 +283,13 @@ export async function changeOwnPasswordService(
     return { ok: false, error: "The current password is not correct." };
   }
 
-  const problem = newPasswordProblem({ ...input, loginId: user.studentProfile?.studentCode });
+  // A student signs in with their student ID, staff with their email: the new
+  // password may be neither.
+  const problem = newPasswordProblem({
+    ...input,
+    loginId: user.studentProfile?.studentCode ?? user.email,
+    loginLabel: user.studentProfile ? "the student ID" : "your email address",
+  });
   if (problem) return { ok: false, error: problem };
 
   const passwordHash = await hashPassword(input.next);

@@ -19,7 +19,12 @@ const ERROR_ID = "change-password-error";
  * password never lingers in a box after the server has answered — right or
  * wrong, it has to be typed again.
  */
-export function ChangePasswordForm() {
+export function ChangePasswordForm({
+  hint = "At least 8 characters. Not the same as the student ID.",
+}: {
+  /** The rule under the new-password box, in the words of whoever is signed in. */
+  hint?: string;
+} = {}) {
   const [state, formAction, pending] = useActionState(changePasswordAction, INITIAL);
   const attempt = state.attempt ?? 0;
   const invalid = Boolean(state.error);
@@ -55,7 +60,7 @@ export function ChangePasswordForm() {
         />
       </Field>
       <p id="new-password-hint" className="-mt-2 text-xs text-neutral-500">
-        At least 8 characters. Not the same as the student ID.
+        {hint}
       </p>
       <Field label="Confirm new password" htmlFor="confirmPassword">
         <Input

@@ -76,3 +76,16 @@ test("a new password is long enough, confirmed, new, and not the student ID", ()
     /same as the student ID/,
   );
 });
+
+test("a staff account's new password may not be its email address either", () => {
+  assert.equal(
+    newPasswordProblem({
+      current: "old-password-1",
+      next: "Head@College.test",
+      confirm: "Head@College.test",
+      loginId: "head@college.test",
+      loginLabel: "your email address",
+    }),
+    "A password cannot be the same as your email address.",
+  );
+});

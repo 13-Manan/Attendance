@@ -55,6 +55,8 @@ export function StudentForm({
   canPlace,
   defaultCohortId,
   returnTo,
+  action,
+  hidden,
 }: {
   mode: "create" | "edit";
   student?: StudentDetail;
@@ -69,9 +71,17 @@ export function StudentForm({
    * from. Each action checks it again.
    */
   returnTo?: string;
+  /**
+   * A different action with the same state, for the same form submitted from
+   * elsewhere — a college course section, whose action places the new student
+   * there and nowhere else. The fields and their checks are unchanged.
+   */
+  action?: (state: StudentActionState, formData: FormData) => Promise<StudentActionState>;
+  /** Fields that action needs and the person filling the form does not choose. */
+  hidden?: Record<string, string>;
 }) {
   const [state, formAction, pending] = useActionState(
-    mode === "create" ? createStudentAction : updateStudentAction,
+    action ?? (mode === "create" ? createStudentAction : updateStudentAction),
     initialState,
   );
   const key = state.attempt ?? 0;
@@ -81,6 +91,9 @@ export function StudentForm({
     <form action={formAction} className="flex w-full max-w-2xl flex-col gap-5">
       {student ? <input type="hidden" name="id" value={student.id} /> : null}
       {returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}
+      {Object.entries(hidden ?? {}).map(([name, value]) => (
+        <input key={name} type="hidden" name={name} value={value} />
+      ))}
 
       <fieldset className="flex flex-col gap-4">
         <legend className="mb-2 text-sm font-semibold text-neutral-900">Who they are</legend>

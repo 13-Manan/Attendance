@@ -15,6 +15,8 @@ export const NAV_GROUPS = [
   "Attendance",
   "Connect",
   "Administration",
+  // A college head of department's own account. Nobody else has a link here.
+  "Account",
 ] as const;
 
 /**
@@ -32,6 +34,13 @@ export interface NavItem {
   group: NavGroup;
   // Omit to show for any authenticated user; set to require a permission.
   permission?: PermissionKey;
+  /** Show when the viewer holds any of these — for a link an administrator and a head of department share. */
+  anyOf?: PermissionKey[];
+  /**
+   * Hide from a viewer who holds this: a head of department's "My department"
+   * is an administrator's "Departments", and one person should see one of them.
+   */
+  unless?: PermissionKey;
   /** Used instead of `label` at a college, where the concept has another name. */
   collegeLabel?: string;
   /** Hide entirely at the other kind of institution. */
@@ -77,11 +86,18 @@ const SCHOOL_SETUP_GROUP: NavGroup = "Academic";
  * A school has classes and sections; a college has departments, semesters and
  * courses. A school is offered two links — Academic year and Classes — and
  * sets up a class, its sections and their teachers in one place
- * (`/dashboard/academic/classes`). A college keeps the structure, class and
- * subject screens, which show the same rows one table at a time. Subjects
- * would disappear at a school regardless: `createSubjectForRequest` refuses
- * `subjects_are_college_only`, and a link to a screen that can only refuse is
- * worse than no link.
+ * (`/dashboard/academic/classes`). A college is offered its own hierarchy —
+ * Academic sessions, Departments, Semesters, Courses — each course with its
+ * sections, teachers and students (`/dashboard/college`), built on the same
+ * rows. The older one-table-at-a-time screens (classes, programmes, subjects,
+ * enrolments) are no longer in a college's navigation, and every route still
+ * answers, so a bookmark keeps working.
+ *
+ * A college's head of department sees their department's links — My
+ * department, Semesters, Courses, Sections, their Faculty and Students, their
+ * teaching's Attendance, and My account — and nothing of another department's:
+ * those pages check the department on the server, as every page checks its
+ * own permission.
  */
 export const NAV_ITEMS: NavItem[] = [
   {
@@ -134,28 +150,24 @@ export const NAV_ITEMS: NavItem[] = [
     permission: "institution.read",
     schoolSetupStep: 2,
   },
+  {
+    // A head of department's own department's people; see /dashboard/college.
+    href: "/dashboard/college/faculty",
+    label: "Faculty",
+    group: "People",
+    permission: "department.manage",
+    unless: "institution.read",
+    only: "COLLEGE",
+  },
+  {
+    href: "/dashboard/college/students",
+    label: "Students",
+    group: "People",
+    permission: "department.manage",
+    unless: "student.read",
+    only: "COLLEGE",
+  },
 
-  {
-    href: "/dashboard/academic/cohorts",
-    label: "Classes",
-    group: "Academic",
-    permission: "academicStructure.manage",
-    only: "COLLEGE",
-  },
-  {
-    href: "/dashboard/academic/units",
-    label: "Programs & semesters",
-    group: "Academic",
-    permission: "academicStructure.manage",
-    only: "COLLEGE",
-  },
-  {
-    href: "/dashboard/academic/subjects",
-    label: "Subjects",
-    group: "Academic",
-    permission: "academicStructure.manage",
-    only: "COLLEGE",
-  },
   {
     href: "/dashboard/academic/sessions",
     label: "Academic year",
@@ -163,6 +175,44 @@ export const NAV_ITEMS: NavItem[] = [
     group: "Academic",
     permission: "academicStructure.manage",
     schoolSetupStep: 1,
+  },
+  {
+    href: "/dashboard/college/departments",
+    label: "Departments",
+    group: "Academic",
+    permission: "academicStructure.manage",
+    only: "COLLEGE",
+  },
+  {
+    // The same page: a head of department has one department, and is taken to it.
+    href: "/dashboard/college/departments",
+    label: "My department",
+    group: "Academic",
+    permission: "department.manage",
+    unless: "academicStructure.manage",
+    only: "COLLEGE",
+  },
+  {
+    href: "/dashboard/college/semesters",
+    label: "Semesters",
+    group: "Academic",
+    anyOf: ["academicStructure.manage", "department.manage"],
+    only: "COLLEGE",
+  },
+  {
+    href: "/dashboard/college/courses",
+    label: "Courses",
+    group: "Academic",
+    anyOf: ["academicStructure.manage", "department.manage"],
+    only: "COLLEGE",
+  },
+  {
+    href: "/dashboard/college/sections",
+    label: "Sections",
+    group: "Academic",
+    permission: "department.manage",
+    unless: "academicStructure.manage",
+    only: "COLLEGE",
   },
   {
     // A school sets up its classes, sections and their teachers on one screen,
@@ -245,6 +295,8 @@ export const NAV_ITEMS: NavItem[] = [
     group: "Administration",
     permission: "auditLog.read",
   },
+
+  { href: "/dashboard/account", label: "My account", group: "Account", permission: "department.manage" },
 ];
 
 export interface NavSection {
@@ -295,8 +347,16 @@ export function buildNavSections(
   const setupStep = (item: NavItem) =>
     setsUpSchool ? (item.schoolSetupStep ?? Number.MAX_SAFE_INTEGER) : 0;
 
+  // A head of department's work is their department, so it leads, above the
+  // people in it. Everyone else keeps the order NAV_GROUPS gives.
+  const headsDepartment =
+    kind === "COLLEGE" && can("department.manage") && !can("academicStructure.manage");
+  const groups: readonly NavGroup[] = headsDepartment
+    ? NAV_GROUPS.map((group) => (group === "People" ? "Academic" : group === "Academic" ? "People" : group))
+    : NAV_GROUPS;
+
   const sections: NavSection[] = [];
-  for (const group of NAV_GROUPS) {
+  for (const group of groups) {
     // A platform account gets the platform groups only; everyone else gets
     // everything except them (their permission check would fail anyway, but
     // being explicit keeps the two tiers from leaking into each other).
@@ -306,6 +366,8 @@ export function buildNavSections(
       (item) =>
         groupOf(item) === group &&
         (!item.permission || can(item.permission)) &&
+        (!item.anyOf || item.anyOf.some((permission) => can(permission))) &&
+        (!item.unless || !can(item.unless)) &&
         // An unknown institution kind only reaches here for a non-platform
         // account with no institution, which the routes themselves handle.
         (!item.only || kind === null || item.only === kind),

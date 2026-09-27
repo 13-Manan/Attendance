@@ -78,6 +78,55 @@ export const DASHBOARD_ROUTES: readonly RouteEntry[] = [
   { pattern: "/dashboard/academic/subjects/[subjectId]/edit", namedTrail: true },
   { pattern: "/dashboard/academic/enrollments", label: "Enrollments" },
 
+  // A college's structure: departments → semesters → courses → sections. Every
+  // page names its records, so each draws its own trail; the `semesters`,
+  // `courses`, `sections` and `students` segments are not pages and redirect
+  // to the record above them.
+  { pattern: "/dashboard/college", label: "College" },
+  { pattern: "/dashboard/college/departments", label: "Departments", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]/faculty", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]/students", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]/semesters" },
+  {
+    pattern: "/dashboard/college/departments/[departmentId]/semesters/[semesterId]",
+    parent: "/dashboard/college/departments/[departmentId]",
+    namedTrail: true,
+  },
+  { pattern: "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses" },
+  {
+    pattern: "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]",
+    parent: "/dashboard/college/departments/[departmentId]/semesters/[semesterId]",
+    namedTrail: true,
+  },
+  {
+    pattern: "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections",
+  },
+  {
+    pattern:
+      "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]",
+    parent: "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]",
+    namedTrail: true,
+  },
+  {
+    pattern:
+      "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]/students",
+  },
+  {
+    pattern:
+      "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]/students/new",
+    parent:
+      "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]",
+    namedTrail: true,
+  },
+  { pattern: "/dashboard/college/semesters", label: "Semesters", namedTrail: true },
+  { pattern: "/dashboard/college/courses", label: "Courses", namedTrail: true },
+  { pattern: "/dashboard/college/sections", label: "Sections", namedTrail: true },
+  // A head of department's People links; each redirects to their own department's page.
+  { pattern: "/dashboard/college/faculty" },
+  { pattern: "/dashboard/college/students" },
+  { pattern: "/dashboard/account", label: "My account", namedTrail: true },
+
   { pattern: "/dashboard/attendance", label: "Attendance" },
   { pattern: "/dashboard/attendance/sessions", label: "Sessions" },
   { pattern: "/dashboard/attendance/[cohortId]", namedTrail: true },

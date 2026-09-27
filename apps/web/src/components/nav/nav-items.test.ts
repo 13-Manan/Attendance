@@ -29,15 +29,23 @@ test("a link appears only when its permission is held", () => {
   assert.deepEqual(hrefs(sections), ["/dashboard", "/dashboard/students"]);
 });
 
-test("subjects are hidden at a school and shown at a college", () => {
+test("a college is set up from its departments; the one-table screens are not in its navigation", () => {
   const can = allowing("academicStructure.manage");
-  assert.ok(!hrefs(buildNavSections(can, "SCHOOL")).includes("/dashboard/academic/subjects"));
-  assert.ok(hrefs(buildNavSections(can, "COLLEGE")).includes("/dashboard/academic/subjects"));
+  const college = hrefs(buildNavSections(can, "COLLEGE"));
+  const school = hrefs(buildNavSections(can, "SCHOOL"));
+  for (const href of ["/dashboard/college/departments", "/dashboard/college/semesters", "/dashboard/college/courses"]) {
+    assert.ok(college.includes(href), href);
+    assert.ok(!school.includes(href), `${href} at a school`);
+  }
+  for (const href of ["/dashboard/academic/subjects", "/dashboard/academic/units", "/dashboard/academic/cohorts"]) {
+    assert.ok(!college.includes(href), href);
+    assert.ok(!school.includes(href), href);
+  }
 });
 
 test("a platform-level account (no institution kind) is not narrowed by kind", () => {
   const can = allowing("academicStructure.manage");
-  assert.ok(hrefs(buildNavSections(can, null)).includes("/dashboard/academic/subjects"));
+  assert.ok(hrefs(buildNavSections(can, null)).includes("/dashboard/college/departments"));
 });
 
 test("a school is offered Academic year and Classes, and nothing more technical", () => {
@@ -49,12 +57,12 @@ test("a school is offered Academic year and Classes, and nothing more technical"
     { href: "/dashboard/academic/sessions", label: "Academic year" },
     { href: "/dashboard/academic/classes", label: "Classes" },
   ]);
-  // A college's screens are unchanged.
+  // A college reads its own hierarchy, session first.
   assert.deepEqual(academic("COLLEGE"), [
-    { href: "/dashboard/academic/cohorts", label: "Classes" },
-    { href: "/dashboard/academic/units", label: "Programs & semesters" },
-    { href: "/dashboard/academic/subjects", label: "Subjects" },
     { href: "/dashboard/academic/sessions", label: "Academic sessions" },
+    { href: "/dashboard/college/departments", label: "Departments" },
+    { href: "/dashboard/college/semesters", label: "Semesters" },
+    { href: "/dashboard/college/courses", label: "Courses" },
   ]);
 });
 
@@ -64,7 +72,7 @@ test("sections come back in the declared group order", () => {
   const sections = buildNavSections(() => true, "COLLEGE");
   assert.deepEqual(
     sections.map((section) => section.group),
-    ["Today", "People", "Academic", "Attendance", "Connect", "Administration"],
+    ["Today", "People", "Academic", "Attendance", "Connect", "Administration", "Account"],
   );
 });
 
@@ -226,18 +234,69 @@ test("a teacher's sidebar is as it was: Students under People, no setup", () => 
   }
 });
 
-test("a college's sidebar is as it was", () => {
-  const sections = buildNavSections(role("COLLEGE_ADMIN"), "COLLEGE");
-  assert.deepEqual(sections.find((section) => section.group === "People")?.items, [
+test("a college administrator reads Academic sessions, Departments, Semesters, Courses", () => {
+  for (const key of ["COLLEGE_ADMIN", "INSTITUTION_ADMIN"]) {
+    const sections = buildNavSections(role(key), "COLLEGE");
+    assert.deepEqual(
+      sections.map((section) => section.group),
+      ["Today", "People", "Academic", "Attendance", "Connect", "Administration"],
+      key,
+    );
+    assert.deepEqual(sections.find((section) => section.group === "People")?.items, [
+      { href: "/dashboard/students", label: "Students" },
+      { href: "/dashboard/faculty", label: "Faculty" },
+    ]);
+    assert.deepEqual(sections.find((section) => section.group === "Academic")?.items, [
+      { href: "/dashboard/academic/sessions", label: "Academic sessions" },
+      { href: "/dashboard/college/departments", label: "Departments" },
+      { href: "/dashboard/college/semesters", label: "Semesters" },
+      { href: "/dashboard/college/courses", label: "Courses" },
+    ]);
+  }
+});
+
+test("a head of department reads their department first, then its people, attendance and account", () => {
+  const sections = buildNavSections(role("HOD"), "COLLEGE");
+  assert.deepEqual(
+    sections.map((section) => section.group),
+    ["Today", "Academic", "People", "Attendance", "Account"],
+  );
+  const items = (group: string) => sections.find((section) => section.group === group)?.items;
+  assert.deepEqual(items("Academic"), [
+    { href: "/dashboard/college/departments", label: "My department" },
+    { href: "/dashboard/college/semesters", label: "Semesters" },
+    { href: "/dashboard/college/courses", label: "Courses" },
+    { href: "/dashboard/college/sections", label: "Sections" },
+  ]);
+  assert.deepEqual(items("People"), [
+    { href: "/dashboard/college/faculty", label: "Faculty" },
+    { href: "/dashboard/college/students", label: "Students" },
+  ]);
+  assert.deepEqual(items("Attendance"), [
+    { href: "/dashboard/attendance", label: "Attendance" },
+    { href: "/dashboard/attendance/sessions", label: "Sessions" },
+    { href: "/dashboard/offline", label: "Offline attendance" },
+    { href: "/dashboard/reports", label: "Reports" },
+  ]);
+  assert.deepEqual(items("Account"), [{ href: "/dashboard/account", label: "My account" }]);
+  // Nothing college-wide: not the whole directory, not the old setup screens.
+  const all = hrefs(sections);
+  for (const href of ["/dashboard/students", "/dashboard/faculty", "/dashboard/academic/sessions", "/dashboard/academic/cohorts"]) {
+    assert.ok(!all.includes(href), href);
+  }
+});
+
+test("a college teacher's sidebar is as it was, and a school's has no college links", () => {
+  const teacher = buildNavSections(role("FACULTY"), "COLLEGE");
+  assert.deepEqual(teacher.find((section) => section.group === "People")?.items, [
     { href: "/dashboard/students", label: "Students" },
-    { href: "/dashboard/faculty", label: "Faculty" },
   ]);
-  assert.deepEqual(sections.find((section) => section.group === "Academic")?.items, [
-    { href: "/dashboard/academic/cohorts", label: "Classes" },
-    { href: "/dashboard/academic/units", label: "Programs & semesters" },
-    { href: "/dashboard/academic/subjects", label: "Subjects" },
-    { href: "/dashboard/academic/sessions", label: "Academic sessions" },
-  ]);
+  assert.equal(teacher.find((section) => section.group === "Academic"), undefined);
+  assert.equal(teacher.find((section) => section.group === "Account"), undefined);
+  for (const key of ["SCHOOL_ADMIN", "FACULTY", "CLASS_TEACHER", "INSTITUTION_ADMIN"]) {
+    const all = hrefs(buildNavSections(role(key), "SCHOOL"));
+    assert.ok(!all.some((href) => href.startsWith("/dashboard/college") || href === "/dashboard/account"), key);
+  }
 });
 
 test("the order moves links, never access: every role sees exactly what its permissions allow", () => {
@@ -252,6 +311,8 @@ test("the order moves links, never access: every role sees exactly what its perm
         (item) =>
           (item.group === "Platform" || item.group === "Platform administration") === isPlatform &&
           (!item.permission || can(item.permission)) &&
+          (!item.anyOf || item.anyOf.some((permission) => can(permission))) &&
+          (!item.unless || !can(item.unless)) &&
           (!item.only || kind === null || item.only === kind),
       )
         .map((item) => item.href)

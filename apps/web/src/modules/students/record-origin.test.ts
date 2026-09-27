@@ -7,11 +7,18 @@ const SECTION = "cmu5dxyup000gitgucbrqyopw";
 const COHORT = "cmu5dxyuq000iitgu8zwyd8ln";
 const SECTION_PATH = `/dashboard/students/classes/${CLASS}/sections/${SECTION}`;
 
-test("a student's record can be returned from a section or a class roster, and nothing else", () => {
+const COLLEGE_SECTION_PATH =
+  `/dashboard/college/departments/${CLASS}/semesters/${SECTION}/courses/${COHORT}/sections/${SECTION}`;
+
+test("a student's record can be returned from a section, a class roster or a college course section, and nothing else", () => {
   assert.deepEqual(STUDENT_RECORD_ORIGINS, [
     "/dashboard/students/classes/[classId]/sections/[sectionId]",
     "/dashboard/academic/cohorts/[cohortId]",
+    "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]",
   ]);
+  // Rebuilt from its ids; a query it does not use is dropped.
+  assert.equal(studentOriginPath(COLLEGE_SECTION_PATH), COLLEGE_SECTION_PATH);
+  assert.equal(studentOriginPath(`${COLLEGE_SECTION_PATH}?evil=1`), COLLEGE_SECTION_PATH);
   assert.equal(studentOriginPath(SECTION_PATH), SECTION_PATH);
   assert.equal(
     studentOriginPath(`/dashboard/academic/cohorts/${COHORT}`),
@@ -47,6 +54,10 @@ test("anything that is not a known list is no origin", () => {
     `//evil.example${SECTION_PATH}`,
     `${SECTION_PATH}#x`,
     `/dashboard/students/classes/${CLASS}/sections/..`,
+    `/dashboard/college/departments/${CLASS}`,
+    `/dashboard/college/departments/${CLASS}/semesters/${SECTION}/courses/${COHORT}`,
+    `//evil.example${COLLEGE_SECTION_PATH}`,
+    COLLEGE_SECTION_PATH.replace(SECTION, "..%2F.."),
   ]) {
     assert.equal(studentOriginPath(value), null, String(value));
   }

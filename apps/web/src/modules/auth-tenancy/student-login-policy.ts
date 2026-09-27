@@ -104,6 +104,8 @@ export function newPasswordProblem(input: {
   next: string;
   confirm: string;
   loginId?: string | null;
+  /** How the sign-in name is referred to: "the student ID", or a staff account's "your email address". */
+  loginLabel?: string;
 }): string | null {
   const { current, next, confirm, loginId } = input;
   if (next.length < PASSWORD_RULES.minLength) {
@@ -116,7 +118,7 @@ export function newPasswordProblem(input: {
   if (next !== confirm) return "The new password and its confirmation do not match.";
   if (next === current) return "Choose a password different from the current one.";
   if (loginId && next.trim().toLowerCase() === loginId.trim().toLowerCase()) {
-    return "A password cannot be the same as the student ID.";
+    return `A password cannot be the same as ${input.loginLabel ?? "the student ID"}.`;
   }
   return null;
 }

@@ -5,7 +5,7 @@ import { describeEnrollment, getStudentDashboard } from "@/modules/attendance-an
 import { getInstitutionIdentity } from "@/modules/institutions/repository";
 import { Button } from "@/components/ui/button";
 import { EmptyState, Panel } from "@/components/ui/panel";
-import { ChangePasswordForm } from "./change-password-form";
+import { ChangePasswordForm } from "@/components/account/change-password-form";
 
 /**
  * The student account: who it belongs to, its password, and signing out.

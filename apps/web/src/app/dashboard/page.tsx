@@ -3,9 +3,13 @@ import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { getFacultyDashboard } from "@/modules/attendance-analytics/service";
 import { hasPermission, isPlatformUser } from "@/modules/authorization/service";
+import { ForbiddenError } from "@/modules/authorization/types";
+import { getCollegeHome } from "@/modules/college-setup/service";
+import { CollegeSetupError } from "@/modules/college-setup/types";
 import { getFaceServiceStatus, getInstitutionCounts } from "@/modules/institutions/overview";
 import { getInstitutionType } from "@/modules/institutions/repository";
 import { SessionRow } from "@/components/attendance/session-list";
+import { DepartmentOverviewPanel } from "@/components/dashboard/department-overview-panel";
 import { QuickActionsPanel } from "@/components/dashboard/quick-actions-panel";
 import { SystemStatusPanel } from "@/components/dashboard/system-status-panel";
 import { StatCard, StatGrid, formatSessionDate } from "@/components/ui/attendance-stat";
@@ -79,11 +83,20 @@ export default async function DashboardHomePage() {
   // Independent reads, issued together. The two additions cannot take the
   // page down: counts are skipped entirely without the permission, and
   // getFaceServiceStatus resolves to "unavailable" rather than throwing.
-  const [dashboard, counts, faceService, institutionKind] = await Promise.all([
+  const [dashboard, counts, faceService, institutionKind, collegeHome] = await Promise.all([
     getFacultyDashboard(user),
     isInstitutionAdmin ? getInstitutionCounts(user) : Promise.resolve(null),
     isInstitutionAdmin ? getFaceServiceStatus() : Promise.resolve(null),
     user.institutionId ? getInstitutionType(user.institutionId) : Promise.resolve(null),
+    // A college head of department's own department, above their lecturer's
+    // view. Only an HOD holds `department.manage`; for anyone else, and for a
+    // head whose designation no longer holds, the page is exactly as before.
+    hasPermission(user, "department.manage") && !isInstitutionAdmin
+      ? getCollegeHome(user).catch((error: unknown) => {
+          if (error instanceof ForbiddenError || error instanceof CollegeSetupError) return null;
+          throw error;
+        })
+      : Promise.resolve(null),
   ]);
 
   const isAdmin = dashboard.scope === "institution";
@@ -95,7 +108,7 @@ export default async function DashboardHomePage() {
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="flex flex-col gap-1">
           <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-            {isAdmin ? "Institution overview" : "Today"}
+            {isAdmin ? "Institution overview" : collegeHome ? "Head of Department" : "Today"}
           </span>
           <h1 className="text-xl font-semibold tracking-tight text-neutral-900 sm:text-2xl">
             Welcome, {user.name}
@@ -117,6 +130,8 @@ export default async function DashboardHomePage() {
           </Link>
         ) : null}
       </header>
+
+      {collegeHome ? <DepartmentOverviewPanel home={collegeHome} /> : null}
 
       <StatGrid>
         <StatCard label="Today's sessions" value={String(dashboard.today.length)} />

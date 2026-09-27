@@ -47,12 +47,18 @@ test("an institution admin is offered the administrative actions", () => {
   }
 });
 
-test("a school's Create a class goes to the class setup, a college's to its class screen", () => {
-  const can = canFor("SCHOOL_ADMIN");
-  const hrefFor = (kind: "SCHOOL" | "COLLEGE") =>
-    buildQuickActions(can, kind).find((action) => action.label === "Create a class")?.href;
-  assert.equal(hrefFor("SCHOOL"), "/dashboard/academic/classes/new");
-  assert.equal(hrefFor("COLLEGE"), "/dashboard/academic/cohorts/new");
+test("a school's Create a class goes to the class setup, a college is sent to its departments", () => {
+  const school = buildQuickActions(canFor("SCHOOL_ADMIN"), "SCHOOL");
+  assert.equal(
+    school.find((action) => action.label === "Create a class")?.href,
+    "/dashboard/academic/classes/new",
+  );
+  const college = buildQuickActions(canFor("COLLEGE_ADMIN"), "COLLEGE");
+  assert.equal(college.find((action) => action.label === "Create a class"), undefined);
+  assert.equal(
+    college.find((action) => action.label === "Set up departments")?.href,
+    "/dashboard/college/departments",
+  );
 });
 
 test("an attendance operator is offered the register and nothing that corrects it", () => {

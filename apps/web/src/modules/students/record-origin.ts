@@ -1,6 +1,7 @@
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { hasPermission } from "@/modules/authorization/service";
 import { getCohortDetailForRequest } from "@/modules/cohorts/directory-service";
+import { getSectionPlacement } from "@/modules/college-setup/service";
 import { parseReturnPath, type ReturnPath } from "@/lib/return-path";
 import { getStudentSectionForRequest } from "./class-navigation-service";
 import { studentSectionHref } from "./class-navigation-paths";
@@ -12,12 +13,15 @@ import { parseStudentFilters, studentFilterQuery } from "./directory-filters";
  * instead of "← Back to Students".
  *
  * Only these lists link to a student with `?returnTo=`: a section's students,
- * and a class's roster under Academic. A value naming anything else is not an
- * origin, and the record leads back to Students, its own parent.
+ * a class's roster under Academic, and a college course section. A value
+ * naming anything else is not an origin, and the record leads back to
+ * Students, its own parent.
  */
 const SECTION = "/dashboard/students/classes/[classId]/sections/[sectionId]";
 const COHORT = "/dashboard/academic/cohorts/[cohortId]";
-export const STUDENT_RECORD_ORIGINS = [SECTION, COHORT] as const;
+const COLLEGE_SECTION =
+  "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]";
+export const STUDENT_RECORD_ORIGINS = [SECTION, COHORT, COLLEGE_SECTION] as const;
 
 export interface RecordOrigin {
   /** The list by the name its own page shows: "Class 8 · Section A". */
@@ -33,6 +37,14 @@ function rebuild(match: ReturnPath): string {
     const filters = { ...parseStudentFilters(Object.fromEntries(match.query)), cohortId: "" };
     const section = studentSectionHref(match.params.classId, match.params.sectionId);
     return `${section}${studentFilterQuery(filters)}`;
+  }
+  if (match.pattern === COLLEGE_SECTION) {
+    const { departmentId, semesterId, courseId, sectionId } = match.params;
+    return (
+      `/dashboard/college/departments/${encodeURIComponent(departmentId)}` +
+      `/semesters/${encodeURIComponent(semesterId)}/courses/${encodeURIComponent(courseId)}` +
+      `/sections/${encodeURIComponent(sectionId)}`
+    );
   }
   return `/dashboard/academic/cohorts/${encodeURIComponent(match.params.cohortId)}`;
 }
@@ -71,6 +83,15 @@ export async function resolveStudentOrigin(
         match.params.sectionId,
       );
       return view ? { label: `${view.className} · ${view.section.label}`, href } : null;
+    }
+    if (match.pattern === COLLEGE_SECTION) {
+      const placement = await getSectionPlacement(user, {
+        departmentId: match.params.departmentId,
+        semesterId: match.params.semesterId,
+        courseId: match.params.courseId,
+        sectionId: match.params.sectionId,
+      });
+      return placement ? { label: `${placement.course.name} · ${placement.section.label}`, href } : null;
     }
     if (!hasPermission(user, "cohort.read")) return null;
     const cohort = await getCohortDetailForRequest(user, match.params.cohortId);

@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { hasPermission } from "@/modules/authorization/service";
+import { hasPermission, isPlatformUser } from "@/modules/authorization/service";
 import {
   changeOwnPasswordService,
   loginService,
@@ -195,8 +195,9 @@ export interface ChangePasswordState {
 
 /**
  * A student — or a parent using the student's account — replacing its
- * password. Only a student account may: the staff screens have no
- * self-service change, and this does not add one by the back door.
+ * password, and a college head of department replacing theirs from My
+ * account. Nobody else: the other staff screens have no self-service change,
+ * and this does not add one by the back door.
  */
 export async function changePasswordAction(
   prevState: ChangePasswordState,
@@ -204,7 +205,10 @@ export async function changePasswordAction(
 ): Promise<ChangePasswordState> {
   const attempt = (prevState.attempt ?? 0) + 1;
   const user = await requireUser();
-  if (!hasPermission(user, "student.read.own")) redirect("/unauthorized");
+  // `department.manage` is also among the platform role's every-permission
+  // set; a platform account is not a head of department.
+  const headOfDepartment = hasPermission(user, "department.manage") && !isPlatformUser(user);
+  if (!hasPermission(user, "student.read.own") && !headOfDepartment) redirect("/unauthorized");
 
   const rawToken = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
   if (!rawToken) redirect("/login");

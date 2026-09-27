@@ -11,6 +11,14 @@ export const PERMISSIONS = [
   "institution.update",
   "campus.manage",
   "academicStructure.manage",
+  // A college Head of Department: the semesters, courses, sections, teachers
+  // and students of the ONE department they head, and nothing outside it.
+  // Institution-wide by name only — which department is resolved on every
+  // request by modules/college-setup/scope.ts from the HOD designation, and
+  // every read and write there is checked against it. Deliberately not
+  // `.own`: it confers authority over other people, which is exactly what
+  // role-management's `.own` exception says a permission must not do.
+  "department.manage",
   "cohort.manage",
   "cohort.read",
   "user.invite",
@@ -87,9 +95,12 @@ const FACULTY_PERMISSIONS: PermissionKey[] = [
   "attendanceRecord.read",
 ];
 
-// The 8 roles the product requires "at minimum." Role NAMES are configurable
-// per institution (Role.name can be edited); these keys and their default
-// permission sets are the seeded starting point. See docs/adr/0006.
+// The 8 roles the product requires "at minimum," plus a college's Head of
+// Department. Role NAMES are configurable per institution (Role.name can be
+// edited); these keys and their default permission sets are the seeded
+// starting point. See docs/adr/0006. A database only gains a role added here
+// when `ensureSystemRolesAndPermissions` runs against it — `npm run prisma:seed`
+// locally, `bootstrap:system` anywhere else (docs/DATABASE_OPERATIONS.md §4.2).
 export const SYSTEM_ROLES: SystemRoleDefinition[] = [
   {
     key: "PLATFORM_SUPER_ADMIN",
@@ -120,6 +131,26 @@ export const SYSTEM_ROLES: SystemRoleDefinition[] = [
     key: "CLASS_TEACHER",
     name: "Class Teacher",
     permissions: [...FACULTY_PERMISSIONS, "enrollment.manage", "student.update"],
+  },
+  {
+    // A college department's head: teaches like a lecturer, and runs one
+    // department through modules/college-setup. What it lacks is the point.
+    // No `student.read` or `cohort.read` — both are institution-wide
+    // directories, and a Computer Science head must not be able to list
+    // Mechanical Engineering's students or classes. No `cohort.manage`, which
+    // bypasses every teaching check, and no account, structure or face
+    // permission. Granted only by the department screen, which also sets the
+    // department it applies to.
+    key: "HOD",
+    name: "Head of Department",
+    permissions: [
+      "department.manage",
+      "attendanceSession.create",
+      "attendanceSession.capture",
+      "attendanceSession.finalize",
+      "attendanceRecord.correct",
+      "attendanceRecord.read",
+    ],
   },
   {
     key: "STUDENT",

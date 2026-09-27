@@ -477,7 +477,7 @@ az containerapp job execution list -n attendance-prod-bootstrap \
 
 ### If it refuses
 
-That is the design working. `tenant` will not run unless all eight system roles
+That is the design working. `tenant` will not run unless all nine system roles
 are present and the database holds zero institutions, zero users and zero role
 assignments. It does not repair a partial state — a database with an institution
 but no administrator is something to look at, not something for a script to

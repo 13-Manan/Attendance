@@ -250,7 +250,7 @@ Four of them may reach production; the fifth must never.
 | | What it writes | Runs where | How often |
 | --- | --- | --- | --- |
 | 1. Migrations | Schema only — tables, indexes, extensions | Every database | Every deployment that carries a new migration |
-| 2. System bootstrap | 8 `Role` + 116 `RolePermission` | Every database | Idempotent; safe to repeat |
+| 2. System bootstrap | 9 `Role` + 123 `RolePermission` | Every database | Idempotent; safe to repeat |
 | 3. First-tenant bootstrap | 1 `Institution`, 1 admin `User`, 1 `UserRoleAssignment` | Every database | Exactly once, on an empty database |
 | 3b. Platform-admin bootstrap | 1 platform `User`, 1 `UserRoleAssignment` — both institution-less | Every database | Idempotent; re-runs report and write nothing |
 | 4. Development fixture | Demo institutions, staff, cohorts, students | localhost only | Any time |
@@ -278,7 +278,8 @@ Section 1. `prisma migrate deploy`, and nothing else, ever, against production.
 
 ### 4.2 System bootstrap — roles and permissions
 
-Eight platform-wide roles (`institutionId IS NULL`) and their permission grants.
+Nine platform-wide roles (`institutionId IS NULL`) and their permission grants —
+the original eight and a college's Head of Department (`HOD`).
 No institution, no user, no student, no face template. Idempotent by
 construction: it converges `RolePermission` to whatever `permissions.ts`
 currently declares, adding what is missing and removing what is stale, so

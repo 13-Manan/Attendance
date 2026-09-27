@@ -103,6 +103,13 @@ test("the layout's trail steps aside only where the page names its records", () 
     `/dashboard/academic/classes/${ID}/sections/${ID2}`,
     `/dashboard/attendance/${ID}/review/${ID2}`,
     `/dashboard/platform/institutions/${ID}`,
+    "/dashboard/college/departments",
+    `/dashboard/college/departments/${ID}`,
+    `/dashboard/college/departments/${ID}/semesters/${ID2}`,
+    `/dashboard/college/departments/${ID}/semesters/${ID2}/courses/${ID}/sections/${ID2}`,
+    `/dashboard/college/departments/${ID}/semesters/${ID2}/courses/${ID}/sections/${ID2}/students/new`,
+    "/dashboard/college/courses",
+    "/dashboard/account",
   ]) {
     assert.equal(pageDrawsTrail(path), true, path);
   }
@@ -139,6 +146,12 @@ test("a page that cannot be shown points at the nearest list that exists", () =>
     [`/dashboard/attendance/${ID}/review/${ID2}`, "Attendance", "/dashboard/attendance"],
     [`/dashboard/campuses/${ID}/edit`, "Campuses", "/dashboard/campuses"],
     [`/dashboard/platform/institutions/${ID}`, "Institutions", "/dashboard/platform/institutions"],
+    [
+      `/dashboard/college/departments/${ID}/semesters/${ID2}/courses/${ID}/sections/${ID2}`,
+      "Departments",
+      "/dashboard/college/departments",
+    ],
+    [`/dashboard/college/departments/${ID}/students`, "Departments", "/dashboard/college/departments"],
   ];
   for (const [path, label, href] of cases) {
     assert.deepEqual(nearestListPage(path), { label, href }, path);

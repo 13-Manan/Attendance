@@ -45,9 +45,11 @@ export const QUICK_ACTIONS: QuickAction[] = [
     only: "SCHOOL",
   },
   {
-    href: "/dashboard/academic/cohorts/new",
-    label: "Create a class",
-    description: "Set up a new cohort for the current academic session.",
+    // A college is set up department by department: semesters, courses and
+    // each course's sections live under its department.
+    href: "/dashboard/college/departments",
+    label: "Set up departments",
+    description: "Departments, their heads, semesters, courses and sections.",
     permission: "academicStructure.manage",
     only: "COLLEGE",
   },
