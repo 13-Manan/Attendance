@@ -53,17 +53,27 @@ export function sectionHref(departmentId: string, semesterId: string, courseId: 
   return `${courseHref(departmentId, semesterId, courseId)}/sections/${encodeURIComponent(sectionId)}`;
 }
 
+/** A section's pages below it: the add-student search, the new-student form, one student. */
+export function sectionStudentsHref(
+  ids: { departmentId: string; semesterId: string; courseId: string; sectionId: string },
+  page: "add" | "new" | { studentId: string },
+): string {
+  const base = `${sectionHref(ids.departmentId, ids.semesterId, ids.courseId, ids.sectionId)}/students`;
+  return typeof page === "string" ? `${base}/${page}` : `${base}/${encodeURIComponent(page.studentId)}`;
+}
+
+/** "Physics (PHY401)": a course named for a form that is about it. */
+export function courseWithCode(course: { name: string; code: string | null }): string {
+  return course.code ? `${course.name} (${course.code})` : course.name;
+}
+
 /** `?session=` for links that should keep the session being viewed. */
 export function withSession(href: string, session: SessionChoice | null, all: readonly SessionChoice[]): string {
   if (!session || session.isCurrent || all.length < 2) return href;
   return `${href}${href.includes("?") ? "&" : "?"}session=${encodeURIComponent(session.id)}`;
 }
 
-/** "PHY401 · Physics", or just the name for a course with no code yet. */
-export function courseTitle(course: { code: string | null; name: string }): string {
-  if (!course.code) return course.name;
-  return course.name.toUpperCase().startsWith(course.code.toUpperCase()) ? course.name : `${course.code} · ${course.name}`;
-}
+export { COURSES_PATH, courseTitle, courseTrail } from "./trail";
 
 /**
  * Runs a page's read, turning a refusal into the same /unauthorized page

@@ -334,6 +334,24 @@ export interface NavSection {
  * to refuse an institution-less actor outright. A platform user who types one
  * of these URLs is redirected to their own tier by the page, not by this list.
  */
+/** A college course's pages, at every level below the course: sections, students. */
+const COLLEGE_COURSE_PAGES = "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses";
+
+/**
+ * Pages that belong to a link other than the one whose address they sit
+ * under, keyed by that link's href.
+ *
+ * A head of department reaches their courses, sections and students from
+ * Courses — the trail on those pages starts there — but the pages live under
+ * their department's address, so without this "My department" would be lit
+ * instead. An administrator walks down from Departments, which stays lit, as
+ * before; every other viewer has no claims at all.
+ */
+export function navClaims(can: (permission: PermissionKey) => boolean, kind: InstitutionKind): Record<string, readonly string[]> {
+  const headsDepartment = kind === "COLLEGE" && can("department.manage") && !can("academicStructure.manage");
+  return headsDepartment ? { "/dashboard/college/courses": [COLLEGE_COURSE_PAGES] } : {};
+}
+
 export function buildNavSections(
   can: (permission: PermissionKey) => boolean,
   kind: InstitutionKind,

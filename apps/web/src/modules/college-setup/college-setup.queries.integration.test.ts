@@ -147,16 +147,24 @@ function reads(prefix: string) {
   const semester = `${department}-s0`;
   const course = `${semester}-c0`;
   const section = `${course}-x0-g`;
+  const sectionIds = { departmentId: department, semesterId: semester, courseId: course, sectionId: section };
+  const student = `${section}-st0`;
   return {
     departments: () => service.getDepartmentsOverview(admin),
     department: () => service.getDepartmentDetail(admin, department),
     semester: () => service.getSemesterDetail(admin, department, semester),
     course: () => service.getCourseDetail(admin, department, semester, course),
-    section: () => service.getCourseSectionDetail(admin, { departmentId: department, semesterId: semester, courseId: course, sectionId: section }),
+    section: () => service.getCourseSectionDetail(admin, sectionIds),
     courses: () => service.getCoursesIndex(admin),
     students: () => service.getDepartmentStudents(admin, department),
     faculty: () => service.getDepartmentFaculty(admin, department),
     semesters: () => service.getSemestersIndex(admin),
+    // The add-student page: the department's suggestions, a search that
+    // matches more than it lists, and an exact student ID.
+    addSuggestions: () => service.searchStudentsForSection(admin, sectionIds, ""),
+    addSearch: () => service.searchStudentsForSection(admin, sectionIds, "st"),
+    addById: () => service.searchStudentsForSection(admin, sectionIds, student.toUpperCase(), student),
+    student: () => service.getSectionStudent(admin, sectionIds, student),
   };
 }
 

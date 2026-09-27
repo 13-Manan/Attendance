@@ -169,6 +169,57 @@ export function sectionGroupName(courseCode: string, sectionName: string): strin
   return /\s/.test(code) || /\s/.test(section) ? `${code} - ${section}` : `${code}-${section}`;
 }
 
+/**
+ * "A", "B", … the next section names a course has not used, as suggestions
+ * anyone can type over. Past Z, numbers.
+ */
+export function nextSectionNames(used: readonly string[], count: number): string[] {
+  const taken = new Set(used.map(sectionKey));
+  const names: string[] = [];
+  for (let index = 0; names.length < count && index < 60; index += 1) {
+    const candidate = index < 26 ? String.fromCharCode(65 + index) : String(index + 1);
+    if (!taken.has(sectionKey(candidate))) names.push(candidate);
+  }
+  return names;
+}
+
+/** How a section is named on its own: "Physics — Section A". */
+export function sectionFullName(courseName: string, sectionLabelText: string): string {
+  return `${tidyName(courseName)} — ${sectionLabelText}`;
+}
+
+/** Characters a student search needs before it looks: one letter matches half the college. */
+export const MIN_STUDENT_SEARCH = 2;
+/** Longer than any name or ID; refuses a pasted paragraph. */
+const MAX_STUDENT_SEARCH = 80;
+/** Words beyond these narrow nothing a name does not already. */
+const MAX_STUDENT_SEARCH_TERMS = 4;
+
+/**
+ * A student search box as search terms, each of which has to match the
+ * student ID, either name or the admission number — so "aman kum" finds Aman
+ * Kumar. None until the box holds enough to search on.
+ */
+export function studentSearchTerms(raw: unknown): string[] {
+  const text = tidyName(String(raw ?? "")).slice(0, MAX_STUDENT_SEARCH);
+  if (text.length < MIN_STUDENT_SEARCH) return [];
+  const terms: string[] = [];
+  for (const term of text.split(" ")) {
+    if (!terms.some((kept) => nameKey(kept) === nameKey(term))) terms.push(term);
+  }
+  return terms.slice(0, MAX_STUDENT_SEARCH_TERMS);
+}
+
+/** Whether a section's own list search finds this student: every word in their name or student ID. */
+export function studentMatchesSearch(
+  student: { firstName: string; lastName: string; studentCode: string },
+  search: string,
+): boolean {
+  const haystack = nameKey(`${student.firstName} ${student.lastName} ${student.studentCode}`);
+  const words = nameKey(search).split(" ").filter(Boolean);
+  return words.every((word) => haystack.includes(word));
+}
+
 /** Ready, needs a teacher, or has one who can no longer sign in. */
 export function sectionStatus(teacher: SectionTeacher | null): SectionStatus {
   if (!teacher) return "needs_teacher";

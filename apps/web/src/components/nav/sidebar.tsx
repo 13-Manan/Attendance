@@ -1,6 +1,6 @@
 import { hasPermission, isPlatformUser } from "@/modules/authorization/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
-import { buildNavSections, type InstitutionKind } from "./nav-items";
+import { buildNavSections, navClaims, type InstitutionKind } from "./nav-items";
 import { NavLink } from "./nav-link";
 
 /**
@@ -49,6 +49,10 @@ export function Sidebar({
   // is *also* a nav destination (/dashboard/platform/institutions).
   const siblingHrefs = sections.flatMap((section) => section.items.map((item) => item.href));
 
+  // Pages one link owns although they sit under another's address — a head of
+  // department's course pages belong to Courses. See `navClaims`.
+  const claims = navClaims((permission) => hasPermission(user, permission), institutionKind);
+
   // `print:hidden` for the same reason as the topbar: navigation links are not
   // part of a printed report, and on paper they cost a column.
   return (
@@ -71,6 +75,10 @@ export function Sidebar({
               href={item.href}
               label={item.label}
               siblingHrefs={siblingHrefs}
+              activeUnder={claims[item.href]}
+              claimedElsewhere={Object.entries(claims)
+                .filter(([href]) => href !== item.href)
+                .flatMap(([, patterns]) => patterns)}
             />
           ))}
         </div>

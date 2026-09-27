@@ -1,8 +1,9 @@
 "use client";
 
-import { useActionState, useId, useState } from "react";
+import { useActionState, useEffect, useId, useRef, useState } from "react";
 import {
   addSectionsAction,
+  addStudentToSectionAction,
   addStudentsToSectionAction,
   assignHeadAction,
   createCourseAction,
@@ -26,6 +27,7 @@ import {
   updateSemesterAction,
   type CollegeActionState,
 } from "@/modules/college-setup/actions";
+import { nextSectionNames } from "@/modules/college-setup/policy";
 import {
   MAX_COURSE_CODE,
   MAX_COURSE_NAME,
@@ -35,6 +37,7 @@ import {
   MAX_SECTION_NAME,
   MAX_SEMESTER_NAME,
   MAX_SEMESTER_NUMBER,
+  type SectionTeacher,
   type StaffChoice,
 } from "@/modules/college-setup/types";
 import { Button } from "@/components/ui/button";
@@ -160,7 +163,13 @@ function TeacherOptions({ teachers, empty }: { teachers: readonly StaffChoice[];
   );
 }
 
-/** A destructive button that asks once more, inline, before it submits. */
+/**
+ * A destructive button that asks once more, in place, before it submits.
+ *
+ * Opening the question moves focus to Cancel — the safe answer — so a
+ * keyboard user lands on it rather than behind it; Escape and Cancel close it
+ * and put focus back on the button that opened it.
+ */
 function ConfirmForm({
   action,
   ids,
@@ -169,6 +178,7 @@ function ConfirmForm({
   question,
   pendingLabel,
   variant = "danger",
+  labelDetail,
 }: {
   action: (state: CollegeActionState, formData: FormData) => Promise<CollegeActionState>;
   ids: Ids;
@@ -177,9 +187,14 @@ function ConfirmForm({
   question: string;
   pendingLabel: string;
   variant?: "danger" | "secondary";
+  /** Read out after the label, for a button repeated down a list: "Remove from section (Aman Kumar)". */
+  labelDetail?: string;
 }) {
   const [state, formAction, pending] = useActionState(action, initialState);
   const [confirming, setConfirming] = useState(false);
+  const [refocus, setRefocus] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const questionId = useId();
   // A finished action closes the confirmation, leaving its result on screen.
   // Without this, Disable and Enable — one control, swapped in place when the
   // page refreshes — would show Enable already half-confirmed.
@@ -188,23 +203,55 @@ function ConfirmForm({
     setSettled(state.attempt);
     if (!state.error) setConfirming(false);
   }
+  useEffect(() => {
+    const target = confirming ? "[data-confirm-cancel]" : refocus ? "[data-confirm-open]" : null;
+    if (target) box.current?.querySelector<HTMLElement>(target)?.focus();
+  }, [confirming, refocus]);
+  const close = () => {
+    setConfirming(false);
+    setRefocus(true);
+  };
   return (
-    <div className="flex flex-col gap-2">
+    <div ref={box} className="flex flex-col gap-2">
       {confirming ? (
-        <form action={formAction} className="flex flex-wrap items-center gap-2">
+        <form
+          action={formAction}
+          role="group"
+          aria-labelledby={questionId}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              close();
+            }
+          }}
+          className="flex flex-col gap-3 rounded-md border border-red-200 bg-red-50 p-3"
+        >
           <Hidden ids={ids} />
-          <span className="text-xs text-neutral-700">{question}</span>
-          <Button type="submit" variant={variant} disabled={pending}>
-            {pending ? pendingLabel : confirmLabel}
-          </Button>
-          <Button type="button" variant="secondary" onClick={() => setConfirming(false)}>
-            Cancel
-          </Button>
+          <p id={questionId} className="text-sm text-neutral-800">
+            {question}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="submit" variant={variant} disabled={pending}>
+              {pending ? pendingLabel : confirmLabel}
+            </Button>
+            <Button type="button" variant="secondary" data-confirm-cancel="" onClick={close}>
+              Cancel
+            </Button>
+          </div>
         </form>
       ) : (
         <div>
-          <Button type="button" variant="secondary" onClick={() => setConfirming(true)}>
+          <Button
+            type="button"
+            variant="secondary"
+            data-confirm-open=""
+            onClick={() => {
+              setRefocus(false);
+              setConfirming(true);
+            }}
+          >
             {label}
+            {labelDetail ? <span className="sr-only"> ({labelDetail})</span> : null}
           </Button>
         </div>
       )}
@@ -692,6 +739,85 @@ export function NewCourseForm({
   );
 }
 
+/**
+ * A course added from the Courses page: its name, its code and which of the
+ * department's semesters it belongs to — the current one unless another is
+ * chosen. Only the semester travels; the server finds its department and
+ * checks it is the head's own.
+ */
+export function AddCourseForm({
+  semesters,
+  defaultSemesterId,
+  sessionId,
+}: {
+  semesters: readonly { id: string; name: string; isCurrent: boolean }[];
+  defaultSemesterId: string | null;
+  sessionId: string;
+}) {
+  const [state, formAction, pending] = useActionState(createCourseAction, initialState);
+  const key = state.attempt ?? 0;
+  const id = useId();
+  return (
+    <form action={formAction} className="flex flex-col gap-4">
+      <Hidden ids={{ sessionId }} />
+      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,10rem)_minmax(0,12rem)]">
+        <Field label="Course name" htmlFor={`${id}-name`}>
+          <Input
+            key={`name-${key}`}
+            id={`${id}-name`}
+            name="name"
+            required
+            maxLength={MAX_COURSE_NAME}
+            placeholder="Physics"
+            defaultValue={state.values?.name ?? ""}
+            autoComplete="off"
+            autoFocus
+          />
+        </Field>
+        <Field label="Course code" htmlFor={`${id}-code`}>
+          <Input
+            key={`code-${key}`}
+            id={`${id}-code`}
+            name="code"
+            required
+            maxLength={MAX_COURSE_CODE}
+            placeholder="PHY401"
+            defaultValue={state.values?.code ?? ""}
+            autoComplete="off"
+            className="uppercase"
+          />
+        </Field>
+        <Field label="Semester" htmlFor={`${id}-semester`}>
+          <Select
+            key={`semester-${key}`}
+            id={`${id}-semester`}
+            name="semesterId"
+            required
+            defaultValue={state.values?.semesterId ?? defaultSemesterId ?? ""}
+          >
+            {defaultSemesterId ? null : <option value="">Choose…</option>}
+            {semesters.map((semester) => (
+              <option key={semester.id} value={semester.id}>
+                {semester.name}
+                {semester.isCurrent ? " (current)" : ""}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      </div>
+      <p className="text-xs text-neutral-500">
+        The code is what registers and the student portal show. Codes are unique across the college.
+      </p>
+      <div>
+        <Button type="submit" disabled={pending}>
+          {pending ? "Creating…" : "Create course"}
+        </Button>
+      </div>
+      <Feedback state={state} />
+    </form>
+  );
+}
+
 export function EditCourseForm({
   ids,
   code,
@@ -759,75 +885,66 @@ export function RemoveCourseButton({ ids }: { ids: { departmentId: string; semes
 // Sections
 // ---------------------------------------------------------------------------
 
-/** "A", "B", … the next letters not already used, as suggestions anyone can type over. */
-function suggestions(used: readonly string[], count: number): string[] {
-  const taken = new Set(used.map((name) => name.trim().toLowerCase().replace(/^section\s+/, "")));
-  const names: string[] = [];
-  for (let index = 0; names.length < count && index < 60; index += 1) {
-    const candidate = index < 26 ? String.fromCharCode(65 + index) : String(index + 1);
-    if (!taken.has(candidate.toLowerCase())) names.push(candidate);
-  }
-  return names;
-}
-
 /**
- * Add sections to a course for the session — how many, what each is called,
- * and (optionally) who teaches each. Names start as the next free letters.
+ * Adds one section to a course for the session: its name — the next free
+ * letter, which anyone can type over — and, optionally, its teacher. The form
+ * stays open and suggests the next letter, so A, B and C are three quick
+ * submissions.
  */
-export function AddSectionsForm({
+export function AddSectionForm({
   ids,
   sessionId,
+  courseLabel,
   existingNames,
   teachers,
+  noTeachersHint,
 }: {
   ids: { departmentId: string; semesterId: string; courseId: string };
   sessionId: string;
+  /** "Physics (PHY401)". */
+  courseLabel: string;
   existingNames: readonly string[];
   teachers: readonly StaffChoice[];
+  noTeachersHint: string;
 }) {
   const [state, formAction, pending] = useActionState(addSectionsAction, initialState);
-  const room = Math.max(0, MAX_SECTIONS - existingNames.length);
-  const [countText, setCountText] = useState(existingNames.length === 0 ? "3" : "1");
-  const count = Math.min(room, Math.max(1, Number.parseInt(countText, 10) || 1));
-  const names = suggestions(existingNames, count);
+  const [suggested = ""] = nextSectionNames(existingNames, 1);
   const id = useId();
-  const key = state.attempt ?? 0;
+  const key = `${state.attempt ?? 0}-${suggested}`;
+  const retry = state.error ? state.values : undefined;
 
-  if (room === 0) {
+  if (existingNames.length >= MAX_SECTIONS) {
     return <p className="text-sm text-neutral-600">This course already has the most sections a course can have in a session.</p>;
   }
   return (
-    <form action={formAction} className="flex flex-col gap-3" key={`sections-${key}`}>
+    <form action={formAction} className="flex flex-col gap-4">
       <Hidden ids={{ ...ids, sessionId }} />
-      <Field label="How many sections" htmlFor={`${id}-count`}>
-        <Input
-          id={`${id}-count`}
-          type="number"
-          inputMode="numeric"
-          min={1}
-          max={room}
-          value={countText}
-          onChange={(event) => setCountText(event.target.value)}
-          className="sm:max-w-32"
-        />
-      </Field>
-      <ol className="flex flex-col gap-3">
-        {names.map((name, index) => (
-          <li key={`${name}-${index}`} className="grid gap-2 rounded-md border border-neutral-200 p-3 sm:grid-cols-[minmax(0,10rem)_minmax(0,1fr)]">
-            <Field label={`Section ${index + 1} name`} htmlFor={`${id}-name-${index}`}>
-              <Input id={`${id}-name-${index}`} name="sectionName" required maxLength={MAX_SECTION_NAME} defaultValue={name} />
-            </Field>
-            <Field label="Teacher (optional)" htmlFor={`${id}-teacher-${index}`}>
-              <Select id={`${id}-teacher-${index}`} name="teacherId" defaultValue="">
-                <TeacherOptions teachers={teachers} empty="Assign later" />
-              </Select>
-            </Field>
-          </li>
-        ))}
-      </ol>
+      <p className="text-sm text-neutral-600">
+        Course: <span className="font-medium text-neutral-900">{courseLabel}</span>
+      </p>
+      <div className="grid gap-3 sm:grid-cols-[minmax(0,10rem)_minmax(0,1fr)]">
+        <Field label="Section name" htmlFor={`${id}-name`}>
+          <Input
+            key={`name-${key}`}
+            id={`${id}-name`}
+            name="sectionName"
+            required
+            maxLength={MAX_SECTION_NAME}
+            defaultValue={retry?.sectionName ?? suggested}
+            autoComplete="off"
+            autoFocus
+          />
+        </Field>
+        <Field label="Teacher" htmlFor={`${id}-teacher`}>
+          <Select key={`teacher-${key}`} id={`${id}-teacher`} name="teacherId" defaultValue={retry?.teacherId ?? ""}>
+            <TeacherOptions teachers={teachers} empty="Assign later" />
+          </Select>
+        </Field>
+      </div>
+      {teachers.length === 0 ? <p className="text-xs text-neutral-500">{noTeachersHint}</p> : null}
       <div>
         <Button type="submit" disabled={pending}>
-          {pending ? "Adding…" : count === 1 ? "Add section" : `Add ${count} sections`}
+          {pending ? "Creating…" : "Create section"}
         </Button>
       </div>
       <Feedback state={state} />
@@ -869,11 +986,93 @@ export function SectionTeacherForm({
       </Field>
       <div>
         <Button type="submit" variant={currentId ? "secondary" : "primary"} disabled={pending}>
-          {pending ? "Saving…" : currentId ? "Change teacher" : "Assign"}
+          {pending ? "Saving…" : currentId ? "Change teacher" : "Assign teacher"}
         </Button>
       </div>
       <Feedback state={state} />
     </form>
+  );
+}
+
+/**
+ * The section's teacher, with the way to change it: "Change teacher" (or
+ * "Assign teacher", for a section that needs one) opens the choice in place,
+ * and focus moves to it. The list holds only the teachers the viewer may
+ * give the section to — for a head of department, their own department's.
+ */
+export function TeacherEditor({
+  ids,
+  teachers,
+  current,
+  canInvite = false,
+  compact = false,
+}: {
+  ids: SectionIds;
+  teachers: readonly StaffChoice[];
+  current: SectionTeacher | null;
+  /** An administrator may also create a new teacher's account from here. */
+  canInvite?: boolean;
+  /**
+   * On a course's section card: only "Assign teacher", for a section that
+   * needs one, and the choice alone — no removal, no new account. The card
+   * keeps it mounted once a teacher is set, so the confirmation stays on
+   * screen until it is closed.
+   */
+  compact?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [refocus, setRefocus] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const target = open ? "select" : refocus ? "[data-teacher-open]" : null;
+    if (target) box.current?.querySelector<HTMLElement>(target)?.focus();
+  }, [open, refocus]);
+  const openLabel = current ? "Change teacher" : "Assign teacher";
+  if (compact && current && !open) return null;
+
+  return (
+    <div ref={box}>
+      {open ? (
+        <div className="flex flex-col gap-3 rounded-md border border-neutral-200 bg-neutral-50 p-3">
+          <SectionTeacherForm ids={ids} teachers={teachers} currentId={current?.userId ?? null} />
+          {!compact && current ? <RemoveSectionTeacherButton ids={ids} /> : null}
+          {!compact && canInvite ? (
+            <details className="rounded-md border border-neutral-200 bg-white p-3">
+              <summary className="cursor-pointer text-sm font-medium text-neutral-900">
+                Or create a new teacher&apos;s account for this section
+              </summary>
+              <div className="mt-3">
+                <InviteSectionTeacherForm ids={ids} />
+              </div>
+            </details>
+          ) : null}
+          <div>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                setOpen(false);
+                setRefocus(true);
+              }}
+            >
+              Close
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Button
+          type="button"
+          variant={current ? "secondary" : "primary"}
+          data-teacher-open=""
+          onClick={() => {
+            setRefocus(false);
+            setOpen(true);
+          }}
+        >
+          {openLabel}
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -971,13 +1170,8 @@ export function RemoveSectionButton({ ids }: { ids: SectionIds }) {
 // Students
 // ---------------------------------------------------------------------------
 
-export function AddStudentsByIdForm({
-  ids,
-  suggestions: known,
-}: {
-  ids: SectionIds;
-  suggestions: readonly { id: string; studentCode: string; name: string }[];
-}) {
+/** Several existing students at once, by their student IDs — for a class list pasted in. */
+export function AddStudentsByIdForm({ ids }: { ids: SectionIds }) {
   const [state, formAction, pending] = useActionState(addStudentsToSectionAction, initialState);
   const key = state.attempt ?? 0;
   const id = useId();
@@ -991,26 +1185,16 @@ export function AddStudentsByIdForm({
           name="studentCodes"
           required
           autoComplete="off"
-          list={known.length > 0 ? `${id}-known` : undefined}
           placeholder="e.g. CSE2601, CSE2602"
           defaultValue={state.values?.studentCodes ?? ""}
         />
       </Field>
-      {known.length > 0 ? (
-        <datalist id={`${id}-known`}>
-          {known.map((student) => (
-            <option key={student.id} value={student.studentCode}>
-              {student.name}
-            </option>
-          ))}
-        </datalist>
-      ) : null}
       <p className="text-xs text-neutral-500">
         Separate several IDs with commas or spaces. A student can be in sections of several courses.
       </p>
       <div>
-        <Button type="submit" disabled={pending}>
-          {pending ? "Adding…" : "Add to section"}
+        <Button type="submit" variant="secondary" disabled={pending}>
+          {pending ? "Adding…" : "Add these students"}
         </Button>
       </div>
       <Feedback state={state} />
@@ -1018,14 +1202,69 @@ export function AddStudentsByIdForm({
   );
 }
 
-export function RemoveStudentButton({ ids, studentId, name }: { ids: SectionIds; studentId: string; name: string }) {
+/**
+ * "Add to section" on one search result. The page it posts from comes back
+ * with the student marked as in the section, so only a refusal is shown here.
+ */
+export function AddToSectionButton({
+  ids,
+  studentId,
+  name,
+  query,
+}: {
+  ids: SectionIds;
+  studentId: string;
+  name: string;
+  /** The search, kept so the results are still there afterwards. */
+  query: string;
+}) {
+  const [state, formAction, pending] = useActionState(addStudentToSectionAction, initialState);
+  return (
+    <form action={formAction} className="flex flex-col items-start gap-2 sm:items-end">
+      <Hidden ids={{ ...ids, studentId, q: query }} />
+      <Button type="submit" disabled={pending}>
+        {pending ? (
+          "Adding…"
+        ) : (
+          <>
+            Add to section<span className="sr-only"> ({name})</span>
+          </>
+        )}
+      </Button>
+      {state.error ? (
+        <p role="alert" className="max-w-xs text-sm text-red-700">
+          {state.error}
+        </p>
+      ) : null}
+    </form>
+  );
+}
+
+/**
+ * Takes a student out of this section, after asking. Only their place here
+ * ends: the student, their login, their face and every register they are on
+ * stay, and so do their other courses' sections.
+ */
+export function RemoveStudentButton({
+  ids,
+  studentId,
+  name,
+  sectionName,
+}: {
+  ids: SectionIds;
+  studentId: string;
+  name: string;
+  /** "Physics — Section A". */
+  sectionName: string;
+}) {
   return (
     <ConfirmForm
       action={removeStudentFromSectionAction}
       ids={{ ...ids, studentId }}
-      label="Remove"
-      confirmLabel={`Remove ${name}`}
-      question="Their attendance in this section is kept."
+      label="Remove from section"
+      labelDetail={name}
+      confirmLabel="Remove from section"
+      question={`Remove ${name} from ${sectionName}? Only their place in this section ends — the student, their face enrolment, their attendance history and their other courses are all kept.`}
       pendingLabel="Removing…"
     />
   );

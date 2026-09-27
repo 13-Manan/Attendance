@@ -119,6 +119,20 @@ export const DASHBOARD_ROUTES: readonly RouteEntry[] = [
       "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]",
     namedTrail: true,
   },
+  {
+    pattern:
+      "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]/students/add",
+    parent:
+      "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]",
+    namedTrail: true,
+  },
+  {
+    pattern:
+      "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]/students/[studentId]",
+    parent:
+      "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]",
+    namedTrail: true,
+  },
   { pattern: "/dashboard/college/semesters", label: "Semesters", namedTrail: true },
   { pattern: "/dashboard/college/courses", label: "Courses", namedTrail: true },
   { pattern: "/dashboard/college/sections", label: "Sections", namedTrail: true },
@@ -204,6 +218,18 @@ export function matchRoute(pathname: string): RouteMatch | null {
     if (matches && (!best || score > best.score)) best = { match: { entry, params }, score };
   }
   return best?.match ?? null;
+}
+
+/**
+ * Whether a path is the page a route pattern names or one below it:
+ * `/dashboard/college/departments/d1/semesters/s4/courses/phy/sections/a` is
+ * below `/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses`.
+ */
+export function isAtOrBelow(pathname: string, pattern: string): boolean {
+  const parts = segmentsOf(pathname);
+  const expected = segmentsOf(pattern);
+  if (parts.length < expected.length) return false;
+  return expected.every((segment, index) => isDynamic(segment) || segment === parts[index]);
 }
 
 /** Whether the page at this path draws its own, named trail. */

@@ -5,6 +5,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DASHBOARD_ROUTES,
+  isAtOrBelow,
   isDashboardPage,
   matchRoute,
   nearestListPage,
@@ -157,4 +158,14 @@ test("a page that cannot be shown points at the nearest list that exists", () =>
     assert.deepEqual(nearestListPage(path), { label, href }, path);
   }
   assert.equal(nearestListPage("/dashboard/no-such-page"), null);
+});
+
+test("a path is at or below a route pattern when every segment the pattern names matches", () => {
+  const courses = "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses";
+  assert.equal(isAtOrBelow("/dashboard/college/departments/d1/semesters/s4/courses/phy", courses), true);
+  assert.equal(isAtOrBelow("/dashboard/college/departments/d1/semesters/s4/courses/phy/sections/a/students/add", courses), true);
+  assert.equal(isAtOrBelow("/dashboard/college/departments/d1/semesters/s4/courses", courses), true);
+  assert.equal(isAtOrBelow("/dashboard/college/departments/d1/semesters/s4", courses), false, "the semester is above it");
+  assert.equal(isAtOrBelow("/dashboard/college/departments/d1/faculty", courses), false);
+  assert.equal(isAtOrBelow("/dashboard/students/classes/c1/sections/s1", courses), false);
 });

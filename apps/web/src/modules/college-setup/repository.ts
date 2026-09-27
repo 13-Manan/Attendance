@@ -341,9 +341,12 @@ const STUDENT_SELECT = {
   studentCode: true,
   firstName: true,
   lastName: true,
+  admissionNumber: true,
   status: true,
   userId: true,
 } satisfies Prisma.StudentSelect;
+
+export type StudentRow = Prisma.StudentGetPayload<{ select: typeof STUDENT_SELECT }>;
 
 /** Current students of these sections, with the section each row came from. */
 export async function listSectionStudents(db: Db, cohortIds: readonly string[]) {
@@ -355,13 +358,14 @@ export async function listSectionStudents(db: Db, cohortIds: readonly string[]) 
   });
 }
 
-/** How many students a section page offers to add from the rest of its department. */
+/** How many of the rest of its department's students a section's add page reads to suggest from. */
 const DEPARTMENT_CHOICE_LIMIT = 2000;
 
 /**
- * Students on roll in any of a session's groups hanging off these units,
- * except one group — the section being viewed — each once. One read, whatever
- * the department's size; what the section page offers to add from.
+ * Students on roll in any of a session's groups hanging off these units who
+ * are not in one group — the section being added to — each once. One read,
+ * whatever the department's size; what the add-student page suggests before
+ * anything is searched.
  */
 export async function listStudentsInGroupsExcept(
   db: Db,
@@ -374,7 +378,7 @@ export async function listStudentsInGroupsExcept(
   const rows = await db.enrollment.findMany({
     where: {
       status: "ACTIVE",
-      student: { status: "ACTIVE" },
+      student: { status: "ACTIVE", enrollments: { none: { cohortId: exceptGroupId, status: "ACTIVE" } } },
       cohort: {
         institutionId,
         academicSessionId: sessionId,
@@ -411,6 +415,98 @@ export async function findStudentsByCodes(db: Db, institutionId: string, codes: 
     },
     select: STUDENT_SELECT,
   });
+}
+
+/**
+ * Students of this college matching every term, each term anywhere in the
+ * student ID, either name or the admission number. On-roll students first,
+ * then by name. `take` bounds it: a search is narrowed by typing more, never
+ * paged through.
+ */
+export async function searchStudents(
+  db: Db,
+  institutionId: string,
+  terms: readonly string[],
+  take: number,
+): Promise<StudentRow[]> {
+  if (terms.length === 0) return [];
+  return db.student.findMany({
+    where: {
+      institutionId,
+      AND: terms.map((term) => ({
+        OR: [
+          { studentCode: { contains: term, mode: "insensitive" as const } },
+          { firstName: { contains: term, mode: "insensitive" as const } },
+          { lastName: { contains: term, mode: "insensitive" as const } },
+          { admissionNumber: { contains: term, mode: "insensitive" as const } },
+        ],
+      })),
+    },
+    orderBy: [{ status: "asc" }, { lastName: "asc" }, { firstName: "asc" }, { studentCode: "asc" }],
+    take,
+    select: STUDENT_SELECT,
+  });
+}
+
+/** One student of this college, or null — never another college's. */
+export async function getStudent(db: Db, institutionId: string, studentId: string): Promise<StudentRow | null> {
+  return db.student.findFirst({ where: { id: studentId, institutionId }, select: STUDENT_SELECT });
+}
+
+/** Which of these students are currently in this section. One read for a whole list. */
+export async function studentsCurrentlyIn(
+  db: Db,
+  cohortId: string,
+  studentIds: readonly string[],
+): Promise<Set<string>> {
+  if (studentIds.length === 0) return new Set();
+  const rows = await db.enrollment.findMany({
+    where: { cohortId, status: "ACTIVE", studentId: { in: [...studentIds] } },
+    select: { studentId: true },
+  });
+  return new Set(rows.map((row) => row.studentId));
+}
+
+/**
+ * The groups of one session a student is currently in, with each one's
+ * teacher — every department's; the caller keeps its own. One read, however
+ * many sections the department has.
+ */
+export async function listStudentGroupsInSession(
+  db: Db,
+  institutionId: string,
+  sessionId: string,
+  studentId: string,
+): Promise<{ id: string; name: string; academicUnitId: string; teacherName: string | null }[]> {
+  const rows = await db.enrollment.findMany({
+    where: { studentId, status: "ACTIVE", cohort: { institutionId, academicSessionId: sessionId } },
+    select: {
+      cohort: {
+        select: {
+          id: true,
+          name: true,
+          academicUnitId: true,
+          facultyLinks: {
+            where: { role: "PRIMARY" },
+            orderBy: { id: "asc" },
+            take: 1,
+            select: { user: { select: { name: true } } },
+          },
+        },
+      },
+    },
+  });
+  return rows.map(({ cohort }) => ({
+    id: cohort.id,
+    name: cohort.name,
+    academicUnitId: cohort.academicUnitId,
+    teacherName: cohort.facultyLinks[0]?.user.name ?? null,
+  }));
+}
+
+/** The two institution fields the face-enrolment policy reads. */
+export async function getInstitutionPolicyFields(institutionId: string) {
+  return prisma.institution.findUnique({ where: { id: institutionId }, select: { type: true, settings: true } });
 }
 
 export async function getEnrollmentStatus(db: Db, studentId: string, cohortId: string) {

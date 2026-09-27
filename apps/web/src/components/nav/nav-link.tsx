@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { isAtOrBelow } from "./route-map";
 
 /**
  * A nav entry that knows whether it is the current page.
@@ -35,11 +36,21 @@ import { usePathname } from "next/navigation";
  * `siblingHrefs` is optional: if the caller does not pass it, we fall back to
  * pure exact match, which is safe (fewer false positives) even if slightly
  * less permissive for nested routes.
+ *
+ * ## Claimed pages
+ *
+ * A few pages belong to a link other than the one whose address they sit
+ * under — a head of department's course pages live under their department's
+ * address but are reached from Courses (see `navClaims`). `activeUnder` lists
+ * the route patterns this link claims; `claimedElsewhere`, those another link
+ * claims, which this one then steps aside for.
  */
 export function NavLink({
   href,
   label,
   siblingHrefs,
+  activeUnder,
+  claimedElsewhere,
 }: {
   href: string;
   label: string;
@@ -48,11 +59,17 @@ export function NavLink({
    * match when a more-specific sibling exists. Ordering does not matter.
    */
   siblingHrefs?: readonly string[];
+  /** Route patterns whose pages, at or below them, are this link's. */
+  activeUnder?: readonly string[];
+  /** Route patterns another link in the shell claims. */
+  claimedElsewhere?: readonly string[];
 }) {
   const pathname = usePathname();
 
   const isActive = (() => {
     if (pathname === href) return true;
+    if (activeUnder?.some((pattern) => isAtOrBelow(pathname, pattern))) return true;
+    if (claimedElsewhere?.some((pattern) => isAtOrBelow(pathname, pattern))) return false;
 
     // Descendant match: only when a more specific sibling has NOT claimed
     // the current pathname. Without the sibling list we cannot know that,

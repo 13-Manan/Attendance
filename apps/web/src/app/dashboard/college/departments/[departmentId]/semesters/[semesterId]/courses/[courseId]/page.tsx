@@ -8,18 +8,21 @@ import { PageTrail } from "@/components/nav/page-trail";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import {
-  AddSectionsForm,
+  AddSectionForm,
   EditCourseForm,
   RemoveCourseButton,
-  SectionTeacherForm,
+  TeacherEditor,
 } from "@/app/dashboard/college/college-controls";
 import {
+  COURSES_PATH,
+  LINK_PRIMARY,
   LINK_SECONDARY,
   Notice,
   SECTION_TONE,
   SessionSwitcher,
   courseHref,
-  courseTitle,
+  courseTrail,
+  courseWithCode,
   departmentHref,
   first,
   readOrDeny,
@@ -33,17 +36,22 @@ interface PageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
+/** `href` with one more query parameter. */
+function withParam(href: string, key: string, value: string): string {
+  return `${href}${href.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(value)}`;
+}
+
 /**
- * One course in one academic session: how many sections it has, who teaches
- * each, and how many students each holds. Sections are the course's own — a
- * student can be in Physics A and Chemistry B.
+ * One course in one academic session — the place its sections are run from:
+ * each section's teacher and student count, "+ Add section" (`?add=section`)
+ * and "Edit course" (`?edit=course`), both of which survive a refresh.
+ * Sections are the course's own; a student can be in Physics A and Chemistry B.
  */
 export default async function CoursePage({ params, searchParams }: PageProps) {
   const user = await requireUser();
   const { departmentId, semesterId, courseId } = await params;
   const query = await searchParams;
   const isAdmin = hasPermission(user, "academicStructure.manage");
-  const trailBase = isAdmin ? [{ label: "Departments", href: "/dashboard/college/departments" }] : [];
 
   const result = await readOrDeny(() =>
     getCourseDetail(user, departmentId, semesterId, courseId, first(query.session)),
@@ -51,7 +59,7 @@ export default async function CoursePage({ params, searchParams }: PageProps) {
   if (!result.ok) {
     return (
       <div className="flex w-full max-w-5xl flex-col gap-5">
-        <PageTrail items={[...trailBase, { label: "Course" }]} />
+        <PageTrail items={[isAdmin ? { label: "Departments", href: "/dashboard/college/departments" } : { label: "Courses", href: COURSES_PATH }, { label: "Course" }]} />
         <EmptyState>{result.message}</EmptyState>
       </div>
     );
@@ -60,35 +68,53 @@ export default async function CoursePage({ params, searchParams }: PageProps) {
   if (!course) notFound();
   const { department, semester, session, sessions, sections, teachers } = course;
   const ids = { departmentId: department.id, semesterId: semester.id, courseId: course.id };
-  const here = courseHref(department.id, semester.id, course.id);
+  const here = withSession(courseHref(department.id, semester.id, course.id), session, sessions);
   const editable = Boolean(session?.isActive);
   const students = sections.reduce((sum, section) => sum + section.studentCount, 0);
   const created = first(query.created) === "1";
   const removed = first(query.removed);
+  const adding = editable && course.canHaveSections && first(query.add) === "section";
+  const editing = first(query.edit) === "course";
+  const trail = courseTrail({
+    viewer: isAdmin ? "admin" : "hod",
+    coursesHref: withSession(COURSES_PATH, session, sessions),
+    department: { name: department.name, href: withSession(departmentHref(department.id), session, sessions) },
+    semester: { name: semester.name, href: withSession(semesterHref(department.id, semester.id), session, sessions) },
+    course: { name: course.name, code: course.code, href: here },
+  });
+  const noTeachersHint = isAdmin
+    ? "No teacher can take attendance yet. Sections can be added now and given a teacher later — add teachers on the Faculty page."
+    : `No teacher in ${department.name} can take attendance yet. Sections can be added now and given a teacher later; ask the college administrator to add teachers to your department.`;
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
-      <PageTrail
-        items={[
-          ...trailBase,
-          { label: department.name, href: withSession(departmentHref(department.id), session, sessions) },
-          { label: semester.name, href: withSession(semesterHref(department.id, semester.id), session, sessions) },
-          { label: courseTitle(course) },
-        ]}
-      />
+      <PageTrail items={trail.items} back={trail.back} />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <header className="flex flex-col gap-1">
-          <h1 className="text-xl font-semibold text-neutral-900">{courseTitle(course)}</h1>
+        <header className="flex min-w-0 flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-xl font-semibold text-neutral-900">{course.name}</h1>
+            {course.code ? <Badge tone="neutral">{course.code}</Badge> : null}
+          </div>
           <p className="text-sm text-neutral-500">
-            {department.name} · {semester.name}
-            {session ? ` · Academic session ${session.name}` : ""} · {sections.length}{" "}
-            {sections.length === 1 ? "section" : "sections"} · {students} {students === 1 ? "student" : "students"}
+            {semester.name} · {department.name}
+            {session && sessions.length > 1 ? ` · Academic session ${session.name}` : ""}
           </p>
         </header>
-        {session ? <SessionSwitcher action={here} sessions={sessions} selectedId={session.id} /> : null}
+        <div className="flex flex-wrap items-end gap-2">
+          {!editing ? (
+            <Link href={withParam(here, "edit", "course")} className={LINK_SECONDARY}>
+              Edit course
+            </Link>
+          ) : null}
+          {session ? <SessionSwitcher action={courseHref(department.id, semester.id, course.id)} sessions={sessions} selectedId={session.id} /> : null}
+        </div>
       </div>
 
-      {created ? <Notice>{course.name} was added. Next: add its sections for {session?.name ?? "the session"}.</Notice> : null}
+      {created ? (
+        <Notice>
+          {course.name} was added. Next: add its sections{session ? ` for ${session.name}` : ""}, and give each a teacher.
+        </Notice>
+      ) : null}
       {removed ? <Notice>Section {removed} was removed.</Notice> : null}
       {!session ? (
         <Notice tone="info">
@@ -107,117 +133,111 @@ export default async function CoursePage({ params, searchParams }: PageProps) {
         <Notice tone="info">{session.name} is archived, so its sections are shown as they were and can&apos;t be changed.</Notice>
       ) : null}
       {!course.canHaveSections ? (
-        <Notice tone="info">This course has no code yet. Give it one below before adding sections.</Notice>
+        <Notice tone="info">This course has no code yet. Give it one under Edit course before adding sections.</Notice>
       ) : null}
 
-      <Panel title="Sections" description="Each section's teacher, students and status.">
+      {editing ? (
+        <Panel
+          title="Edit course"
+          description="The name and code registers and the student portal show."
+          action={
+            <Link href={here} className={LINK_SECONDARY}>
+              Close
+            </Link>
+          }
+        >
+          <div className="flex flex-col gap-5">
+            <EditCourseForm ids={ids} code={course.code ?? ""} name={course.name} sessionId={session?.id ?? ""} />
+            {sections.length === 0 ? <RemoveCourseButton ids={ids} /> : null}
+          </div>
+        </Panel>
+      ) : null}
+
+      {adding && session ? (
+        <Panel
+          title="Add a section"
+          description={`For ${session.name}. Add as many as the course needs, one after another.`}
+          action={
+            <Link href={here} className={LINK_SECONDARY}>
+              Close
+            </Link>
+          }
+        >
+          <AddSectionForm
+            ids={ids}
+            sessionId={session.id}
+            courseLabel={courseWithCode(course)}
+            existingNames={sections.map((section) => section.name)}
+            teachers={teachers}
+            noTeachersHint={noTeachersHint}
+          />
+        </Panel>
+      ) : null}
+
+      <Panel
+        title="Sections"
+        description={`${sections.length} ${sections.length === 1 ? "section" : "sections"} · ${students} ${students === 1 ? "student" : "students"}`}
+        action={
+          editable && course.canHaveSections && !adding ? (
+            <Link href={withParam(here, "add", "section")} className={LINK_PRIMARY}>
+              + Add section
+            </Link>
+          ) : null
+        }
+      >
         {sections.length === 0 ? (
           <EmptyState>
-            {course.name} has no sections{session ? ` in ${session.name}` : ""} yet.{editable ? " Add them below." : ""}
+            {course.name} has no sections{session ? ` in ${session.name}` : ""} yet.
+            {editable && course.canHaveSections && !adding ? " Add the first one with + Add section." : ""}
           </EmptyState>
         ) : (
-          <>
-            <ul className="flex flex-col gap-3 md:hidden">
-              {sections.map((section) => (
-                <li key={section.id} className="flex flex-col gap-3 rounded-md border border-neutral-200 p-3">
+          <ul className="grid gap-3 md:grid-cols-2">
+            {sections.map((section) => {
+              const open = sectionHref(department.id, semester.id, course.id, section.id);
+              return (
+                <li key={section.id} className="flex flex-col gap-3 rounded-md border border-neutral-200 p-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h3 className="text-base font-medium text-neutral-900">{section.label}</h3>
+                    <h3 className="text-base font-medium text-neutral-900">
+                      <Link href={open} className="underline-offset-2 hover:underline">
+                        {section.label}
+                      </Link>
+                    </h3>
                     <Badge tone={SECTION_TONE[section.status]}>{SECTION_STATUS_LABEL[section.status]}</Badge>
                   </div>
-                  <dl className="grid grid-cols-2 gap-2 text-sm">
-                    <div>
-                      <dt className="text-xs text-neutral-500">Teacher</dt>
-                      <dd className="text-neutral-800">{section.teacher ? section.teacher.name : "Not assigned"}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-xs text-neutral-500">Students</dt>
-                      <dd className="tabular-nums text-neutral-800">{section.studentCount}</dd>
-                    </div>
+                  <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
+                    <dt className="text-neutral-500">Teacher</dt>
+                    <dd className="min-w-0 break-words text-neutral-900">
+                      {section.teacher ? (
+                        <>
+                          {section.teacher.name}
+                          {!section.teacher.active ? <span className="ml-1 text-red-700">(can&apos;t sign in)</span> : null}
+                        </>
+                      ) : (
+                        <span className="text-amber-700">Needs teacher</span>
+                      )}
+                    </dd>
+                    <dt className="text-neutral-500">Students</dt>
+                    <dd className="tabular-nums text-neutral-900">{section.studentCount}</dd>
+                    {section.groupName !== section.label ? (
+                      <>
+                        <dt className="text-neutral-500">Registers</dt>
+                        <dd className="font-mono text-xs leading-5 text-neutral-600">{section.groupName}</dd>
+                      </>
+                    ) : null}
                   </dl>
-                  {editable && !section.teacher ? (
-                    <SectionTeacherForm ids={{ ...ids, sectionId: section.id }} teachers={teachers} currentId={null} />
+                  {editable ? (
+                    <TeacherEditor ids={{ ...ids, sectionId: section.id }} teachers={teachers} current={section.teacher} compact />
                   ) : null}
-                  <Link href={sectionHref(department.id, semester.id, course.id, section.id)} className={LINK_SECONDARY}>
-                    Manage {section.label}
-                  </Link>
+                  <div>
+                    <Link href={open} className={LINK_SECONDARY}>
+                      Open section<span className="sr-only"> {section.label}</span>
+                    </Link>
+                  </div>
                 </li>
-              ))}
-            </ul>
-            <div className="hidden md:block">
-              <table className="w-full border-collapse text-left">
-                <thead>
-                  <tr className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
-                    <th className="py-2 pr-4 font-medium">Section</th>
-                    <th className="py-2 pr-4 font-medium">Teacher</th>
-                    <th className="py-2 pr-4 text-right font-medium">Students</th>
-                    <th className="py-2 pr-4 font-medium">Status</th>
-                    <th className="py-2 font-medium">
-                      <span className="sr-only">Actions</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sections.map((section) => (
-                    <tr key={section.id} className="border-b border-neutral-100 align-top text-sm">
-                      <td className="py-3 pr-4">
-                        <span className="font-medium text-neutral-900">{section.label}</span>
-                        {section.groupName !== section.label ? (
-                          <span className="ml-2 font-mono text-xs text-neutral-500">{section.groupName}</span>
-                        ) : null}
-                      </td>
-                      <td className="py-3 pr-4 text-neutral-700">
-                        {section.teacher ? (
-                          section.teacher.name
-                        ) : editable ? (
-                          <SectionTeacherForm ids={{ ...ids, sectionId: section.id }} teachers={teachers} currentId={null} compact />
-                        ) : (
-                          <span className="text-neutral-500">Not assigned</span>
-                        )}
-                      </td>
-                      <td className="py-3 pr-4 text-right tabular-nums">{section.studentCount}</td>
-                      <td className="py-3 pr-4">
-                        <Badge tone={SECTION_TONE[section.status]}>{SECTION_STATUS_LABEL[section.status]}</Badge>
-                      </td>
-                      <td className="py-3 text-right">
-                        <Link
-                          href={sectionHref(department.id, semester.id, course.id, section.id)}
-                          className={LINK_SECONDARY}
-                          aria-label={`Manage ${section.label}`}
-                        >
-                          Manage
-                        </Link>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
+              );
+            })}
+          </ul>
         )}
-        {editable && course.canHaveSections && session ? (
-          <div className="border-t border-neutral-200 pt-4">
-            <h3 className="mb-3 text-sm font-semibold text-neutral-900">Add sections for {session.name}</h3>
-            <AddSectionsForm
-              ids={ids}
-              sessionId={session.id}
-              existingNames={sections.map((section) => section.name)}
-              teachers={teachers}
-            />
-            {teachers.length === 0 ? (
-              <p className="mt-2 text-xs text-neutral-500">
-                No teacher can be chosen yet{isAdmin ? "" : " in your department"}. Sections can be added now and given a
-                teacher later.
-              </p>
-            ) : null}
-          </div>
-        ) : null}
-      </Panel>
-
-      <Panel title="Course details" description="The code and name registers and the student portal show.">
-        <div className="flex flex-col gap-5">
-          <EditCourseForm ids={ids} code={course.code ?? ""} name={course.name} sessionId={session?.id ?? ""} />
-          {sections.length === 0 ? <RemoveCourseButton ids={ids} /> : null}
-        </div>
       </Panel>
     </div>
   );

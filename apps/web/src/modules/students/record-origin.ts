@@ -1,6 +1,7 @@
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { hasPermission } from "@/modules/authorization/service";
 import { getCohortDetailForRequest } from "@/modules/cohorts/directory-service";
+import { sectionFullName } from "@/modules/college-setup/policy";
 import { getSectionPlacement } from "@/modules/college-setup/service";
 import { parseReturnPath, type ReturnPath } from "@/lib/return-path";
 import { getStudentSectionForRequest } from "./class-navigation-service";
@@ -10,7 +11,7 @@ import { parseStudentFilters, studentFilterQuery } from "./directory-filters";
 /**
  * Where a student's record was opened from, when that is a list other than
  * the whole directory — so the record can offer "← Back to Class 8 · Section A"
- * instead of "← Back to Students".
+ * or "← Back to Physics — Section A" instead of "← Back to Students".
  *
  * Only these lists link to a student with `?returnTo=`: a section's students,
  * a class's roster under Academic, and a college course section. A value
@@ -91,7 +92,7 @@ export async function resolveStudentOrigin(
         courseId: match.params.courseId,
         sectionId: match.params.sectionId,
       });
-      return placement ? { label: `${placement.course.name} · ${placement.section.label}`, href } : null;
+      return placement ? { label: sectionFullName(placement.course.name, placement.section.label), href } : null;
     }
     if (!hasPermission(user, "cohort.read")) return null;
     const cohort = await getCohortDetailForRequest(user, match.params.cohortId);

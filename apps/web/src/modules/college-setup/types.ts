@@ -50,6 +50,10 @@ export const MAX_SECTION_NAME = 40;
 export const MAX_SECTIONS = 30;
 /** Students one "add by student ID" box accepts at once. */
 export const MAX_STUDENT_CODES_AT_ONCE = 50;
+/** Students one search lists. A name that matches more is narrowed by typing more of it. */
+export const STUDENT_SEARCH_LIMIT = 20;
+/** Students of the department an empty search offers to add. */
+export const STUDENT_SUGGESTION_LIMIT = 50;
 
 /**
  * Who is looking, as the college service resolved it — never as the browser
@@ -220,11 +224,15 @@ export interface CourseDetail extends CourseRef {
   canHaveSections: boolean;
 }
 
+/** A student record's status, as `Student.status` stores it. */
+export type StudentRecordStatus = "ACTIVE" | "INACTIVE" | "TRANSFERRED" | "COMPLETED";
+
 export interface SectionStudent {
   studentId: string;
   studentCode: string;
   firstName: string;
   lastName: string;
+  status: StudentRecordStatus;
   /** Whether a face template the running model can compare exists — the "enrolled" of the face screens. */
   faceEnrolled: boolean;
   hasLogin: boolean;
@@ -244,8 +252,6 @@ export interface CourseSectionDetail {
   section: SectionRow;
   students: SectionStudent[];
   teachers: StaffChoice[];
-  /** Other students of this department's sections this session, to add from a list. */
-  departmentStudents: { id: string; studentCode: string; name: string }[];
   removal: RemovalCheck;
 }
 
@@ -312,4 +318,64 @@ export interface SectionPlacement {
   course: CourseRef;
   session: SessionChoice;
   section: { id: string; name: string; label: string; groupName: string };
+}
+
+/** A student as the add-student search lists them. */
+export interface StudentSearchRow {
+  studentId: string;
+  studentCode: string;
+  firstName: string;
+  lastName: string;
+  admissionNumber: string | null;
+  status: StudentRecordStatus;
+  /** Already in this section, so there is nothing to add. */
+  inSection: boolean;
+}
+
+/** The add-student page: a search of the college's students, for one section. */
+export interface SectionStudentSearch {
+  placement: SectionPlacement;
+  /** What was searched for, tidied. */
+  query: string;
+  /** False until the box holds enough to search on. */
+  searched: boolean;
+  /** Exact student-ID matches first, then everyone else the search matched. */
+  results: StudentSearchRow[];
+  /** More matched than are listed. */
+  truncated: boolean;
+  /**
+   * Before anything is searched: students in the department's other sections
+   * this session who are not in this one — the likeliest to add next.
+   */
+  suggestions: StudentSearchRow[];
+  /** More of the department's students than are suggested. */
+  suggestionsTruncated: boolean;
+  /** The student just added from this page, while they are still in the section. */
+  added: { studentId: string; name: string } | null;
+}
+
+/** One student of a section, as the section's own student page shows them. */
+export interface SectionStudentView {
+  placement: SectionPlacement;
+  student: {
+    studentId: string;
+    studentCode: string;
+    firstName: string;
+    lastName: string;
+    admissionNumber: string | null;
+    status: StudentRecordStatus;
+    faceEnrolled: boolean;
+    hasLogin: boolean;
+  };
+  /** Their sections of this department this session — this one among them. */
+  sections: {
+    sectionId: string;
+    label: string;
+    groupName: string;
+    course: CourseRef;
+    semesterId: string;
+    teacherName: string | null;
+  }[];
+  /** Whether this college lets a student enrol their own face from the student portal. */
+  selfEnrollment: boolean;
 }

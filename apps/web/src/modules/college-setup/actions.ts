@@ -23,6 +23,7 @@ import { sectionLabel } from "./policy";
 import {
   addCourseSections,
   addNewStudentToSection,
+  addStudentToSection,
   addStudentsToSection,
   assignDepartmentHead,
   createCourse,
@@ -327,32 +328,35 @@ export async function removeSemesterAction(
 // Courses
 // ---------------------------------------------------------------------------
 
+/**
+ * Adds a course. The semester page sends its department and semester; the
+ * Courses page sends only the chosen semester, and the service finds — and
+ * checks — its department.
+ */
 export async function createCourseAction(
   prev: CollegeActionState,
   formData: FormData,
 ): Promise<CollegeActionState> {
   const actor = await requireUser();
-  const departmentId = text(formData, "departmentId");
-  const semesterId = text(formData, "semesterId");
   const session = text(formData, "sessionId");
-  let courseId: string;
+  let created: { courseId: string; departmentId: string; semesterId: string };
   try {
-    ({ courseId } = await createCourse(actor, {
-      departmentId,
-      semesterId,
+    created = await createCourse(actor, {
+      departmentId: text(formData, "departmentId") || undefined,
+      semesterId: text(formData, "semesterId"),
       code: text(formData, "code"),
       name: text(formData, "name"),
-    }));
+    });
   } catch (error) {
     return {
       error: describe(error, "The course could not be added."),
-      values: { code: text(formData, "code"), name: text(formData, "name") },
+      values: { code: text(formData, "code"), name: text(formData, "name"), semesterId: text(formData, "semesterId") },
       attempt: next(prev),
     };
   }
   const query = new URLSearchParams({ created: "1", ...(session ? { session } : {}) });
   redirect(
-    `${BASE}/${encodeURIComponent(departmentId)}/semesters/${encodeURIComponent(semesterId)}/courses/${encodeURIComponent(courseId)}?${query}`,
+    `${BASE}/${encodeURIComponent(created.departmentId)}/semesters/${encodeURIComponent(created.semesterId)}/courses/${encodeURIComponent(created.courseId)}?${query}`,
   );
 }
 
@@ -424,7 +428,11 @@ export async function addSectionsAction(
       attempt: next(prev),
     };
   } catch (error) {
-    return { error: describe(error, "The sections could not be added."), attempt: next(prev) };
+    return {
+      error: describe(error, "The section could not be added."),
+      values: { sectionName: names[0] ?? "", teacherId: teachers[0] ?? "" },
+      attempt: next(prev),
+    };
   }
 }
 
@@ -559,14 +567,38 @@ export async function addNewStudentToSectionAction(
   const ids = sectionIds(formData);
   const values = readStudentForm(formData);
   const attempt = (prev.attempt ?? 0) + 1;
-  let name: string;
+  let studentId: string;
   try {
-    const student = await addNewStudentToSection(actor, ids, values);
-    name = `${student.firstName} ${student.lastName}`.trim();
+    ({ id: studentId } = await addNewStudentToSection(actor, ids, values));
   } catch (error) {
     return { error: describe(error, "The student could not be added."), values, attempt };
   }
-  redirect(`${sectionPath(ids)}?added=${encodeURIComponent(name)}`);
+  // The section names the student from its own list, so the notice can only
+  // ever be about somebody who really is in it.
+  redirect(`${sectionPath(ids)}?added=${encodeURIComponent(studentId)}`);
+}
+
+/**
+ * Adds one student chosen from the add-student search. The page it came from
+ * shows the result — the search kept, the student now marked as in the
+ * section — so several can be added one after another.
+ */
+export async function addStudentToSectionAction(
+  prev: CollegeActionState,
+  formData: FormData,
+): Promise<CollegeActionState> {
+  const actor = await requireUser();
+  const ids = sectionIds(formData);
+  let studentId: string;
+  try {
+    ({ studentId } = await addStudentToSection(actor, ids, text(formData, "studentId")));
+  } catch (error) {
+    return { error: describe(error, "The student could not be added."), attempt: next(prev) };
+  }
+  const query = new URLSearchParams({ added: studentId });
+  const search = text(formData, "q").trim();
+  if (search) query.set("q", search);
+  redirect(`${sectionPath(ids)}/students/add?${query}`);
 }
 
 export async function addStudentsToSectionAction(

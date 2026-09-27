@@ -1,14 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  MIN_STUDENT_SEARCH,
   courseStatus,
   defaultSemesterName,
+  nextSectionNames,
   ordinal,
   parseStudentCodes,
   pickSession,
+  sectionFullName,
   sectionGroupName,
   sectionRemovalCheck,
   sectionStatus,
+  studentMatchesSearch,
+  studentSearchTerms,
   validateCourseCode,
   validateCourseName,
   validateDepartmentCode,
@@ -112,4 +117,38 @@ test("student IDs are read from commas, spaces and lines, each once, within a li
   assert.deepEqual(parseStudentCodes("CSE01, cse02\nCSE03 CSE01;cse01", 10), ["CSE01", "cse02", "CSE03", "cse01"]);
   refuses(() => parseStudentCodes("  , ", 10), /at least one student ID/);
   refuses(() => parseStudentCodes("a b c", 2), /at most 2/);
+});
+
+test("the next section suggested is the first letter not taken, however the others were written", () => {
+  assert.deepEqual(nextSectionNames([], 3), ["A", "B", "C"]);
+  assert.deepEqual(nextSectionNames(["A", "section b", "D"], 2), ["C", "E"]);
+  assert.deepEqual(nextSectionNames(["Section A"], 1), ["B"]);
+  const alphabet = Array.from({ length: 26 }, (_, index) => String.fromCharCode(65 + index));
+  assert.deepEqual(nextSectionNames(alphabet, 1), ["27"], "past Z, numbers");
+});
+
+test("a section is named in full with its course", () => {
+  assert.equal(sectionFullName("Physics", "Section A"), "Physics — Section A");
+  assert.equal(sectionFullName("  Applied   Physics ", "CSE Sem 3 - Section 1"), "Applied Physics — CSE Sem 3 - Section 1");
+});
+
+test("a student search becomes terms only once there is enough to search on", () => {
+  assert.equal(MIN_STUDENT_SEARCH, 2);
+  assert.deepEqual(studentSearchTerms(""), []);
+  assert.deepEqual(studentSearchTerms(" a "), [], "one letter matches half the college");
+  assert.deepEqual(studentSearchTerms("CSE001"), ["CSE001"]);
+  assert.deepEqual(studentSearchTerms("  aman   kumar "), ["aman", "kumar"]);
+  assert.deepEqual(studentSearchTerms("Aman aman AMAN"), ["Aman"], "a repeated word is one term");
+  assert.deepEqual(studentSearchTerms("a b c d e f"), ["a", "b", "c", "d"], "at most four terms");
+  assert.equal(studentSearchTerms("x".repeat(500))[0].length, 80, "a pasted paragraph is cut short");
+  assert.deepEqual(studentSearchTerms(null), []);
+});
+
+test("a section's own list search needs every word in the name or the student ID", () => {
+  const aman = { firstName: "Aman", lastName: "Kumar", studentCode: "CSE001" };
+  assert.equal(studentMatchesSearch(aman, "aman"), true);
+  assert.equal(studentMatchesSearch(aman, "kumar aman"), true);
+  assert.equal(studentMatchesSearch(aman, "cse00"), true);
+  assert.equal(studentMatchesSearch(aman, "aman singh"), false);
+  assert.equal(studentMatchesSearch(aman, "   "), true, "nothing typed hides nobody");
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SYSTEM_ROLES, type PermissionKey } from "@/modules/authorization/permissions";
-import { NAV_GROUPS, NAV_ITEMS, buildNavSections } from "./nav-items.ts";
+import { NAV_GROUPS, NAV_ITEMS, buildNavSections, navClaims } from "./nav-items.ts";
 
 /**
  * The navigation is not a security boundary — every page gates itself — but it
@@ -321,4 +321,16 @@ test("the order moves links, never access: every role sees exactly what its perm
       assert.deepEqual(shown, [...new Set(expected)], `${definition.key} at ${kind}`);
     }
   }
+});
+
+test("a head of department's course pages light Courses, not My department; nobody else's claims change", () => {
+  const role = (key: string) => allowing(...(SYSTEM_ROLES.find((candidate) => candidate.key === key)!.permissions as PermissionKey[]));
+  assert.deepEqual(navClaims(role("HOD"), "COLLEGE"), {
+    "/dashboard/college/courses": ["/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses"],
+  });
+  assert.deepEqual(navClaims(role("COLLEGE_ADMIN"), "COLLEGE"), {}, "an administrator walks down from Departments");
+  assert.deepEqual(navClaims(role("FACULTY"), "COLLEGE"), {});
+  assert.deepEqual(navClaims(role("SCHOOL_ADMIN"), "SCHOOL"), {});
+  assert.deepEqual(navClaims(role("HOD"), "SCHOOL"), {}, "only at a college");
+  assert.deepEqual(navClaims(role("PLATFORM_SUPER_ADMIN"), null), {});
 });

@@ -308,8 +308,8 @@ test("students: admitted into a section, added to other courses by ID, removed w
   const row = department?.students.find((student) => student.studentId === aman.id);
   assert.deepEqual(row?.sections.map((section) => section.groupName).sort(), ["CHE402-B", "MAT403-A", "PHY401-A"]);
   const phyB = { departmentId: ids.cse, semesterId: ids.s4, courseId: ids.phy, sectionId: ids.phyB };
-  const detail = await college.getCourseSectionDetail(hod(), phyB);
-  assert.deepEqual(detail?.departmentStudents.map((student) => student.studentCode), ["CSE2601"], "offered for sections they are not in");
+  const offered = await college.searchStudentsForSection(hod(), phyB, "");
+  assert.deepEqual(offered?.suggestions.map((student) => student.studentCode), ["CSE2601"], "offered for sections they are not in");
 
   // Two students whose IDs differ only in case: the exact one is taken, and a guess between them is refused.
   await prisma.student.create({ data: { id: "cs-it-twin", institutionId: A, studentCode: "cse2601", firstName: "Other", lastName: "Aman" } });
