@@ -273,22 +273,22 @@ test("one student is in several courses' sections; adding to one leaves the othe
   assert.equal((await enrolment("hc-it-s1", ids.phyA))?.status, "ACTIVE", "still in Physics A");
   assert.equal((await enrolment("hc-it-s1", ids.cheB))?.status, "ACTIVE", "and in Chemistry B");
 
-  const view = await college.getSectionStudent(hod(), physicsA(), "hc-it-s1");
+  const view = await college.getDepartmentStudent(hod(), ids.cse, "hc-it-s1");
   assert.deepEqual(
-    view?.sections.map((row) => [row.groupName, row.teacherName]),
+    view?.placements.map((row) => [row.groupName, row.teacher?.userId]),
     [
-      ["PHY401-A", TA],
       ["CHE402-B", TB],
+      ["PHY401-A", TA],
     ],
-    "this section first, then their others",
+    "both of the department's sections, each with its teacher",
   );
   assert.deepEqual(
-    [view?.student.studentCode, view?.student.admissionNumber, view?.student.faceEnrolled, view?.student.hasLogin],
-    ["CSE001", "ADM-11", false, false],
+    [view?.student.studentCode, view?.student.admissionNumber, view?.face.enrolled, view?.login.state],
+    ["CSE001", "ADM-11", false, "none"],
   );
-  assert.equal(view?.selfEnrollment, true, "a college lets students enrol their own face unless it says otherwise");
-  assert.equal(await college.getSectionStudent(hod(), chemistryB(), "hc-it-s2"), null, "Rahul is not in Chemistry B");
-  assert.equal(await college.getSectionStudent(hod(), physicsA(), "hc-it-elsewhere"), null);
+  const rahul = await college.getDepartmentStudent(hod(), ids.cse, "hc-it-s2");
+  assert.deepEqual(rahul?.placements.map((row) => row.groupName), ["PHY401-A"], "Rahul is not in Chemistry B");
+  assert.equal(await college.getDepartmentStudent(hod(), ids.cse, "hc-it-elsewhere"), null);
 
   // The student's portal lists both courses' sections as soon as they are in them.
   await provisionStudentLogin(admin(), "hc-it-s1", {});
@@ -370,8 +370,8 @@ test("taking a student out of Physics A ends only that place: the student, face,
   // Physics A's list no longer has them; the student page only shows them where they are.
   const section = await college.getCourseSectionDetail(hod(), physicsA());
   assert.deepEqual(section?.students.map((row) => row.studentCode).sort(), ["CSE002", "CSE003"]);
-  assert.equal(await college.getSectionStudent(hod(), physicsA(), "hc-it-s1"), null);
-  assert.ok(await college.getSectionStudent(hod(), chemistryB(), "hc-it-s1"));
+  const after = await college.getDepartmentStudent(hod(), ids.cse, "hc-it-s1");
+  assert.deepEqual(after?.placements.map((row) => row.groupName), ["CHE402-B"], "their page keeps only Chemistry B");
 
   // Their portal keeps Chemistry B as a current course, and the Physics attendance already taken.
   const portal = await getStudentDashboard(actor(ids.accountUserId, "STUDENT", A));
@@ -389,11 +389,11 @@ test("another department's ids, and mixed-up ids, read as not found and change n
   assert.equal(await college.getCourseDetail(hod(), ids.me, ids.meS1, ids.mec), null);
   assert.equal(await college.getCourseSectionDetail(hod(), mechanics), null);
   assert.equal(await college.searchStudentsForSection(hod(), mechanics, "CSE"), null);
-  assert.equal(await college.getSectionStudent(hod(), mechanics, "hc-it-s2"), null);
+  assert.equal(await college.getDepartmentStudent(hod(), ids.me, "hc-it-s2"), null);
   assert.equal(await college.getSectionPlacement(hod(), mechanics), null);
   // CSE's department in front of Mechanics' section, and a course from the wrong semester.
   assert.equal(await college.searchStudentsForSection(hod(), { ...physicsA(), sectionId: ids.mecA }, ""), null);
-  assert.equal(await college.getSectionStudent(hod(), { ...physicsA(), semesterId: ids.s3 }, "hc-it-s2"), null);
+  assert.equal(await college.getDepartmentStudent(hod(), ids.cse, "hc-it-left"), null, "a student in none of its sections");
 
   await assert.rejects(() => college.addStudentToSection(hod(), mechanics, "hc-it-s2"), refused(/not part of this college/));
   await assert.rejects(() => college.addStudentToSection(hod(), { ...physicsA(), sectionId: ids.mecA }, "hc-it-s2"), refused(/not part of this course/));
@@ -415,6 +415,6 @@ test("the administrator's own way in is unchanged: the semester page, and the sa
   assert.equal((await college.addStudentToSection(admin(), mathsA, "hc-it-s2")).name, "Rahul Singh");
   const search = await college.searchStudentsForSection(admin(), mathsA, "Rahul");
   assert.deepEqual(search?.results.map((row) => [row.studentCode, row.inSection]), [["CSE002", true]]);
-  const view = await college.getSectionStudent(admin(), mathsA, "hc-it-s2");
-  assert.deepEqual(view?.sections.map((row) => row.groupName), ["MAT301-A", "PHY401-A"]);
+  const view = await college.getDepartmentStudent(admin(), ids.cse, "hc-it-s2");
+  assert.deepEqual(view?.placements.map((row) => row.groupName), ["MAT301-A", "PHY401-A"]);
 });

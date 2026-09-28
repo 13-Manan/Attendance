@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, type ReactNode } from "react";
 import {
   createStudentAction,
   updateStudentAction,
@@ -57,6 +57,7 @@ export function StudentForm({
   returnTo,
   action,
   hidden,
+  leading,
 }: {
   mode: "create" | "edit";
   student?: StudentDetail;
@@ -79,6 +80,11 @@ export function StudentForm({
   action?: (state: StudentActionState, formData: FormData) => Promise<StudentActionState>;
   /** Fields that action needs and the person filling the form does not choose. */
   hidden?: Record<string, string>;
+  /**
+   * A field that action needs and the person does choose, shown first: the
+   * course section a student admitted from a college department joins.
+   */
+  leading?: ReactNode;
 }) {
   const [state, formAction, pending] = useActionState(
     action ?? (mode === "create" ? createStudentAction : updateStudentAction),
@@ -94,6 +100,7 @@ export function StudentForm({
       {Object.entries(hidden ?? {}).map(([name, value]) => (
         <input key={name} type="hidden" name={name} value={value} />
       ))}
+      {leading}
 
       <fieldset className="flex flex-col gap-4">
         <legend className="mb-2 text-sm font-semibold text-neutral-900">Who they are</legend>

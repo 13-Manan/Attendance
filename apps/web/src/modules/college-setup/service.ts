@@ -4,12 +4,20 @@ import { recordAuditLog } from "@/modules/audit/service";
 import { pickByStudentCode } from "@/modules/auth-tenancy/student-login-policy";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { enrollStudentInCohortForRequest, unenrollStudentFromCohortForRequest } from "@/modules/enrollment/service";
-import { resolveSelfEnrollmentEnabled } from "@/modules/face-enrollment/policy";
+import {
+  enrollFaceForStudentRequest,
+  getStudentFaceEnrollment,
+  replaceFaceEnrollmentRequest,
+  type FaceEnrollmentDeps,
+  type StudentFaceEnrollment,
+} from "@/modules/face-enrollment/service";
+import type { FaceCaptureSource, FaceEnrollmentResult } from "@/modules/face-enrollment/types";
 import {
   deactivateFaculty,
   inviteFaculty,
   reactivateFaculty,
   resetFacultyPassword,
+  updateFacultyDetails,
   type InvitedFaculty,
 } from "@/modules/faculty/directory-service";
 import type { IssuedPassword } from "@/modules/faculty/directory-types";
@@ -42,6 +50,7 @@ import {
   MAX_STUDENT_CODES_AT_ONCE,
   STUDENT_SEARCH_LIMIT,
   STUDENT_SUGGESTION_LIMIT,
+  SameCourseConflict,
   type CollegeHome,
   type CollegeScope,
   type CourseDetail,
@@ -49,19 +58,28 @@ import {
   type CourseSectionDetail,
   type DepartmentDetail,
   type DepartmentFaculty,
+  type DepartmentFacultyFilters,
+  type DepartmentFacultyMember,
   type DepartmentFacultyRow,
+  type DepartmentStudentDetail,
+  type DepartmentStudentFilters,
+  type DepartmentStudentPick,
   type DepartmentStudentRow,
+  type DepartmentStudentSearch,
   type DepartmentStudents,
   type DepartmentsOverview,
   type HeadOfDepartment,
+  type SectionChoice,
   type SectionPlacement,
   type SectionStudentSearch,
-  type SectionStudentView,
   type SemesterDetail,
   type SemesterRow,
   type SessionChoice,
   type StaffChoice,
+  type StudentLoginState,
   type StudentSearchRow,
+  type StudentSectionChoice,
+  type StudentSectionRef,
 } from "./types";
 import {
   buildTree,
@@ -80,6 +98,7 @@ import {
   sortedSectionRows,
   toCourseRef,
   toDepartmentRef,
+  toSectionRow,
   toSemesterRef,
   withMetadata,
   childrenOf,
@@ -770,98 +789,95 @@ export async function searchStudentsForSection(
   };
 }
 
+const STUDENT_LIST_LIMIT = 500;
+
+/** The department's section groups of the loaded session, and nothing else. */
+async function departmentSessionGroups(loaded: Loaded, department: repo.UnitRow): Promise<repo.GroupRow[]> {
+  if (!loaded.session) return [];
+  return repo.listSessionGroups(
+    prisma,
+    loaded.scope.institutionId,
+    loaded.session.id,
+    sectionUnitIds(loaded.tree, departmentCourses(loaded.tree, department.id).map((course) => course.id)),
+  );
+}
+
 /**
- * One student of a section, for the section's own student page: who they
- * are, whether a face and a sign-in are on file, and which of this
- * department's sections they are in this session.
- *
- * Null unless the student is currently in this section — the page is reached
- * from the section's list, and a head of department reads no student outside
- * their department's sections.
+ * The department's sections as a picker offers them: course, section, who
+ * teaches it and how many are in it — in programme order, then by course and
+ * section. A group that is not under one of the department's courses is left
+ * out rather than shown half-named.
  */
-export async function getSectionStudent(
-  actor: SessionUser,
-  ids: SectionIds,
-  studentId: string,
-): Promise<SectionStudentView | null> {
-  const resolved = await resolveSection(actor, ids);
-  if (!resolved) return null;
-  const { scope, chain, group, session, placement } = resolved;
+function toSectionChoices(tree: Tree, groups: readonly repo.GroupRow[]): SectionChoice[] {
+  return groups
+    .flatMap((group) => {
+      const courseId = courseIdOfGroup(tree, group);
+      const course = courseId ? tree.byId.get(courseId) : undefined;
+      const semester = course?.parentId ? tree.byId.get(course.parentId) : undefined;
+      if (!course || semester?.kind !== "SEMESTER") return [];
+      const row = toSectionRow(tree, group);
+      return [
+        {
+          sectionId: group.id,
+          label: row.label,
+          groupName: group.name,
+          course: toCourseRef(course),
+          semester: toSemesterRef(semester),
+          teacher: row.teacher ? { userId: row.teacher.userId, name: row.teacher.name } : null,
+          studentCount: row.studentCount,
+        },
+      ];
+    })
+    .sort(
+      (a, b) =>
+        a.semester.number - b.semester.number ||
+        a.course.name.localeCompare(b.course.name) ||
+        a.label.localeCompare(b.label, "en", { numeric: true }),
+    );
+}
 
-  const student = await repo.getStudent(prisma, scope.institutionId, studentId);
-  if (!student || student.status !== "ACTIVE") return null;
-  const [groups, units, faces, institution] = await Promise.all([
-    repo.listStudentGroupsInSession(prisma, scope.institutionId, session.id, student.id),
-    repo.listCollegeUnits(prisma, scope.institutionId),
-    repo.listStudentIdsWithFaces(prisma, [student.id]),
-    repo.getInstitutionPolicyFields(scope.institutionId),
-  ]);
-  if (!groups.some((candidate) => candidate.id === group.id)) return null;
-
-  // Only this department's sections: another department's are not the head's to see.
-  const tree = buildTree(units);
-  const sections = groups.flatMap((source) => {
-    const courseId = courseIdOfGroup(tree, source);
-    const course = courseId ? tree.byId.get(courseId) : undefined;
-    const semester = course?.parentId ? tree.byId.get(course.parentId) : undefined;
-    if (!course || !semester || semester.parentId !== chain.department.id) return [];
-    return [
-      {
-        sectionId: source.id,
-        label: sectionLabelOfGroup(tree, source),
-        groupName: source.name,
-        course: toCourseRef(course),
-        semesterId: semester.id,
-        teacherName: source.teacherName,
-      },
-    ];
-  });
-
+function toStudentSectionRef(choice: SectionChoice): StudentSectionRef {
   return {
-    placement,
-    student: {
-      studentId: student.id,
-      studentCode: student.studentCode,
-      firstName: student.firstName,
-      lastName: student.lastName,
-      admissionNumber: student.admissionNumber,
-      status: student.status,
-      faceEnrolled: faces.has(student.id),
-      hasLogin: student.userId !== null,
-    },
-    // This section first, then the others as their courses are ordered.
-    sections: [
-      ...sections.filter((row) => row.sectionId === group.id),
-      ...sections
-        .filter((row) => row.sectionId !== group.id)
-        .sort((a, b) => a.course.name.localeCompare(b.course.name) || a.label.localeCompare(b.label)),
-    ],
-    selfEnrollment: institution ? resolveSelfEnrollmentEnabled(institution) : false,
+    sectionId: choice.sectionId,
+    label: choice.label,
+    groupName: choice.groupName,
+    courseId: choice.course.id,
+    courseName: choice.course.name,
+    semesterId: choice.semester.id,
   };
 }
 
-const STUDENT_LIST_LIMIT = 500;
+function loginStateOf(userId: string | null, status: string | undefined): StudentLoginState {
+  if (!userId) return "none";
+  return status === "ACTIVE" ? "enabled" : "disabled";
+}
 
-/** The department's students this session: everyone in one of its sections. */
+/**
+ * The department's students this session: everyone in one of its sections,
+ * with each of the department's sections they are in, their face and their
+ * sign-in — searched by name, student ID or admission number and filtered by
+ * course, section, face and sign-in. A bounded number of reads however large
+ * the department: its groups, who is in them, which of those have a face on
+ * file, and which sign-ins are switched on.
+ */
 export async function getDepartmentStudents(
   actor: SessionUser,
   departmentId: string,
-  filters: { sessionId?: string; q?: string; courseId?: string } = {},
+  filters: DepartmentStudentFilters = {},
 ): Promise<DepartmentStudents | null> {
   const loaded = await load(actor, filters.sessionId);
   const department = departmentRow(loaded, departmentId);
   if (!department) return null;
 
-  const { groups } = await departmentGroups(loaded, department);
-  const byGroup = new Map(groups.map((group) => [group.id, group]));
-  const rows = await repo.listSectionStudents(prisma, groups.map((group) => group.id));
+  const groups = await departmentSessionGroups(loaded, department);
+  const choices = toSectionChoices(loaded.tree, groups);
+  const byGroup = new Map(choices.map((choice) => [choice.sectionId, choice]));
+  const rows = await repo.listSectionStudents(prisma, choices.map((choice) => choice.sectionId));
 
   const students = new Map<string, DepartmentStudentRow>();
   for (const row of rows) {
-    const group = byGroup.get(row.cohortId);
-    const courseId = group ? courseIdOfGroup(loaded.tree, group) : null;
-    const course = courseId ? loaded.tree.byId.get(courseId) : undefined;
-    if (!group || !course?.parentId) continue;
+    const choice = byGroup.get(row.cohortId);
+    if (!choice) continue;
     const entry =
       students.get(row.student.id) ??
       ({
@@ -869,94 +885,186 @@ export async function getDepartmentStudents(
         studentCode: row.student.studentCode,
         firstName: row.student.firstName,
         lastName: row.student.lastName,
+        admissionNumber: row.student.admissionNumber,
         faceEnrolled: false,
         hasLogin: row.student.userId !== null,
+        login: loginStateOf(row.student.userId, undefined),
         sections: [],
       } satisfies DepartmentStudentRow);
-    entry.sections.push({ sectionId: group.id, groupName: group.name, courseId: course.id, semesterId: course.parentId });
+    entry.sections.push(toStudentSectionRef(choice));
     students.set(row.student.id, entry);
   }
 
-  const query = nameKey(filters.q ?? "");
-  const matched = [...students.values()]
-    .filter(
-      (student) =>
-        query === "" ||
-        nameKey(`${student.firstName} ${student.lastName}`).includes(query) ||
-        nameKey(student.studentCode).includes(query),
-    )
+  const all = [...students.values()];
+  const userIds = [...new Set(rows.map((row) => row.student.userId).filter((id): id is string => id !== null))];
+  const [faces, logins] = await Promise.all([
+    repo.listStudentIdsWithFaces(prisma, all.map((student) => student.studentId)),
+    repo.loginStatusesOf(prisma, userIds),
+  ]);
+  const userOf = new Map(rows.map((row) => [row.student.id, row.student.userId]));
+  for (const student of all) {
+    student.faceEnrolled = faces.has(student.studentId);
+    const userId = userOf.get(student.studentId) ?? null;
+    student.login = loginStateOf(userId, userId ? logins.get(userId) : undefined);
+  }
+
+  const words = nameKey(filters.q ?? "").split(" ").filter(Boolean);
+  const matched = all
+    .filter((student) => {
+      if (words.length === 0) return true;
+      const haystack = nameKey(
+        `${student.firstName} ${student.lastName} ${student.studentCode} ${student.admissionNumber ?? ""}`,
+      );
+      return words.every((word) => haystack.includes(word));
+    })
     .filter((student) => !filters.courseId || student.sections.some((section) => section.courseId === filters.courseId))
+    .filter((student) => !filters.sectionId || student.sections.some((section) => section.sectionId === filters.sectionId))
+    .filter((student) => !filters.face || student.faceEnrolled === (filters.face === "enrolled"))
+    .filter((student) => !filters.login || student.login === filters.login)
     .sort((a, b) => a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName));
   const listed = matched.slice(0, STUDENT_LIST_LIMIT);
-  const faces = await repo.listStudentIdsWithFaces(prisma, listed.map((student) => student.studentId));
-  for (const student of listed) student.faceEnrolled = faces.has(student.studentId);
 
   return {
     department: toDepartmentRef(department),
     session: loaded.session,
     sessions: loaded.sessions,
     courses: departmentCourses(loaded.tree, department.id).map(toCourseRef),
+    sections: choices,
     students: listed,
     truncated: matched.length > listed.length,
   };
 }
 
-/** The department's staff, and anyone else teaching one of its sections this session. */
+/**
+ * The department's staff, and anyone else teaching one of its sections this
+ * session, each with the sections they teach — searched by name, email or
+ * faculty ID and filtered by access and by whether they teach anything yet.
+ * Whether the viewer may manage each person is decided here, once.
+ */
 export async function getDepartmentFaculty(
   actor: SessionUser,
   departmentId: string,
-  requestedSessionId?: string,
+  filters: DepartmentFacultyFilters = {},
 ): Promise<DepartmentFaculty | null> {
-  const loaded = await load(actor, requestedSessionId);
+  const loaded = await load(actor, filters.sessionId);
   const department = departmentRow(loaded, departmentId);
   if (!department) return null;
 
-  const [{ groups }, members] = await Promise.all([
-    departmentGroups(loaded, department),
+  const [groups, members] = await Promise.all([
+    departmentSessionGroups(loaded, department),
     prisma.user.findMany({
       where: { institutionId: loaded.scope.institutionId, departmentId: department.id, studentProfile: { is: null } },
       select: { id: true },
     }),
   ]);
-  const teaching = new Map<string, DepartmentFacultyRow["sections"]>();
-  for (const group of groups) {
-    const courseId = courseIdOfGroup(loaded.tree, group);
-    const course = courseId ? loaded.tree.byId.get(courseId) : undefined;
-    if (!course?.parentId) continue;
-    for (const link of group.facultyLinks) {
-      if (link.role !== "PRIMARY") continue;
-      teaching.set(link.user.id, [
-        ...(teaching.get(link.user.id) ?? []),
-        { sectionId: group.id, groupName: group.name, courseId: course.id, semesterId: course.parentId },
-      ]);
-    }
-  }
+  const teaching = teachingBySection(loaded.tree, groups);
   const memberIds = new Set(members.map((member) => member.id));
-  const people = await repo.listPeople(prisma, loaded.scope.institutionId, [
-    ...new Set([...memberIds, ...teaching.keys()]),
+  const ids = [...new Set([...memberIds, ...teaching.keys()])];
+  const [people, admins] = await Promise.all([
+    repo.listPeople(prisma, loaded.scope.institutionId, ids),
+    repo.administratorIds(prisma, ids),
   ]);
+  const deactivators = await deactivatorsFor(loaded.scope, people);
   const headId = headUserIdOf(department);
 
-  const faculty: DepartmentFacultyRow[] = people
-    .map((person) => ({
-      userId: person.id,
-      name: person.name,
-      email: person.email,
-      employeeCode: person.employeeCode,
-      status: person.status === "ACTIVE" ? ("ACTIVE" as const) : ("INACTIVE" as const),
-      isHead: person.id === headId && isConsistentHead(person, department),
-      member: memberIds.has(person.id),
-      sections: (teaching.get(person.id) ?? []).sort((a, b) =>
-        a.groupName.localeCompare(b.groupName, "en", { numeric: true }),
-      ),
-    }))
+  const all = people
+    .map((person) =>
+      toFacultyRow(person, {
+        department,
+        headId,
+        member: memberIds.has(person.id),
+        admin: admins.has(person.id),
+        viewer: actor.userId,
+        scope: loaded.scope,
+        deactivatedBy: deactivators.get(person.id) ?? null,
+        sections: teaching.get(person.id) ?? [],
+      }),
+    )
     .sort((a, b) => Number(b.isHead) - Number(a.isHead) || Number(b.member) - Number(a.member) || a.name.localeCompare(b.name));
+
+  const words = nameKey(filters.q ?? "").split(" ").filter(Boolean);
+  const faculty = all
+    .filter((person) => {
+      if (words.length === 0) return true;
+      const haystack = nameKey(`${person.name} ${person.email} ${person.employeeCode ?? ""}`);
+      return words.every((word) => haystack.includes(word));
+    })
+    .filter((person) => !filters.status || (person.status === "ACTIVE") === (filters.status === "active"))
+    .filter((person) => !filters.assigned || (person.sections.length > 0) === (filters.assigned === "assigned"));
 
   return {
     department: toDepartmentRef(department),
     session: loaded.session,
     sessions: loaded.sessions,
     faculty,
+    totalAll: all.length,
+  };
+}
+
+/** Who teaches which of these groups, as each person's list of sections. */
+function teachingBySection(tree: Tree, groups: readonly repo.GroupRow[]): Map<string, DepartmentFacultyRow["sections"]> {
+  const teaching = new Map<string, DepartmentFacultyRow["sections"]>();
+  for (const group of groups) {
+    const courseId = courseIdOfGroup(tree, group);
+    const course = courseId ? tree.byId.get(courseId) : undefined;
+    if (!course?.parentId) continue;
+    const label = sectionLabelOfGroup(tree, group);
+    for (const link of group.facultyLinks) {
+      if (link.role !== "PRIMARY") continue;
+      teaching.set(link.user.id, [
+        ...(teaching.get(link.user.id) ?? []),
+        { sectionId: group.id, groupName: group.name, label, courseId: course.id, courseName: course.name, semesterId: course.parentId },
+      ]);
+    }
+  }
+  for (const sections of teaching.values()) {
+    sections.sort((a, b) => a.courseName.localeCompare(b.courseName) || a.label.localeCompare(b.label, "en", { numeric: true }));
+  }
+  return teaching;
+}
+
+/**
+ * Who last disabled each disabled account among these people, for a head of
+ * department — who may enable again only what they disabled. An
+ * administrator is not asked about: they may enable any account.
+ */
+async function deactivatorsFor(
+  scope: CollegeScope,
+  people: readonly repo.PersonRow[],
+): Promise<Map<string, string | null>> {
+  if (scope.kind !== "hod") return new Map();
+  const disabled = people.filter((person) => person.status !== "ACTIVE").map((person) => person.id);
+  return repo.lastDeactivatorsOf(prisma, scope.institutionId, disabled);
+}
+
+function toFacultyRow(
+  person: repo.PersonRow,
+  context: {
+    department: repo.UnitRow;
+    headId: string | null;
+    member: boolean;
+    admin: boolean;
+    viewer: string;
+    scope: CollegeScope;
+    /** Who last disabled the account, when a head of department is asking. */
+    deactivatedBy: string | null;
+    sections: DepartmentFacultyRow["sections"];
+  },
+): DepartmentFacultyRow {
+  const isStudent = person.roleAssignments.some((assignment) => assignment.role.key === "STUDENT");
+  const manageable = context.member && !context.admin && !isStudent && person.id !== context.viewer;
+  return {
+    userId: person.id,
+    name: person.name,
+    email: person.email,
+    employeeCode: person.employeeCode,
+    status: person.status === "ACTIVE" ? "ACTIVE" : "INACTIVE",
+    lastLoginAt: person.lastLoginAt,
+    isHead: person.id === context.headId && isConsistentHead(person, context.department),
+    member: context.member,
+    manageable,
+    enableable: manageable && (context.scope.kind === "admin" || context.deactivatedBy === context.viewer),
+    sections: context.sections,
   };
 }
 
@@ -2119,10 +2227,16 @@ export async function removeCourseSection(
  * Gives a section its teacher, or changes who it is: one teacher per section
  * here, the previous one's assignment removed in the same transaction.
  * Additional teachers set up on the Faculty page are left as they were.
+ *
+ * `expectedTeacherId` is the teacher the screen showed — "" for none. When it
+ * is given and the section's teacher is somebody else by now, nothing is
+ * changed: replacing a teacher is a decision made about the teacher on
+ * screen, never about whoever happens to hold the section when the form
+ * arrives.
  */
 export async function setCourseSectionTeacher(
   actor: SessionUser,
-  input: SectionIds & { teacherId: string },
+  input: SectionIds & { teacherId: string; expectedTeacherId?: string },
 ): Promise<{ teacherName: string; replaced: string[] }> {
   const scope = await resolveCollegeScope(actor, STRUCTURE);
   if (input.teacherId.trim() === "") throw new CollegeSetupError("Choose a teacher.");
@@ -2138,6 +2252,13 @@ export async function setCourseSectionTeacher(
     const others = primaries.filter((link) => link.user.id !== teacher.id);
     if (primaries.length > 0 && others.length === 0) {
       throw new CollegeSetupError(`${teacher.name} already teaches this section.`);
+    }
+    if (input.expectedTeacherId !== undefined && (primaries[0]?.user.id ?? "") !== input.expectedTeacherId.trim()) {
+      throw new CollegeSetupError(
+        primaries.length > 0
+          ? `${group.name} is taught by ${primaries[0].user.name} now. Look at the section again before changing its teacher.`
+          : `${group.name} has no teacher now. Look at the section again before choosing one.`,
+      );
     }
     for (const link of others) {
       await tx.cohortFaculty.delete({ where: { id: link.id } });
@@ -2237,7 +2358,7 @@ async function requireWritableSection(actor: SessionUser, input: SectionIds) {
   const { course } = await requireChain(prisma, scope, input);
   const { group, session } = await requireSectionOf(prisma, scope, course!, input.sectionId);
   requireOpenSession(session);
-  return { scope, group };
+  return { scope, group, course: course! };
 }
 
 /**
@@ -2274,8 +2395,9 @@ export async function addNewStudentToSection(
 /**
  * Adds existing students to this section by student ID — a student already in
  * Physics A being added to Chemistry B, say. Each ID is reported: added, not
- * found, ambiguous, not on roll, or already here. Placement goes through the
- * enrolment service, the only writer of that table.
+ * found, ambiguous, not on roll, already here, or already in another section
+ * of this course. Placement goes through the enrolment service, the only
+ * writer of that table.
  *
  * An ID is matched the way student sign-in matches it: exactly as typed if a
  * student has it, otherwise ignoring case if exactly one student does. Codes
@@ -2287,7 +2409,7 @@ export async function addStudentsToSection(
   ids: SectionIds,
   rawCodes: string,
 ): Promise<{ added: string[]; skipped: string[] }> {
-  const { scope, group } = await requireWritableSection(actor, ids);
+  const { scope, group, course } = await requireWritableSection(actor, ids);
   const codes = parseStudentCodes(rawCodes, MAX_STUDENT_CODES_AT_ONCE);
   const found = await repo.findStudentsByCodes(prisma, scope.institutionId, codes);
   const caller = callerFor(actor, scope, ["enrollment.manage"]);
@@ -2305,9 +2427,14 @@ export async function addStudentsToSection(
       skipped.push(`More than one student has an ID like ${code}. Enter it exactly as it is written.`);
       continue;
     }
-    const refusal = await placeInSection(caller, group, student);
-    if (refusal) skipped.push(refusal);
-    else added.push(studentLabel(student));
+    try {
+      const placed = await placeInSection(caller, scope, course, group, student);
+      if ("refusal" in placed) skipped.push(placed.refusal);
+      else added.push(studentLabel(student));
+    } catch (error) {
+      if (!(error instanceof SameCourseConflict)) throw error;
+      skipped.push(error.message);
+    }
   }
   return { added, skipped };
 }
@@ -2317,41 +2444,89 @@ function studentLabel(student: Pick<repo.StudentRow, "firstName" | "lastName" | 
 }
 
 /**
- * Puts one student in a section through the enrolment service — the only
- * writer of that table, whose upsert brings back an ended placement rather
- * than adding a second one. Returns why not, in words, instead of placing a
- * student who is off roll or already there. Their other sections are not
- * touched: a student is in Physics A and Chemistry B at once.
+ * The section of this course, in the same session, the student is in already
+ * — other than `group` — if any. A student is in one section of a course at a
+ * time; this is what that is checked against.
  */
-async function placeInSection(
-  caller: SessionUser,
-  group: Pick<repo.GroupRow, "id" | "name">,
-  student: Pick<repo.StudentRow, "id" | "firstName" | "lastName" | "studentCode" | "status">,
-): Promise<string | null> {
-  const label = studentLabel(student);
-  if (student.status !== "ACTIVE") return `${label} is not on roll.`;
-  const current = await repo.getEnrollmentStatus(prisma, student.id, group.id);
-  if (current?.status === "ACTIVE") return `${label} is already in ${group.name}.`;
-  await enrollStudentInCohortForRequest(caller, { studentId: student.id, cohortId: group.id });
-  return null;
+async function otherSectionOfCourse(
+  scope: CollegeScope,
+  course: repo.UnitRow,
+  group: Pick<repo.GroupRow, "id" | "academicSessionId">,
+  studentId: string,
+): Promise<{ sectionId: string; label: string } | null> {
+  const siblings = (
+    await repo.listCourseGroups(prisma, scope.institutionId, group.academicSessionId, course.id)
+  ).filter((sibling) => sibling.id !== group.id);
+  if (siblings.length === 0) return null;
+  const placed = await repo.placementsOf(prisma, [studentId], siblings.map((sibling) => sibling.id));
+  const sibling = siblings.find((candidate) => placed.some((placement) => placement.cohortId === candidate.id));
+  if (!sibling) return null;
+  return {
+    sectionId: sibling.id,
+    label: sibling.academicUnit.kind === "SECTION" ? sectionLabel(sibling.academicUnit.name) : sibling.name,
+  };
 }
 
 /**
- * Adds one existing student, chosen from the add-student search, to this
- * section. The id is looked up inside the actor's college only: another
+ * Puts one student in a section through the enrolment service — the only
+ * writer of that table, whose upsert brings back an ended placement rather
+ * than adding a second one. Returns why not, in words, instead of placing a
+ * student who is off roll or already there. Their other courses' sections are
+ * not touched: a student is in Physics A and Chemistry B at once.
+ *
+ * Within one course a student is in one section. If they are in another
+ * section of this course already, nothing is changed and `SameCourseConflict`
+ * says where they are — unless `moveFrom` names exactly that section, which is
+ * the deliberate "move them" answer: they are placed here first and only then
+ * taken out of there, so a failure part-way leaves them in a class rather
+ * than in none. Their registers in the old section stay as they are. A
+ * `moveFrom` with nothing to move from is a plain add, and says so.
+ */
+async function placeInSection(
+  caller: SessionUser,
+  scope: CollegeScope,
+  course: repo.UnitRow,
+  group: Pick<repo.GroupRow, "id" | "name" | "academicSessionId">,
+  student: Pick<repo.StudentRow, "id" | "firstName" | "lastName" | "studentCode" | "status">,
+  options: { moveFrom?: string } = {},
+): Promise<{ refusal: string } | { moved: boolean }> {
+  const label = studentLabel(student);
+  if (student.status !== "ACTIVE") return { refusal: `${label} is not on roll.` };
+  const current = await repo.getEnrollmentStatus(prisma, student.id, group.id);
+  if (current?.status === "ACTIVE") return { refusal: `${label} is already in ${group.name}.` };
+  const other = await otherSectionOfCourse(scope, course, group, student.id);
+  if (other && options.moveFrom !== other.sectionId) {
+    throw new SameCourseConflict(
+      `${student.firstName} ${student.lastName} is already in ${course.name} — ${other.label}. ` +
+        "A student is in one section of a course at a time, so move them instead of adding them twice.",
+      other,
+    );
+  }
+  await enrollStudentInCohortForRequest(caller, { studentId: student.id, cohortId: group.id });
+  if (other) await unenrollStudentFromCohortForRequest(caller, { studentId: student.id, cohortId: other.sectionId });
+  return { moved: other !== null };
+}
+
+/**
+ * Adds one existing student, chosen from a search, to this section — or,
+ * with `moveFrom`, moves them here from the other section of this course they
+ * are in. The id is looked up inside the actor's college only: another
  * college's student is "not part of this college", never placed.
  */
 export async function addStudentToSection(
   actor: SessionUser,
   ids: SectionIds,
   studentId: string,
-): Promise<{ studentId: string; name: string }> {
-  const { scope, group } = await requireWritableSection(actor, ids);
-  const student = studentId.trim() === "" ? null : await repo.getStudent(prisma, scope.institutionId, studentId);
+  options: { moveFrom?: string } = {},
+): Promise<{ studentId: string; name: string; moved: boolean }> {
+  const { scope, group, course } = await requireWritableSection(actor, ids);
+  const student = studentId.trim() === "" ? null : await repo.getStudent(prisma, scope.institutionId, studentId.trim());
   if (!student) throw new CollegeSetupError("That student is not part of this college.");
-  const refusal = await placeInSection(callerFor(actor, scope, ["enrollment.manage"]), group, student);
-  if (refusal) throw new CollegeSetupError(refusal);
-  return { studentId: student.id, name: `${student.firstName} ${student.lastName}`.trim() };
+  const placed = await placeInSection(callerFor(actor, scope, ["enrollment.manage"]), scope, course, group, student, {
+    moveFrom: options.moveFrom?.trim() || undefined,
+  });
+  if ("refusal" in placed) throw new CollegeSetupError(placed.refusal);
+  return { studentId: student.id, name: `${student.firstName} ${student.lastName}`.trim(), moved: placed.moved };
 }
 
 /**
@@ -2364,12 +2539,537 @@ export async function removeStudentFromSection(
   studentId: string,
 ): Promise<{ name: string }> {
   const { scope, group } = await requireWritableSection(actor, ids);
-  const row = (await repo.listSectionStudents(prisma, [group.id])).find((entry) => entry.student.id === studentId);
-  if (!row) throw new CollegeSetupError("That student is not in this section.");
+  const id = studentId.trim();
+  // Looked up directly rather than from the roll, so a student taken off roll
+  // with their place still open can have it ended too.
+  const [student, place] = await Promise.all([
+    id === "" ? Promise.resolve(null) : repo.getStudent(prisma, scope.institutionId, id),
+    id === "" ? Promise.resolve(null) : repo.getEnrollmentStatus(prisma, id, group.id),
+  ]);
+  if (!student || place?.status !== "ACTIVE") throw new CollegeSetupError("That student is not in this section.");
   await unenrollStudentFromCohortForRequest(callerFor(actor, scope, ["enrollment.manage"]), {
-    studentId: row.student.id,
+    studentId: student.id,
     cohortId: group.id,
   });
-  return { name: `${row.student.firstName} ${row.student.lastName}`.trim() };
+  return { name: `${student.firstName} ${student.lastName}`.trim() };
 }
 
+// ---------------------------------------------------------------------------
+// The department's people: its faculty and its students
+// ---------------------------------------------------------------------------
+//
+// The same services as everywhere else — the Faculty page's account service,
+// the student and enrolment services, the face enrolment service — reached
+// from the department. Every function below first settles, from the session
+// and the database, that the department is inside the actor's scope and that
+// the person or section it names belongs to that department; only then does
+// it call the service, lending a head of department the one permission that
+// call needs (`callerFor`). Nothing a browser sends is trusted on its own.
+
+/**
+ * A section of this department named by its id alone — the way a picker sends
+ * it — resolved through its parents to its course, semester and department,
+ * which must be the one asked for and inside the actor's scope.
+ */
+async function sectionIdsInDepartment(scope: CollegeScope, departmentId: string, sectionId: string): Promise<SectionIds> {
+  const id = sectionId.trim();
+  const [units, group] = await Promise.all([
+    repo.listCollegeUnits(prisma, scope.institutionId),
+    id === "" ? Promise.resolve(null) : repo.getGroup(prisma, scope.institutionId, id),
+  ]);
+  const tree = buildTree(units);
+  const department = tree.byId.get(departmentId);
+  if (!department || department.kind !== "DEPARTMENT" || !departmentInScope(scope, department.id)) {
+    throw new CollegeSetupError(NOT_HERE.department);
+  }
+  if (id === "") throw new CollegeSetupError("Choose one of the department's sections.");
+  const courseId = group ? courseIdOfGroup(tree, group) : null;
+  const course = courseId ? tree.byId.get(courseId) : undefined;
+  const semester = course?.parentId ? tree.byId.get(course.parentId) : undefined;
+  if (!group || !course || !semester || semester.parentId !== department.id) {
+    throw new CollegeSetupError("That section is not part of this department.");
+  }
+  return { departmentId: department.id, semesterId: semester.id, courseId: course.id, sectionId: group.id };
+}
+
+/** The department, checked against the actor's scope, for a change to its people. */
+async function requireDepartmentForChange(
+  actor: SessionUser,
+  departmentId: string,
+  adminPermissions: Parameters<typeof resolveCollegeScope>[1],
+) {
+  const scope = await resolveCollegeScope(actor, adminPermissions);
+  const { department } = await requireChain(prisma, scope, { departmentId });
+  return { scope, department };
+}
+
+/**
+ * A member of this department the actor may manage: in the department, not a
+ * student, not the actor, and not a college administrator — whose account is
+ * the Director's to manage, wherever it sits.
+ */
+async function requireManageableMember(
+  scope: CollegeScope,
+  actor: SessionUser,
+  department: repo.UnitRow,
+  userId: string,
+): Promise<repo.PersonRow> {
+  const id = userId.trim();
+  const person = id === "" ? null : await repo.getPerson(prisma, scope.institutionId, id);
+  if (
+    !person ||
+    person.departmentId !== department.id ||
+    person.roleAssignments.some((assignment) => assignment.role.key === "STUDENT")
+  ) {
+    throw new CollegeSetupError("That person is not a member of this department.");
+  }
+  if (person.id === actor.userId) {
+    throw new CollegeSetupError("That is your own account. Ask the college administrator to change it.");
+  }
+  if (await repo.holdsAdministratorRole(prisma, person.id)) {
+    throw new CollegeSetupError(`${person.name} is a college administrator, whose account the Director manages.`);
+  }
+  return person;
+}
+
+/**
+ * One person on the department's faculty page: a member of the department, or
+ * somebody from another department who teaches one of its sections this
+ * session. Null for anybody else — another department's staff, another
+ * college's, a student — so the page can 404.
+ */
+export async function getDepartmentFacultyMember(
+  actor: SessionUser,
+  departmentId: string,
+  userId: string,
+): Promise<DepartmentFacultyMember | null> {
+  const loaded = await load(actor);
+  const department = departmentRow(loaded, departmentId);
+  if (!department) return null;
+
+  const [person, groups] = await Promise.all([
+    repo.getPerson(prisma, loaded.scope.institutionId, userId),
+    departmentSessionGroups(loaded, department),
+  ]);
+  if (!person || person.roleAssignments.some((assignment) => assignment.role.key === "STUDENT")) return null;
+  const sections = teachingBySection(loaded.tree, groups).get(person.id) ?? [];
+  const member = person.departmentId === department.id;
+  if (!member && sections.length === 0) return null;
+  const [admins, deactivators] = await Promise.all([
+    repo.administratorIds(prisma, [person.id]),
+    deactivatorsFor(loaded.scope, [person]),
+  ]);
+
+  return {
+    department: toDepartmentRef(department),
+    session: loaded.session,
+    person: toFacultyRow(person, {
+      department,
+      headId: headUserIdOf(department),
+      member,
+      admin: admins.has(person.id),
+      viewer: actor.userId,
+      scope: loaded.scope,
+      deactivatedBy: deactivators.get(person.id) ?? null,
+      sections,
+    }),
+    isSelf: person.id === actor.userId,
+    sectionChoices: toSectionChoices(loaded.tree, groups),
+  };
+}
+
+/**
+ * Adds a member of staff to this department through the Faculty page's own
+ * account service — its validation, its duplicate-email check, its audit row
+ * and its one-time password. The department is the one checked here and the
+ * role is always the teaching one: a head of department adds teachers to
+ * their own department, never an administrator and never to anyone else's.
+ */
+export async function addDepartmentFaculty(
+  actor: SessionUser,
+  input: { departmentId: string; name: string; email: string; employeeCode?: string },
+): Promise<InvitedFaculty> {
+  const { scope, department } = await requireDepartmentForChange(actor, input.departmentId, ["user.invite"]);
+  return inviteFaculty(callerFor(actor, scope, ["user.invite"]), {
+    name: input.name,
+    email: input.email,
+    employeeCode: input.employeeCode,
+    departmentId: department.id,
+    roleKey: repo.RESTORED_ROLE_KEY,
+  });
+}
+
+/** A department member's name and faculty ID. Their email — what they sign in with — and department stay. */
+export async function updateDepartmentFacultyMember(
+  actor: SessionUser,
+  input: { departmentId: string; userId: string; name: string; employeeCode?: string },
+): Promise<{ name: string }> {
+  const { scope, department } = await requireDepartmentForChange(actor, input.departmentId, ["user.update"]);
+  const person = await requireManageableMember(scope, actor, department, input.userId);
+  const updated = await updateFacultyDetails(callerFor(actor, scope, ["user.update"]), person.id, {
+    name: input.name,
+    employeeCode: input.employeeCode,
+  });
+  return { name: updated.name };
+}
+
+/**
+ * Stops or restores a department member's access, through the Faculty page's
+ * own service: stopping ends every session they have open. A head of
+ * department restores only an account they stopped themselves — one the
+ * Director stopped is the Director's to restore.
+ */
+export async function setDepartmentFacultyActive(
+  actor: SessionUser,
+  input: { departmentId: string; userId: string; active: boolean },
+): Promise<{ name: string }> {
+  const permission = input.active ? "user.invite" : "user.deactivate";
+  const { scope, department } = await requireDepartmentForChange(actor, input.departmentId, [permission]);
+  const person = await requireManageableMember(scope, actor, department, input.userId);
+  if (input.active && scope.kind === "hod" && person.status !== "ACTIVE") {
+    const by = (await repo.lastDeactivatorsOf(prisma, scope.institutionId, [person.id])).get(person.id) ?? null;
+    if (by !== actor.userId) {
+      throw new CollegeSetupError(
+        `${person.name}'s account was not disabled by you, so only the college administrator can enable it again.`,
+      );
+    }
+  }
+  const caller = callerFor(actor, scope, [permission]);
+  const member = input.active ? await reactivateFaculty(caller, person.id) : await deactivateFaculty(caller, person.id);
+  return { name: member.name };
+}
+
+/**
+ * Gives a member of this department one of its sections, from the faculty
+ * page: the same assignment as the section's own page — its course link, its
+ * register, its audit rows — with the teacher the screen showed passed along,
+ * so a section that has a teacher is only ever changed on purpose.
+ */
+export async function assignFacultyToSection(
+  actor: SessionUser,
+  input: { departmentId: string; userId: string; sectionId: string; expectedTeacherId: string },
+): Promise<{ teacherName: string; replaced: string[]; ids: SectionIds }> {
+  const scope = await resolveCollegeScope(actor, STRUCTURE);
+  const ids = await sectionIdsInDepartment(scope, input.departmentId, input.sectionId);
+  const result = await setCourseSectionTeacher(actor, {
+    ...ids,
+    teacherId: input.userId,
+    expectedTeacherId: input.expectedTeacherId,
+  });
+  return { ...result, ids };
+}
+
+/** Each section, with whether the student is in it and, if not, whether they are in another of its course. */
+function withStudentFlags(choices: readonly SectionChoice[], inSections: ReadonlySet<string>): StudentSectionChoice[] {
+  return choices.map((choice) => {
+    const sibling = inSections.has(choice.sectionId)
+      ? undefined
+      : choices.find(
+          (other) =>
+            other.course.id === choice.course.id && other.sectionId !== choice.sectionId && inSections.has(other.sectionId),
+        );
+    return {
+      ...choice,
+      inSection: inSections.has(choice.sectionId),
+      sameCourseSection: sibling ? { sectionId: sibling.sectionId, label: sibling.label } : null,
+    };
+  });
+}
+
+/**
+ * A student on the department's student page: who they are, their sections
+ * of this department this session and who teaches each, their face — as a
+ * count and a date, never a template — and their sign-in, and the sections
+ * they could be added to.
+ *
+ * Null unless the student is in one of this department's sections (in any
+ * session): a head of department reads no student outside their department.
+ */
+export async function getDepartmentStudent(
+  actor: SessionUser,
+  departmentId: string,
+  studentId: string,
+  requestedSessionId?: string,
+): Promise<DepartmentStudentDetail | null> {
+  const loaded = await load(actor, requestedSessionId);
+  const department = departmentRow(loaded, departmentId);
+  if (!department) return null;
+  const institutionId = loaded.scope.institutionId;
+  const unitIds = sectionUnitIds(loaded.tree, departmentCourses(loaded.tree, department.id).map((course) => course.id));
+
+  const [student, placed, groups] = await Promise.all([
+    repo.getStudentDetail(prisma, institutionId, studentId),
+    repo.hasPlacementIn(prisma, institutionId, studentId, unitIds),
+    departmentSessionGroups(loaded, department),
+  ]);
+  if (!student || !placed) return null;
+
+  const choices = toSectionChoices(loaded.tree, groups);
+  const [placements, face, current] = await Promise.all([
+    repo.placementsOf(prisma, [student.id], choices.map((choice) => choice.sectionId)),
+    repo.faceSummaryOf(prisma, student.id),
+    repo.hasPlacementIn(prisma, institutionId, student.id, unitIds, { openSessionsOnly: true }),
+  ]);
+  const inSections = new Set(placements.map((placement) => placement.cohortId));
+
+  return {
+    department: toDepartmentRef(department),
+    session: loaded.session,
+    student: {
+      studentId: student.id,
+      studentCode: student.studentCode,
+      firstName: student.firstName,
+      lastName: student.lastName,
+      admissionNumber: student.admissionNumber,
+      email: student.email,
+      phone: student.phone,
+      status: student.status,
+    },
+    placements: choices
+      .filter((choice) => inSections.has(choice.sectionId))
+      .map((choice) => ({ ...choice, courseCode: choice.course.code })),
+    face: {
+      enrolled: face.active > 0 && student.status === "ACTIVE",
+      activeSamples: face.active,
+      lastEnrolledAt: face.lastEnrolledAt,
+      canEnroll: current,
+    },
+    login: { state: loginStateOf(student.userId, student.user?.status), loginId: student.studentCode },
+    sectionChoices: withStudentFlags(choices, inSections),
+  };
+}
+
+/**
+ * The department's Add student page: this college's students matching a
+ * search by student ID, name or admission number — exact ID matches first —
+ * each with the department's sections they are in already.
+ */
+export async function searchStudentsForDepartment(
+  actor: SessionUser,
+  departmentId: string,
+  rawQuery: string,
+): Promise<DepartmentStudentSearch | null> {
+  const loaded = await load(actor);
+  const department = departmentRow(loaded, departmentId);
+  if (!department) return null;
+  const institutionId = loaded.scope.institutionId;
+  const terms = studentSearchTerms(rawQuery);
+
+  const [matched, exact, groups] = await Promise.all([
+    repo.searchStudents(prisma, institutionId, terms, STUDENT_SEARCH_LIMIT + 1),
+    terms.length === 1 ? repo.findStudentsByCodes(prisma, institutionId, terms) : Promise.resolve([]),
+    departmentSessionGroups(loaded, department),
+  ]);
+  const exactIds = new Set(exact.map((student) => student.id));
+  const results = [...exact, ...matched.filter((student) => !exactIds.has(student.id)).slice(0, STUDENT_SEARCH_LIMIT)];
+  const choices = toSectionChoices(loaded.tree, groups);
+  const byId = new Map(choices.map((choice) => [choice.sectionId, choice]));
+  const placements = await repo.placementsOf(
+    prisma,
+    results.map((student) => student.id),
+    choices.map((choice) => choice.sectionId),
+  );
+
+  return {
+    department: toDepartmentRef(department),
+    session: loaded.session,
+    query: terms.join(" "),
+    searched: terms.length > 0,
+    results: results.map((student) => ({
+      ...toSearchRow(student, new Set()),
+      sections: placements
+        .filter((placement) => placement.studentId === student.id)
+        .map((placement) => toStudentSectionRef(byId.get(placement.cohortId)!)),
+    })),
+    truncated: matched.length > STUDENT_SEARCH_LIMIT,
+    hasSections: choices.length > 0,
+  };
+}
+
+/**
+ * A student chosen on the department's Add student page, before they are
+ * placed: who they are — as a search already shows — and the department's
+ * sections they could join. Any student of this college can be chosen; only
+ * this department's sections are offered.
+ */
+export async function getDepartmentStudentPick(
+  actor: SessionUser,
+  departmentId: string,
+  studentId: string,
+): Promise<DepartmentStudentPick | null> {
+  const loaded = await load(actor);
+  const department = departmentRow(loaded, departmentId);
+  if (!department) return null;
+  const [student, groups] = await Promise.all([
+    repo.getStudent(prisma, loaded.scope.institutionId, studentId),
+    departmentSessionGroups(loaded, department),
+  ]);
+  if (!student) return null;
+  const choices = toSectionChoices(loaded.tree, groups);
+  const placements = await repo.placementsOf(prisma, [student.id], choices.map((choice) => choice.sectionId));
+  const inSections = new Set(placements.map((placement) => placement.cohortId));
+
+  return {
+    department: toDepartmentRef(department),
+    session: loaded.session,
+    student: toSearchRow(student, new Set()),
+    placements: choices.filter((choice) => inSections.has(choice.sectionId)).map(toStudentSectionRef),
+    sectionChoices: withStudentFlags(choices, inSections),
+  };
+}
+
+/**
+ * Adds an existing student to one of the department's sections, named by the
+ * section alone — or moves them there from the other section of that course
+ * they are in, when `moveFrom` says so. The same placement as a section's own
+ * page, reached from the student.
+ */
+export async function addStudentToDepartmentSection(
+  actor: SessionUser,
+  input: { departmentId: string; studentId: string; sectionId: string; moveFrom?: string },
+): Promise<{ studentId: string; name: string; moved: boolean; ids: SectionIds }> {
+  const scope = await resolveCollegeScope(actor, ["enrollment.manage"]);
+  const ids = await sectionIdsInDepartment(scope, input.departmentId, input.sectionId);
+  const result = await addStudentToSection(actor, ids, input.studentId, { moveFrom: input.moveFrom });
+  return { ...result, ids };
+}
+
+/**
+ * Takes a student out of one of the department's sections — their other
+ * sections, their record, face, sign-in and registers all stay. Says whether
+ * they are still one of the department's students, so the page can go where
+ * they can still be seen.
+ */
+export async function removeStudentFromDepartmentSection(
+  actor: SessionUser,
+  input: { departmentId: string; studentId: string; sectionId: string },
+): Promise<{ name: string; stillInDepartment: boolean; ids: SectionIds }> {
+  const scope = await resolveCollegeScope(actor, ["enrollment.manage"]);
+  const ids = await sectionIdsInDepartment(scope, input.departmentId, input.sectionId);
+  const { name } = await removeStudentFromSection(actor, ids, input.studentId);
+  const units = await repo.listCollegeUnits(prisma, scope.institutionId);
+  const tree = buildTree(units);
+  const stillInDepartment = await repo.hasPlacementIn(
+    prisma,
+    scope.institutionId,
+    input.studentId,
+    sectionUnitIds(tree, departmentCourses(tree, ids.departmentId).map((course) => course.id)),
+  );
+  return { name, stillInDepartment, ids };
+}
+
+/**
+ * Admits a new student through the college's usual Add student form and
+ * service, straight into the department section chosen on that form.
+ */
+export async function createDepartmentStudent(
+  actor: SessionUser,
+  input: { departmentId: string; sectionId: string },
+  student: Omit<StudentInput, "cohortId" | "status">,
+): Promise<Student> {
+  const scope = await resolveCollegeScope(actor, ["enrollment.manage"]);
+  const ids = await sectionIdsInDepartment(scope, input.departmentId, input.sectionId);
+  return addNewStudentToSection(actor, ids, student);
+}
+
+/**
+ * One of the department's students, for face enrolment: in one of its
+ * sections in a session that has not been archived, in the actor's college,
+ * with the department inside the actor's scope. A student whose only place in
+ * the department was in an archived session is no longer theirs to enrol.
+ * Face enrolment from the department starts here, every time.
+ */
+async function requireDepartmentStudent(actor: SessionUser, departmentId: string, studentId: string) {
+  const scope = await resolveCollegeScope(actor, ["faceEmbedding.manage"]);
+  const tree = buildTree(await repo.listCollegeUnits(prisma, scope.institutionId));
+  const department = tree.byId.get(departmentId);
+  if (!department || department.kind !== "DEPARTMENT" || !departmentInScope(scope, department.id)) {
+    throw new CollegeSetupError(NOT_HERE.department);
+  }
+  const id = studentId.trim();
+  const student = id === "" ? null : await repo.getStudent(prisma, scope.institutionId, id);
+  const placed = student
+    ? await repo.hasPlacementIn(
+        prisma,
+        scope.institutionId,
+        student.id,
+        sectionUnitIds(tree, departmentCourses(tree, department.id).map((course) => course.id)),
+        { openSessionsOnly: true },
+      )
+    : false;
+  if (!student || !placed) throw new CollegeSetupError("That student is not in any of this department's sections.");
+  return { scope, department, student };
+}
+
+export interface DepartmentStudentFace extends StudentFaceEnrollment {
+  department: { id: string; name: string; code: string | null };
+  student: { studentId: string; studentCode: string; firstName: string; lastName: string };
+}
+
+/**
+ * The face enrolment screen for one of the department's students: exactly
+ * what the administrator's screen reads — status, sample history as metadata,
+ * the running model — through the same service. Null for a student who is not
+ * the department's, so the page can 404.
+ */
+export async function getDepartmentStudentFace(
+  actor: SessionUser,
+  departmentId: string,
+  studentId: string,
+  overrides: FaceEnrollmentDeps = {},
+): Promise<DepartmentStudentFace | null> {
+  let context: Awaited<ReturnType<typeof requireDepartmentStudent>>;
+  try {
+    context = await requireDepartmentStudent(actor, departmentId, studentId);
+  } catch (error) {
+    if (error instanceof CollegeSetupError) return null;
+    throw error;
+  }
+  const enrollment = await getStudentFaceEnrollment(
+    callerFor(actor, context.scope, ["faceEmbedding.manage"]),
+    context.student.id,
+    overrides,
+  );
+  return {
+    ...enrollment,
+    department: toDepartmentRef(context.department),
+    student: {
+      studentId: context.student.id,
+      studentCode: context.student.studentCode,
+      firstName: context.student.firstName,
+      lastName: context.student.lastName,
+    },
+  };
+}
+
+/**
+ * Enrols — or, with `mode: "replace"`, re-enrols — one of the department's
+ * students' faces through the face enrolment service the administrator's
+ * screen uses: the same quality gate, duplicate and lookalike checks, sample
+ * limit, template storage and audit rows, recorded as enrolled by this actor.
+ * The department check comes first; the service's own checks all still run.
+ */
+export async function enrollDepartmentStudentFace(
+  actor: SessionUser,
+  input: {
+    departmentId: string;
+    studentId: string;
+    imageBase64: string;
+    captureSource: FaceCaptureSource;
+    confirmDistinctFromStudentId?: string;
+  },
+  mode: "add" | "replace",
+  overrides: FaceEnrollmentDeps = {},
+): Promise<FaceEnrollmentResult> {
+  const { scope, student } = await requireDepartmentStudent(actor, input.departmentId, input.studentId);
+  const caller = callerFor(actor, scope, ["faceEmbedding.manage"]);
+  const request = {
+    studentId: student.id,
+    imageBase64: input.imageBase64,
+    captureSource: input.captureSource,
+    ...(input.confirmDistinctFromStudentId ? { confirmDistinctFromStudentId: input.confirmDistinctFromStudentId } : {}),
+  };
+  return mode === "replace"
+    ? replaceFaceEnrollmentRequest(caller, request, overrides)
+    : enrollFaceForStudentRequest(caller, request, overrides);
+}

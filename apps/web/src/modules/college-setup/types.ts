@@ -35,6 +35,22 @@ export class CollegeSetupError extends Error {
   }
 }
 
+/**
+ * The student is already in another section of this course. A student is in
+ * one section of a course at a time, so adding them to a second is refused
+ * and moving them is offered instead — as its own, deliberate choice.
+ */
+export class SameCourseConflict extends CollegeSetupError {
+  /** The section they are in now, which a move would take them out of. */
+  readonly current: { sectionId: string; label: string };
+
+  constructor(message: string, current: { sectionId: string; label: string }) {
+    super(message);
+    this.name = "SameCourseConflict";
+    this.current = current;
+  }
+}
+
 /** Shared with `AcademicUnit.name`'s other uses. */
 export const MAX_DEPARTMENT_NAME = 120;
 /** "CSE", "ECE", "MECH" — short enough to read in a table column. */
@@ -255,20 +271,47 @@ export interface CourseSectionDetail {
   removal: RemovalCheck;
 }
 
+/** Whether a student can sign in: no login yet, a login that works, or one that was switched off. */
+export type StudentLoginState = "none" | "enabled" | "disabled";
+
+export const STUDENT_LOGIN_LABEL: Record<StudentLoginState, string> = {
+  none: "No login",
+  enabled: "Can sign in",
+  disabled: "Sign-in disabled",
+};
+
+/** One of the department's sections a student is in, as a list names it. */
+export interface StudentSectionRef {
+  sectionId: string;
+  /** "Section A". */
+  label: string;
+  groupName: string;
+  courseId: string;
+  courseName: string;
+  semesterId: string;
+}
+
 export interface DepartmentStudentRow {
   studentId: string;
   studentCode: string;
   firstName: string;
   lastName: string;
+  admissionNumber: string | null;
   faceEnrolled: boolean;
   hasLogin: boolean;
-  /** "PHY401-A" and where it lives, for each of this department's sections they are in. */
-  sections: {
-    sectionId: string;
-    groupName: string;
-    courseId: string;
-    semesterId: string;
-  }[];
+  login: StudentLoginState;
+  /** Each of this department's sections they are in. */
+  sections: StudentSectionRef[];
+}
+
+export interface DepartmentStudentFilters {
+  sessionId?: string;
+  /** Name, student ID or admission number. */
+  q?: string;
+  courseId?: string;
+  sectionId?: string;
+  face?: "enrolled" | "not_enrolled" | "";
+  login?: StudentLoginState | "";
 }
 
 export interface DepartmentStudents {
@@ -277,6 +320,8 @@ export interface DepartmentStudents {
   sessions: SessionChoice[];
   /** The department's courses, for the course filter. */
   courses: CourseRef[];
+  /** The department's sections this session, for the section filter. */
+  sections: SectionChoice[];
   students: DepartmentStudentRow[];
   /** More matched than are listed; the search box narrows it. */
   truncated: boolean;
@@ -288,10 +333,38 @@ export interface DepartmentFacultyRow {
   email: string;
   employeeCode: string | null;
   status: "ACTIVE" | "INACTIVE";
+  lastLoginAt: Date | null;
   isHead: boolean;
   /** Whether this person's department is this one, or they only teach one of its sections. */
   member: boolean;
-  sections: { sectionId: string; groupName: string; courseId: string; semesterId: string }[];
+  /**
+   * Whether the viewer may edit this person, stop or restore their access, and
+   * give them sections: a member of the department who is not a college
+   * administrator and is not the viewer.
+   */
+  manageable: boolean;
+  /**
+   * Whether the viewer may enable this account again once it is disabled: an
+   * administrator always; a head of department only an account they disabled
+   * themselves — one the Director disabled stays so until the Director says.
+   */
+  enableable: boolean;
+  sections: {
+    sectionId: string;
+    groupName: string;
+    label: string;
+    courseId: string;
+    courseName: string;
+    semesterId: string;
+  }[];
+}
+
+export interface DepartmentFacultyFilters {
+  sessionId?: string;
+  /** Name, email or faculty ID. */
+  q?: string;
+  status?: "active" | "inactive" | "";
+  assigned?: "assigned" | "unassigned" | "";
 }
 
 export interface DepartmentFaculty {
@@ -299,6 +372,100 @@ export interface DepartmentFaculty {
   session: SessionChoice | null;
   sessions: SessionChoice[];
   faculty: DepartmentFacultyRow[];
+  /** Before filtering, so an empty result can say whether the department has anyone at all. */
+  totalAll: number;
+}
+
+/**
+ * One of the department's sections as a picker offers it: which course,
+ * which section, who teaches it now and how many are in it — this session.
+ */
+export interface SectionChoice {
+  sectionId: string;
+  label: string;
+  groupName: string;
+  course: CourseRef;
+  semester: SemesterRef;
+  teacher: { userId: string; name: string } | null;
+  studentCount: number;
+}
+
+/** A member of staff as the department's faculty page shows one person. */
+export interface DepartmentFacultyMember {
+  department: DepartmentRef;
+  session: SessionChoice | null;
+  person: DepartmentFacultyRow;
+  /** The viewer is looking at their own account. */
+  isSelf: boolean;
+  /** The department's sections this session, to give this person one. */
+  sectionChoices: SectionChoice[];
+}
+
+/** What a student-side section picker knows about each section. */
+export interface StudentSectionChoice extends SectionChoice {
+  /** The student is in this section now. */
+  inSection: boolean;
+  /**
+   * The student is in another section of the same course: the one they would
+   * be moved from. A student is in one section of a course at a time.
+   */
+  sameCourseSection: { sectionId: string; label: string } | null;
+}
+
+/** A student as the department's student page shows them. */
+export interface DepartmentStudentDetail {
+  department: DepartmentRef;
+  session: SessionChoice | null;
+  student: {
+    studentId: string;
+    studentCode: string;
+    firstName: string;
+    lastName: string;
+    admissionNumber: string | null;
+    email: string | null;
+    phone: string | null;
+    status: StudentRecordStatus;
+  };
+  /** Their sections of this department this session. */
+  placements: (SectionChoice & { courseCode: string | null })[];
+  face: {
+    enrolled: boolean;
+    /** Samples in use for recognition. Metadata only — never the templates. */
+    activeSamples: number;
+    lastEnrolledAt: Date | null;
+    /**
+     * Whether their face can be enrolled from the department: they are in one
+     * of its sections in a session that has not been archived.
+     */
+    canEnroll: boolean;
+  };
+  login: { state: StudentLoginState; loginId: string };
+  /** The department's sections this session, for "Add to section". */
+  sectionChoices: StudentSectionChoice[];
+}
+
+/** The department's Add student search: this college's students, each with the department's sections they are in. */
+export interface DepartmentStudentSearch {
+  department: DepartmentRef;
+  session: SessionChoice | null;
+  /** What was searched for, tidied. */
+  query: string;
+  /** False until the box holds enough to search on. */
+  searched: boolean;
+  results: (StudentSearchRow & { sections: StudentSectionRef[] })[];
+  truncated: boolean;
+  /** Whether the department has a section this session to place anyone in. */
+  hasSections: boolean;
+}
+
+/** A student chosen on the department's Add student page, before they are placed. */
+export interface DepartmentStudentPick {
+  department: DepartmentRef;
+  session: SessionChoice | null;
+  student: StudentSearchRow;
+  /** Their sections of this department this session, if any. */
+  placements: StudentSectionRef[];
+  sectionChoices: StudentSectionChoice[];
 }
 
 export interface CollegeHome {
@@ -352,30 +519,4 @@ export interface SectionStudentSearch {
   suggestionsTruncated: boolean;
   /** The student just added from this page, while they are still in the section. */
   added: { studentId: string; name: string } | null;
-}
-
-/** One student of a section, as the section's own student page shows them. */
-export interface SectionStudentView {
-  placement: SectionPlacement;
-  student: {
-    studentId: string;
-    studentCode: string;
-    firstName: string;
-    lastName: string;
-    admissionNumber: string | null;
-    status: StudentRecordStatus;
-    faceEnrolled: boolean;
-    hasLogin: boolean;
-  };
-  /** Their sections of this department this session — this one among them. */
-  sections: {
-    sectionId: string;
-    label: string;
-    groupName: string;
-    course: CourseRef;
-    semesterId: string;
-    teacherName: string | null;
-  }[];
-  /** Whether this college lets a student enrol their own face from the student portal. */
-  selfEnrollment: boolean;
 }

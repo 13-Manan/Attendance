@@ -67,3 +67,35 @@ export function courseTrail(input: CourseTrailInput): CollegeTrail {
   }
   return { items };
 }
+
+export interface DepartmentTrailInput {
+  viewer: "admin" | "hod";
+  department: { name: string; href: string };
+  /** The department's Faculty or Students page. */
+  list: { label: "Faculty" | "Students"; href: string };
+  /** A page below the list: a person, "Add student". */
+  leaf?: { label: string; href?: string };
+  /** A page below a person: "Face enrollment". */
+  subleaf?: string;
+}
+
+/**
+ * A department's Faculty and Students pages and the pages below them. A head
+ * of department reaches them from the sidebar — Faculty, Students — so their
+ * trail starts there; an administrator walks down from Departments.
+ */
+export function departmentTrail(input: DepartmentTrailInput): CollegeTrail {
+  const items: TrailCrumb[] =
+    input.viewer === "hod"
+      ? [{ label: input.list.label, href: input.list.href }]
+      : [
+          { label: "Departments", href: DEPARTMENTS_PATH },
+          { label: input.department.name, href: input.department.href },
+          { label: input.list.label, href: input.list.href },
+        ];
+  if (input.leaf) items.push({ label: input.leaf.label, href: input.leaf.href });
+  if (input.subleaf) items.push({ label: input.subleaf });
+  // The page being shown is named, not linked.
+  items[items.length - 1] = { label: items[items.length - 1].label };
+  return { items };
+}

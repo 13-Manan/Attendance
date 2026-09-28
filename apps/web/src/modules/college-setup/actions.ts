@@ -12,41 +12,52 @@
  * form and nowhere else — the same lifetime as on the Faculty page.
  */
 
+import { z } from "zod";
 import { redirect } from "next/navigation";
 import { refresh } from "next/cache";
+import { imageBase64Field } from "@/lib/image-validation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { ForbiddenError } from "@/modules/authorization/types";
+import type { FaceEnrollmentResult } from "@/modules/face-enrollment/types";
 import { FacultyError } from "@/modules/faculty/directory-types";
 import type { StudentActionState, StudentFormValues } from "@/modules/students/directory-actions";
 import { StudentError } from "@/modules/students/directory-types";
 import { sectionLabel } from "./policy";
 import {
   addCourseSections,
+  addDepartmentFaculty,
   addNewStudentToSection,
+  addStudentToDepartmentSection,
   addStudentToSection,
   addStudentsToSection,
   assignDepartmentHead,
+  assignFacultyToSection,
   createCourse,
   createDepartment,
   createDepartmentHead,
+  createDepartmentStudent,
   createSemester,
+  enrollDepartmentStudentFace,
   inviteTeacherForCourseSection,
   removeCourse,
   removeCourseSection,
   removeCourseSectionTeacher,
   removeDepartmentHead,
   removeSemester,
+  removeStudentFromDepartmentSection,
   removeStudentFromSection,
   renameCourseSection,
   resetDepartmentHeadPassword,
   setCourseSectionTeacher,
   setCurrentSemester,
+  setDepartmentFacultyActive,
   setDepartmentHeadActive,
   updateCourse,
   updateDepartment,
+  updateDepartmentFacultyMember,
   updateSemester,
 } from "./service";
-import { CollegeSetupError } from "./types";
+import { CollegeSetupError, SameCourseConflict } from "./types";
 
 export interface CollegeActionState {
   error?: string;
@@ -56,6 +67,15 @@ export interface CollegeActionState {
   /** Shown once, immediately after it is issued. Never re-readable. */
   password?: string;
   passwordLabel?: string;
+  /** What the person the password is for can do with it — it differs between a head and a teacher. */
+  passwordNote?: string;
+  /** The account a form has just created, for the next step it offers. */
+  createdId?: string;
+  /**
+   * The student is in another section of this course already: where, so the
+   * form can offer the one deliberate answer — moving them.
+   */
+  conflict?: { sectionId: string; label: string };
   /** Changes on every submission, so a form can reset itself after a success. */
   attempt?: number;
   /** What was typed, echoed back on a refusal so the form does not clear itself. */
@@ -480,6 +500,8 @@ export async function setSectionTeacherAction(
     const { teacherName, replaced } = await setCourseSectionTeacher(actor, {
       ...sectionIds(formData),
       teacherId: text(formData, "teacherId"),
+      // The teacher the form showed; a section that has changed hands since is not changed again blindly.
+      expectedTeacherId: formData.has("expectedTeacherId") ? text(formData, "expectedTeacherId") : undefined,
     });
     refresh();
     return {
@@ -529,6 +551,7 @@ export async function inviteSectionTeacherAction(
         : `${invited.member.name} now teaches this section and can sign in with ${invited.member.email}.`,
       password: invited.password,
       passwordLabel: `Temporary password for ${invited.member.email}`,
+      passwordNote: TEACHER_PASSWORD_NOTE,
       attempt: next(prev),
     };
   } catch (error) {
@@ -591,9 +614,15 @@ export async function addStudentToSectionAction(
   const ids = sectionIds(formData);
   let studentId: string;
   try {
-    ({ studentId } = await addStudentToSection(actor, ids, text(formData, "studentId")));
+    ({ studentId } = await addStudentToSection(actor, ids, text(formData, "studentId"), {
+      moveFrom: text(formData, "moveFrom") || undefined,
+    }));
   } catch (error) {
-    return { error: describe(error, "The student could not be added."), attempt: next(prev) };
+    return {
+      error: describe(error, "The student could not be added."),
+      conflict: error instanceof SameCourseConflict ? error.current : undefined,
+      attempt: next(prev),
+    };
   }
   const query = new URLSearchParams({ added: studentId });
   const search = text(formData, "q").trim();
@@ -643,4 +672,230 @@ export async function removeStudentFromSectionAction(
     return { error: describe(error, "The student could not be removed."), attempt: next(prev) };
   }
   redirect(`${sectionPath(ids)}?removedStudent=${encodeURIComponent(name)}`);
+}
+
+// ---------------------------------------------------------------------------
+// A department's faculty
+// ---------------------------------------------------------------------------
+
+const DEPARTMENT_BASE = "/dashboard/college/departments";
+
+/** The password note for a teacher: they cannot change their own, so say who can issue another. */
+const TEACHER_PASSWORD_NOTE =
+  "Copy this now — it is shown once and cannot be recovered. Hand it over in person or by a channel you trust. " +
+  "If it is lost, the college administrator can issue a new one.";
+
+/**
+ * Adds a teacher to the department — a new sign-in account in this department
+ * with the teaching role, through the Faculty page's own service. The password
+ * comes back here once and is shown once; nothing else keeps it.
+ */
+export async function addFacultyAction(prev: CollegeActionState, formData: FormData): Promise<CollegeActionState> {
+  const actor = await requireUser();
+  const values = {
+    name: text(formData, "name"),
+    email: text(formData, "email"),
+    employeeCode: text(formData, "employeeCode"),
+  };
+  try {
+    const invited = await addDepartmentFaculty(actor, { departmentId: text(formData, "departmentId"), ...values });
+    refresh();
+    return {
+      message: `${invited.member.name} was added to the department and signs in with ${invited.member.email}.`,
+      password: invited.password,
+      passwordLabel: `Temporary password for ${invited.member.email}`,
+      passwordNote: TEACHER_PASSWORD_NOTE,
+      createdId: invited.member.id,
+      attempt: next(prev),
+    };
+  } catch (error) {
+    return { error: describe(error, "The teacher's account could not be created."), values, attempt: next(prev) };
+  }
+}
+
+export async function updateFacultyAction(prev: CollegeActionState, formData: FormData): Promise<CollegeActionState> {
+  const actor = await requireUser();
+  const values = { name: text(formData, "name"), employeeCode: text(formData, "employeeCode") };
+  try {
+    const { name } = await updateDepartmentFacultyMember(actor, {
+      departmentId: text(formData, "departmentId"),
+      userId: text(formData, "userId"),
+      ...values,
+    });
+    refresh();
+    return { message: `Saved ${name}'s details.`, attempt: next(prev) };
+  } catch (error) {
+    return { error: describe(error, "The details could not be saved."), values, attempt: next(prev) };
+  }
+}
+
+/** Disable and Enable are one control that swaps in place, so each answer is the control's own. */
+export async function setFacultyActiveAction(prev: CollegeActionState, formData: FormData): Promise<CollegeActionState> {
+  const actor = await requireUser();
+  const active = text(formData, "active") === "1";
+  try {
+    const { name } = await setDepartmentFacultyActive(actor, {
+      departmentId: text(formData, "departmentId"),
+      userId: text(formData, "userId"),
+      active,
+    });
+    refresh();
+    return {
+      message: active
+        ? `${name} can sign in again.`
+        : `${name} can no longer sign in, and has been signed out everywhere. Their sections keep them as their teacher until they are given to somebody else.`,
+      attempt: next(prev),
+    };
+  } catch (error) {
+    return { error: describe(error, "The account could not be changed."), attempt: next(prev) };
+  }
+}
+
+export async function assignFacultyToSectionAction(
+  prev: CollegeActionState,
+  formData: FormData,
+): Promise<CollegeActionState> {
+  const actor = await requireUser();
+  try {
+    const { teacherName, replaced } = await assignFacultyToSection(actor, {
+      departmentId: text(formData, "departmentId"),
+      userId: text(formData, "userId"),
+      sectionId: text(formData, "sectionId"),
+      expectedTeacherId: text(formData, "expectedTeacherId"),
+    });
+    refresh();
+    return {
+      message: `${teacherName} now teaches ${text(formData, "sectionName") || "the section"}.${replaced.length ? ` ${replaced.join(", ")} no longer does.` : ""}`,
+      attempt: next(prev),
+    };
+  } catch (error) {
+    return { error: describe(error, "The section could not be assigned."), attempt: next(prev) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A department's students
+// ---------------------------------------------------------------------------
+
+function studentPath(departmentId: string, studentId: string): string {
+  return `${DEPARTMENT_BASE}/${encodeURIComponent(departmentId)}/students/${encodeURIComponent(studentId)}`;
+}
+
+/**
+ * Adds an existing student to one of the department's sections, or moves them
+ * there from another section of that course when the form says so — then
+ * opens the student, where the new section now appears.
+ */
+export async function addStudentToDepartmentSectionAction(
+  prev: CollegeActionState,
+  formData: FormData,
+): Promise<CollegeActionState> {
+  const actor = await requireUser();
+  const departmentId = text(formData, "departmentId");
+  let result: { studentId: string; moved: boolean; ids: { sectionId: string } };
+  try {
+    result = await addStudentToDepartmentSection(actor, {
+      departmentId,
+      studentId: text(formData, "studentId"),
+      sectionId: text(formData, "sectionId"),
+      moveFrom: text(formData, "moveFrom") || undefined,
+    });
+  } catch (error) {
+    return {
+      error: describe(error, "The student could not be added."),
+      conflict: error instanceof SameCourseConflict ? error.current : undefined,
+      values: { sectionId: text(formData, "sectionId") },
+      attempt: next(prev),
+    };
+  }
+  const query = new URLSearchParams({ [result.moved ? "moved" : "added"]: result.ids.sectionId });
+  redirect(`${studentPath(departmentId, result.studentId)}?${query}`);
+}
+
+/**
+ * Takes a student out of one of the department's sections — nothing else
+ * about them changes — and returns to them, or to the student list when that
+ * was their last section of the department.
+ */
+export async function removeStudentFromDepartmentSectionAction(
+  prev: CollegeActionState,
+  formData: FormData,
+): Promise<CollegeActionState> {
+  const actor = await requireUser();
+  const departmentId = text(formData, "departmentId");
+  const studentId = text(formData, "studentId");
+  let removed: { name: string; stillInDepartment: boolean };
+  try {
+    removed = await removeStudentFromDepartmentSection(actor, {
+      departmentId,
+      studentId,
+      sectionId: text(formData, "sectionId"),
+    });
+  } catch (error) {
+    return { error: describe(error, "The student could not be removed."), attempt: next(prev) };
+  }
+  const sectionName = text(formData, "sectionName");
+  if (removed.stillInDepartment) {
+    redirect(`${studentPath(departmentId, studentId)}?${new URLSearchParams({ removed: sectionName })}`);
+  }
+  redirect(
+    `${DEPARTMENT_BASE}/${encodeURIComponent(departmentId)}/students?${new URLSearchParams({ removedStudent: removed.name, from: sectionName })}`,
+  );
+}
+
+/**
+ * The college's usual Add student form, submitted from the department with
+ * the section the student joins first: created by the student service, placed
+ * by it, and opened so the next step is right there.
+ */
+export async function createDepartmentStudentAction(
+  prev: StudentActionState,
+  formData: FormData,
+): Promise<StudentActionState> {
+  const actor = await requireUser();
+  const departmentId = text(formData, "departmentId");
+  const values = readStudentForm(formData);
+  const attempt = (prev.attempt ?? 0) + 1;
+  let studentId: string;
+  try {
+    ({ id: studentId } = await createDepartmentStudent(
+      actor,
+      { departmentId, sectionId: text(formData, "sectionId") },
+      values,
+    ));
+  } catch (error) {
+    return { error: describe(error, "The student could not be added."), values, attempt };
+  }
+  redirect(`${studentPath(departmentId, studentId)}?created=1`);
+}
+
+// ---------------------------------------------------------------------------
+// Face enrolment for a department's student
+// ---------------------------------------------------------------------------
+
+/**
+ * The same input the administrator's enrolment actions accept — the image
+ * bounded and checked to be a JPEG, PNG or WebP before it goes anywhere — plus
+ * the department it is enrolled from, which the service checks.
+ */
+const departmentEnrollmentSchema = z.object({
+  departmentId: z.string().min(1),
+  studentId: z.string().min(1),
+  imageBase64: imageBase64Field(),
+  captureSource: z.enum(["CAMERA", "UPLOAD"]),
+  confirmDistinctFromStudentId: z.string().min(1).optional(),
+});
+
+export async function enrollDepartmentStudentFaceAction(
+  input: z.infer<typeof departmentEnrollmentSchema>,
+): Promise<FaceEnrollmentResult> {
+  const actor = await requireUser();
+  return enrollDepartmentStudentFace(actor, departmentEnrollmentSchema.parse(input), "add");
+}
+
+export async function replaceDepartmentStudentFaceAction(
+  input: z.infer<typeof departmentEnrollmentSchema>,
+): Promise<FaceEnrollmentResult> {
+  const actor = await requireUser();
+  return enrollDepartmentStudentFace(actor, departmentEnrollmentSchema.parse(input), "replace");
 }

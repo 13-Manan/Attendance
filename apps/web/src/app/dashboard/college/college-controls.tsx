@@ -1,10 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import { useActionState, useEffect, useId, useRef, useState } from "react";
 import {
+  addFacultyAction,
   addSectionsAction,
+  addStudentToDepartmentSectionAction,
   addStudentToSectionAction,
   addStudentsToSectionAction,
+  assignFacultyToSectionAction,
   assignHeadAction,
   createCourseAction,
   createDepartmentAction,
@@ -16,14 +20,17 @@ import {
   removeSectionAction,
   removeSectionTeacherAction,
   removeSemesterAction,
+  removeStudentFromDepartmentSectionAction,
   removeStudentFromSectionAction,
   renameSectionAction,
   resetHeadPasswordAction,
   setCurrentSemesterAction,
+  setFacultyActiveAction,
   setHeadActiveAction,
   setSectionTeacherAction,
   updateCourseAction,
   updateDepartmentAction,
+  updateFacultyAction,
   updateSemesterAction,
   type CollegeActionState,
 } from "@/modules/college-setup/actions";
@@ -37,8 +44,10 @@ import {
   MAX_SECTION_NAME,
   MAX_SEMESTER_NAME,
   MAX_SEMESTER_NUMBER,
+  type SectionChoice,
   type SectionTeacher,
   type StaffChoice,
+  type StudentSectionChoice,
 } from "@/modules/college-setup/types";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
@@ -88,7 +97,9 @@ function Feedback({ state }: { state: CollegeActionState }) {
           ))}
         </ul>
       ) : null}
-      {state.password ? <PasswordOnce label={state.passwordLabel ?? "Temporary password"} password={state.password} /> : null}
+      {state.password ? (
+        <PasswordOnce label={state.passwordLabel ?? "Temporary password"} password={state.password} note={state.passwordNote} />
+      ) : null}
     </>
   );
 }
@@ -98,7 +109,7 @@ function Feedback({ state }: { state: CollegeActionState }) {
  * and lives nowhere else: reloading the page does not bring it back, and there
  * is no screen that can show the current one.
  */
-function PasswordOnce({ label, password }: { label: string; password: string }) {
+function PasswordOnce({ label, password, note }: { label: string; password: string; note?: string }) {
   const [dismissed, setDismissed] = useState(false);
   const [copied, setCopied] = useState(false);
   if (dismissed) return null;
@@ -128,8 +139,8 @@ function PasswordOnce({ label, password }: { label: string; password: string }) 
         </span>
       </div>
       <p className="text-xs text-emerald-900">
-        Copy this now — it is shown once and cannot be recovered. Hand it over in person or by a channel you trust.
-        They can choose their own password under My account once signed in.
+        {note ??
+          "Copy this now — it is shown once and cannot be recovered. Hand it over in person or by a channel you trust. They can choose their own password under My account once signed in."}
       </p>
       <div>
         <Button type="button" variant="secondary" onClick={() => setDismissed(true)}>
@@ -978,7 +989,7 @@ export function SectionTeacherForm({
   }
   return (
     <form action={formAction} className={compact ? "flex flex-wrap items-end gap-2" : "flex flex-col gap-2"}>
-      <Hidden ids={ids} />
+      <Hidden ids={{ ...ids, expectedTeacherId: currentId ?? "" }} />
       <Field label={currentId ? "Change teacher" : "Assign a teacher"} htmlFor={`${id}-teacher`}>
         <Select id={`${id}-teacher`} name="teacherId" required defaultValue="">
           <TeacherOptions teachers={choices} empty="Choose…" />
@@ -1222,9 +1233,15 @@ export function AddToSectionButton({
   return (
     <form action={formAction} className="flex flex-col items-start gap-2 sm:items-end">
       <Hidden ids={{ ...ids, studentId, q: query }} />
-      <Button type="submit" disabled={pending}>
+      {state.conflict ? <input type="hidden" name="moveFrom" value={state.conflict.sectionId} /> : null}
+      <Button type="submit" disabled={pending} variant={state.conflict ? "secondary" : "primary"}>
         {pending ? (
           "Adding…"
+        ) : state.conflict ? (
+          <>
+            Move here from {state.conflict.label}
+            <span className="sr-only"> ({name})</span>
+          </>
         ) : (
           <>
             Add to section<span className="sr-only"> ({name})</span>
@@ -1265,6 +1282,353 @@ export function RemoveStudentButton({
       labelDetail={name}
       confirmLabel="Remove from section"
       question={`Remove ${name} from ${sectionName}? Only their place in this section ends — the student, their face enrolment, their attendance history and their other courses are all kept.`}
+      pendingLabel="Removing…"
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A department's faculty
+// ---------------------------------------------------------------------------
+
+/**
+ * Adds a teacher to the department: a new sign-in account in this department,
+ * with the teaching role. The one-time password appears here, with the way on
+ * to giving the new teacher a section.
+ */
+export function AddFacultyForm({
+  departmentId,
+  facultyHref,
+}: {
+  departmentId: string;
+  /** The department's faculty page; one person's page is below it — the next step offered once they exist. */
+  facultyHref: string;
+}) {
+  const [state, formAction, pending] = useActionState(addFacultyAction, initialState);
+  const key = state.attempt ?? 0;
+  const id = useId();
+  const created = state.createdId && !state.error ? state.createdId : null;
+  return (
+    <form action={formAction} className="flex flex-col gap-4">
+      <Hidden ids={{ departmentId }} />
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Full name" htmlFor={`${id}-name`}>
+          <Input
+            key={`name-${key}`}
+            id={`${id}-name`}
+            name="name"
+            required
+            autoComplete="off"
+            autoFocus
+            defaultValue={state.error ? (state.values?.name ?? "") : ""}
+          />
+        </Field>
+        <Field label="Work email (their login)" htmlFor={`${id}-email`}>
+          <Input
+            key={`email-${key}`}
+            id={`${id}-email`}
+            name="email"
+            type="email"
+            required
+            autoComplete="off"
+            defaultValue={state.error ? (state.values?.email ?? "") : ""}
+          />
+        </Field>
+        <Field label="Faculty ID (optional)" htmlFor={`${id}-code`}>
+          <Input
+            key={`code-${key}`}
+            id={`${id}-code`}
+            name="employeeCode"
+            autoComplete="off"
+            defaultValue={state.error ? (state.values?.employeeCode ?? "") : ""}
+          />
+        </Field>
+      </div>
+      <p className="text-xs text-neutral-500">
+        They join this department as a teacher, with a password shown once below.
+      </p>
+      <div>
+        <Button type="submit" disabled={pending}>
+          {pending ? "Creating…" : "Create account"}
+        </Button>
+      </div>
+      <Feedback state={state} />
+      {created ? (
+        <p className="text-sm text-neutral-700">
+          Next:{" "}
+          <Link
+            href={`${facultyHref}/${encodeURIComponent(created)}`}
+            className="font-medium text-neutral-900 underline underline-offset-2"
+          >
+            give them a section
+          </Link>
+          .
+        </p>
+      ) : null}
+    </form>
+  );
+}
+
+/** A department member's name and faculty ID. Their email is what they sign in with, so it stays. */
+export function EditFacultyForm({
+  departmentId,
+  userId,
+  name,
+  employeeCode,
+}: {
+  departmentId: string;
+  userId: string;
+  name: string;
+  employeeCode: string;
+}) {
+  const [state, formAction, pending] = useActionState(updateFacultyAction, initialState);
+  const key = state.attempt ?? 0;
+  const id = useId();
+  return (
+    <form action={formAction} className="flex flex-col gap-3">
+      <Hidden ids={{ departmentId, userId }} />
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Full name" htmlFor={`${id}-name`}>
+          <Input key={`name-${key}`} id={`${id}-name`} name="name" required defaultValue={state.values?.name ?? name} />
+        </Field>
+        <Field label="Faculty ID (optional)" htmlFor={`${id}-code`}>
+          <Input
+            key={`code-${key}`}
+            id={`${id}-code`}
+            name="employeeCode"
+            defaultValue={state.values?.employeeCode ?? employeeCode}
+          />
+        </Field>
+      </div>
+      <div>
+        <Button type="submit" variant="secondary" disabled={pending}>
+          {pending ? "Saving…" : "Save details"}
+        </Button>
+      </div>
+      <Feedback state={state} />
+    </form>
+  );
+}
+
+/** Stops or restores a department member's access — asked first, like every account change. */
+export function FacultyAccessButton({
+  departmentId,
+  userId,
+  active,
+  personName,
+}: {
+  departmentId: string;
+  userId: string;
+  active: boolean;
+  personName: string;
+}) {
+  return active ? (
+    <ConfirmForm
+      action={setFacultyActiveAction}
+      ids={{ departmentId, userId, active: "0" }}
+      label="Disable account"
+      labelDetail={personName}
+      confirmLabel="Disable account"
+      question={`Disable ${personName}'s account? They can't sign in until it is enabled again, and are signed out everywhere now. Their sections and every register they took stay as they are.`}
+      pendingLabel="Disabling…"
+    />
+  ) : (
+    <ConfirmForm
+      action={setFacultyActiveAction}
+      ids={{ departmentId, userId, active: "1" }}
+      label="Enable account"
+      labelDetail={personName}
+      confirmLabel="Enable account"
+      question={`Enable ${personName}'s account? They can sign in again with their current password.`}
+      pendingLabel="Enabling…"
+      variant="secondary"
+    />
+  );
+}
+
+/** "Physics — Section A · PHY401-A · taught by Rajesh Kumar" — a section as a picker names it. */
+function describeChoice(choice: SectionChoice): string {
+  return `${choice.course.name} — ${choice.label} (${choice.groupName})`;
+}
+
+/**
+ * Gives a department member one of the department's sections. A section that
+ * already has a teacher says so, and changes hands only through "Replace …",
+ * which names who is replaced; the server refuses if that has changed since.
+ */
+export function AssignSectionForm({
+  departmentId,
+  userId,
+  personName,
+  choices,
+}: {
+  departmentId: string;
+  userId: string;
+  personName: string;
+  choices: readonly SectionChoice[];
+}) {
+  const [state, formAction, pending] = useActionState(assignFacultyToSectionAction, initialState);
+  const [sectionId, setSectionId] = useState("");
+  const id = useId();
+  const open = choices.filter((choice) => choice.teacher?.userId !== userId);
+  const chosen = open.find((choice) => choice.sectionId === sectionId) ?? null;
+  const replacing = chosen?.teacher ?? null;
+
+  // A finished assignment clears the choice, so the next one starts fresh.
+  const [settled, setSettled] = useState(state.attempt);
+  if (state.attempt !== settled) {
+    setSettled(state.attempt);
+    if (!state.error) setSectionId("");
+  }
+
+  if (open.length === 0) {
+    return (
+      <p className="text-sm text-neutral-600">
+        {choices.length === 0
+          ? "The department has no sections this session yet. Add them on a course's page."
+          : `${personName} already teaches every section of the department this session.`}
+      </p>
+    );
+  }
+  return (
+    <form action={formAction} className="flex flex-col gap-3">
+      <Hidden
+        ids={{
+          departmentId,
+          userId,
+          expectedTeacherId: replacing?.userId ?? "",
+          sectionName: chosen ? `${chosen.course.name} — ${chosen.label}` : "",
+        }}
+      />
+      <Field label="Course and section" htmlFor={`${id}-section`}>
+        <Select
+          id={`${id}-section`}
+          name="sectionId"
+          required
+          value={sectionId}
+          onChange={(event) => setSectionId(event.target.value)}
+        >
+          <option value="">Choose…</option>
+          {open.map((choice) => (
+            <option key={choice.sectionId} value={choice.sectionId}>
+              {describeChoice(choice)}
+              {choice.teacher ? ` · taught by ${choice.teacher.name}` : " · needs a teacher"}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      {replacing ? (
+        <p role="note" className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          {chosen!.course.name} — {chosen!.label} is taught by {replacing.name}. Replacing them gives the section to{" "}
+          {personName}; {replacing.name} stops teaching it. Registers already taken stay as they are.
+        </p>
+      ) : null}
+      <div>
+        <Button type="submit" disabled={pending || !chosen} variant={replacing ? "danger" : "primary"}>
+          {pending ? "Saving…" : replacing ? `Replace ${replacing.name}` : "Assign to section"}
+        </Button>
+      </div>
+      <Feedback state={state} />
+    </form>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A department's students
+// ---------------------------------------------------------------------------
+
+/**
+ * Adds a student to one of the department's sections. The list says which
+ * sections they are in already. Choosing a section of a course they are in
+ * says where they are and turns the button into a move — never a second place
+ * in the same course.
+ */
+export function StudentSectionForm({
+  departmentId,
+  studentId,
+  studentName,
+  choices,
+}: {
+  departmentId: string;
+  studentId: string;
+  studentName: string;
+  choices: readonly StudentSectionChoice[];
+}) {
+  const [state, formAction, pending] = useActionState(addStudentToDepartmentSectionAction, initialState);
+  const [sectionId, setSectionId] = useState(state.values?.sectionId ?? "");
+  const id = useId();
+  const available = choices.filter((choice) => !choice.inSection);
+  const chosen = available.find((choice) => choice.sectionId === sectionId) ?? null;
+  const moveFrom = chosen?.sameCourseSection ?? null;
+
+  if (choices.length === 0) {
+    return <p className="text-sm text-neutral-600">The department has no sections this session yet.</p>;
+  }
+  if (available.length === 0) {
+    return <p className="text-sm text-neutral-600">{studentName} is in every section of the department this session.</p>;
+  }
+  return (
+    <form action={formAction} className="flex flex-col gap-3">
+      <Hidden ids={{ departmentId, studentId, moveFrom: moveFrom?.sectionId ?? "" }} />
+      <Field label="Course and section" htmlFor={`${id}-section`}>
+        <Select
+          id={`${id}-section`}
+          name="sectionId"
+          required
+          value={sectionId}
+          onChange={(event) => setSectionId(event.target.value)}
+        >
+          <option value="">Choose…</option>
+          {available.map((choice) => (
+            <option key={choice.sectionId} value={choice.sectionId}>
+              {describeChoice(choice)}
+              {choice.sameCourseSection ? ` · now in ${choice.sameCourseSection.label}` : ""}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      {moveFrom ? (
+        <p role="note" className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          {studentName} is in {chosen!.course.name} — {moveFrom.label} already. A student is in one section of a
+          course, so this moves them to {chosen!.label}. Their attendance in {moveFrom.label} is kept.
+        </p>
+      ) : null}
+      <div>
+        <Button type="submit" disabled={pending || !chosen}>
+          {pending ? "Saving…" : moveFrom ? `Move to ${chosen!.label}` : "Add to section"}
+        </Button>
+      </div>
+      <Feedback state={state} />
+    </form>
+  );
+}
+
+/**
+ * Takes a student out of one of the department's sections, after asking. Only
+ * that place ends.
+ */
+export function RemovePlacementButton({
+  departmentId,
+  studentId,
+  sectionId,
+  studentName,
+  sectionName,
+}: {
+  departmentId: string;
+  studentId: string;
+  sectionId: string;
+  studentName: string;
+  /** "Physics — Section A". */
+  sectionName: string;
+}) {
+  return (
+    <ConfirmForm
+      action={removeStudentFromDepartmentSectionAction}
+      ids={{ departmentId, studentId, sectionId, sectionName }}
+      label="Remove from section"
+      labelDetail={sectionName}
+      confirmLabel="Remove from section"
+      question={`Remove ${studentName} from ${sectionName}? Their student record, face enrolment, login, attendance history and other course enrolments will remain unchanged.`}
       pendingLabel="Removing…"
     />
   );

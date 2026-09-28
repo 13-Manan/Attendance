@@ -336,20 +336,30 @@ export interface NavSection {
  */
 /** A college course's pages, at every level below the course: sections, students. */
 const COLLEGE_COURSE_PAGES = "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses";
+/** A department's Faculty and Students pages, and every page below them. */
+const COLLEGE_FACULTY_PAGES = "/dashboard/college/departments/[departmentId]/faculty";
+const COLLEGE_STUDENT_PAGES = "/dashboard/college/departments/[departmentId]/students";
 
 /**
  * Pages that belong to a link other than the one whose address they sit
  * under, keyed by that link's href.
  *
- * A head of department reaches their courses, sections and students from
- * Courses — the trail on those pages starts there — but the pages live under
- * their department's address, so without this "My department" would be lit
+ * A head of department reaches their courses and sections from Courses, and
+ * their department's teachers and students from Faculty and Students — the
+ * trail on those pages starts there — but the pages live under their
+ * department's address, so without this "My department" would be lit
  * instead. An administrator walks down from Departments, which stays lit, as
  * before; every other viewer has no claims at all.
  */
 export function navClaims(can: (permission: PermissionKey) => boolean, kind: InstitutionKind): Record<string, readonly string[]> {
   const headsDepartment = kind === "COLLEGE" && can("department.manage") && !can("academicStructure.manage");
-  return headsDepartment ? { "/dashboard/college/courses": [COLLEGE_COURSE_PAGES] } : {};
+  return headsDepartment
+    ? {
+        "/dashboard/college/courses": [COLLEGE_COURSE_PAGES],
+        "/dashboard/college/faculty": [COLLEGE_FACULTY_PAGES],
+        "/dashboard/college/students": [COLLEGE_STUDENT_PAGES],
+      }
+    : {};
 }
 
 export function buildNavSections(

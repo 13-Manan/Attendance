@@ -19,6 +19,7 @@ import {
   courseHref,
   courseTrail,
   departmentHref,
+  departmentPeopleHref,
   first,
   readOrDeny,
   sectionHref,
@@ -75,9 +76,12 @@ export default async function AddSectionStudentsPage({ params, searchParams }: P
     leaf: "Add students",
   });
   const viewHref = (studentId: string) =>
-    canOpenRecord
-      ? withReturnPath(`/dashboard/students/${encodeURIComponent(studentId)}`, sectionPage)
-      : sectionStudentsHref(ids, { studentId });
+    withReturnPath(
+      canOpenRecord
+        ? `/dashboard/students/${encodeURIComponent(studentId)}`
+        : departmentPeopleHref(department.id, "students", studentId),
+      sectionPage,
+    );
   const typedTooLittle = rawQuery.trim() !== "" && !search.searched;
 
   return (

@@ -27,6 +27,7 @@ import {
   courseHref,
   courseTrail,
   departmentHref,
+  departmentPeopleHref,
   first,
   readOrDeny,
   sectionHref,
@@ -77,7 +78,11 @@ export default async function CourseSectionPage({ params, searchParams }: PagePr
   const editable = session.isActive;
   const fullName = sectionFullName(course.name, section.label);
   const canOpenRecord = hasPermission(user, "student.read");
-  const canEnrollFace = hasPermission(user, "faceEmbedding.manage");
+  // An administrator enrols from the Students screen; a head of department from
+  // their department's own student page, which checks the student is theirs —
+  // and is in one of its sections in a session that is still open.
+  const adminEnrollsFace = hasPermission(user, "faceEmbedding.manage");
+  const canEnrollFace = adminEnrollsFace || (!isAdmin && editable);
   const canTakeAttendance =
     hasPermission(user, "attendanceSession.create") &&
     (hasPermission(user, "cohort.manage") || section.teacher?.userId === user.userId);
@@ -102,9 +107,11 @@ export default async function CourseSectionPage({ params, searchParams }: PagePr
   const recordHref = (student: SectionStudent) =>
     canOpenRecord
       ? withReturnPath(`/dashboard/students/${encodeURIComponent(student.studentId)}`, here)
-      : sectionStudentsHref(ids, { studentId: student.studentId });
+      : withReturnPath(departmentPeopleHref(department.id, "students", student.studentId), here);
   const faceHref = (student: SectionStudent) =>
-    withReturnPath(`/dashboard/students/${encodeURIComponent(student.studentId)}/enroll-face`, here);
+    adminEnrollsFace
+      ? withReturnPath(`/dashboard/students/${encodeURIComponent(student.studentId)}/enroll-face`, here)
+      : departmentPeopleHref(department.id, "students", student.studentId, "enroll-face");
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
@@ -263,7 +270,8 @@ export default async function CourseSectionPage({ params, searchParams }: PagePr
                       </Link>
                       {canEnrollFace ? (
                         <Link href={faceHref(student)} className={LINK_SECONDARY}>
-                          Enroll face<span className="sr-only"> for {name}</span>
+                          {student.faceEnrolled ? "Add face samples" : "Enroll face"}
+                          <span className="sr-only"> for {name}</span>
                         </Link>
                       ) : null}
                     </div>
@@ -311,7 +319,8 @@ export default async function CourseSectionPage({ params, searchParams }: PagePr
                             </Link>
                             {canEnrollFace ? (
                               <Link href={faceHref(student)} className={LINK_SECONDARY}>
-                                Enroll face<span className="sr-only"> for {name}</span>
+                                {student.faceEnrolled ? "Add face samples" : "Enroll face"}
+                                <span className="sr-only"> for {name}</span>
                               </Link>
                             ) : null}
                             {editable ? (
@@ -327,10 +336,9 @@ export default async function CourseSectionPage({ params, searchParams }: PagePr
             </div>
           </>
         )}
-        {!canEnrollFace ? (
+        {!canOpenRecord ? (
           <p className="text-xs text-neutral-500">
-            Faces are enrolled, and student sign-ins set up, by the college administrator from each student&apos;s record.
-            View shows where a student stands.
+            Student sign-ins are created and reset by the college administrator. View shows where a student stands.
           </p>
         ) : null}
       </Panel>

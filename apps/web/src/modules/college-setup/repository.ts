@@ -315,6 +315,44 @@ export async function listHeadCandidates(db: Db, institutionId: string) {
   });
 }
 
+/**
+ * Of these people, who holds a role that administers the whole college — one
+ * read for a whole faculty list. Such an account is the Director's to manage,
+ * never a head of department's, even when it is in the department.
+ */
+export async function administratorIds(db: Db, userIds: readonly string[]): Promise<Set<string>> {
+  if (userIds.length === 0) return new Set();
+  const rows = await db.userRoleAssignment.findMany({
+    where: {
+      userId: { in: [...userIds] },
+      role: { permissions: { some: { permission: "academicStructure.manage" } } },
+    },
+    select: { userId: true },
+  });
+  return new Set(rows.map((row) => row.userId));
+}
+
+/**
+ * Who last stopped each of these accounts, from the audit trail — one read for
+ * a whole list. A head of department restores only an account they stopped
+ * themselves; one the Director stopped stays stopped until the Director says.
+ */
+export async function lastDeactivatorsOf(
+  db: Db,
+  institutionId: string,
+  userIds: readonly string[],
+): Promise<Map<string, string | null>> {
+  if (userIds.length === 0) return new Map();
+  const rows = await db.auditLog.findMany({
+    where: { institutionId, entityType: "User", action: "user.deactivated", entityId: { in: [...userIds] } },
+    orderBy: { createdAt: "desc" },
+    select: { entityId: true, actorUserId: true },
+  });
+  const last = new Map<string, string | null>();
+  for (const row of rows) if (!last.has(row.entityId)) last.set(row.entityId, row.actorUserId);
+  return last;
+}
+
 /** Whether this person holds any role that administers the whole college. */
 export async function holdsAdministratorRole(db: Db, userId: string): Promise<boolean> {
   const count = await db.userRoleAssignment.count({
@@ -467,46 +505,90 @@ export async function studentsCurrentlyIn(
   return new Set(rows.map((row) => row.studentId));
 }
 
-/**
- * The groups of one session a student is currently in, with each one's
- * teacher — every department's; the caller keeps its own. One read, however
- * many sections the department has.
- */
-export async function listStudentGroupsInSession(
-  db: Db,
-  institutionId: string,
-  sessionId: string,
-  studentId: string,
-): Promise<{ id: string; name: string; academicUnitId: string; teacherName: string | null }[]> {
-  const rows = await db.enrollment.findMany({
-    where: { studentId, status: "ACTIVE", cohort: { institutionId, academicSessionId: sessionId } },
-    select: {
-      cohort: {
-        select: {
-          id: true,
-          name: true,
-          academicUnitId: true,
-          facultyLinks: {
-            where: { role: "PRIMARY" },
-            orderBy: { id: "asc" },
-            take: 1,
-            select: { user: { select: { name: true } } },
-          },
-        },
-      },
-    },
+/** One student of this college with the details their department page shows — contact fields included. */
+export async function getStudentDetail(db: Db, institutionId: string, studentId: string) {
+  return db.student.findFirst({
+    where: { id: studentId, institutionId },
+    select: { ...STUDENT_SELECT, email: true, phone: true, user: { select: { status: true } } },
   });
-  return rows.map(({ cohort }) => ({
-    id: cohort.id,
-    name: cohort.name,
-    academicUnitId: cohort.academicUnitId,
-    teacherName: cohort.facultyLinks[0]?.user.name ?? null,
-  }));
 }
 
-/** The two institution fields the face-enrolment policy reads. */
-export async function getInstitutionPolicyFields(institutionId: string) {
-  return prisma.institution.findUnique({ where: { id: institutionId }, select: { type: true, settings: true } });
+/** Whether each of these sign-in accounts is switched on. One read for a whole list. */
+export async function loginStatusesOf(db: Db, userIds: readonly string[]): Promise<Map<string, string>> {
+  if (userIds.length === 0) return new Map();
+  const rows = await db.user.findMany({ where: { id: { in: [...userIds] } }, select: { id: true, status: true } });
+  return new Map(rows.map((row) => [row.id, row.status]));
+}
+
+/**
+ * How many face samples a student has in use, and when the latest was taken.
+ * A count and a date — no template, no vector, no image.
+ */
+export async function faceSummaryOf(db: Db, studentId: string) {
+  const row = await db.faceEmbedding.aggregate({
+    where: { studentId, isActive: true },
+    _count: { _all: true },
+    _max: { createdAt: true },
+  });
+  return { active: row._count._all, lastEnrolledAt: row._max.createdAt };
+}
+
+/**
+ * Whether a student is currently in any group hanging off these units, in any
+ * session — what makes them one of a department's students — or, with
+ * `openSessionsOnly`, in a session that has not been archived: what lets their
+ * face be enrolled from the department.
+ */
+export async function hasPlacementIn(
+  db: Db,
+  institutionId: string,
+  studentId: string,
+  unitIds: readonly string[],
+  options: { openSessionsOnly?: boolean } = {},
+): Promise<boolean> {
+  if (unitIds.length === 0) return false;
+  const row = await db.enrollment.findFirst({
+    where: {
+      studentId,
+      status: "ACTIVE",
+      cohort: {
+        institutionId,
+        academicUnitId: { in: [...unitIds] },
+        ...(options.openSessionsOnly ? { academicSession: { isActive: true } } : {}),
+      },
+    },
+    select: { cohortId: true },
+  });
+  return row !== null;
+}
+
+/** (student, section) pairs for these students currently in any of these sections. One read. */
+export async function placementsOf(
+  db: Db,
+  studentIds: readonly string[],
+  cohortIds: readonly string[],
+): Promise<{ studentId: string; cohortId: string }[]> {
+  if (studentIds.length === 0 || cohortIds.length === 0) return [];
+  return db.enrollment.findMany({
+    where: { studentId: { in: [...studentIds] }, cohortId: { in: [...cohortIds] }, status: "ACTIVE" },
+    select: { studentId: true, cohortId: true },
+  });
+}
+
+/**
+ * A course's groups in one session — its sections, and an older group hung
+ * straight off the course — with what each is called. What "another section
+ * of the same course" is checked against.
+ */
+export async function listCourseGroups(db: Db, institutionId: string, sessionId: string, courseId: string) {
+  return db.cohort.findMany({
+    where: {
+      institutionId,
+      academicSessionId: sessionId,
+      OR: [{ academicUnitId: courseId }, { academicUnit: { parentId: courseId, kind: "SECTION" } }],
+    },
+    select: { id: true, name: true, academicUnit: { select: { kind: true, name: true } } },
+  });
 }
 
 export async function getEnrollmentStatus(db: Db, studentId: string, cohortId: string) {

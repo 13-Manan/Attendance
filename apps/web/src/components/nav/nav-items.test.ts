@@ -323,10 +323,12 @@ test("the order moves links, never access: every role sees exactly what its perm
   }
 });
 
-test("a head of department's course pages light Courses, not My department; nobody else's claims change", () => {
+test("a head of department's course, faculty and student pages light their own links, not My department; nobody else's claims change", () => {
   const role = (key: string) => allowing(...(SYSTEM_ROLES.find((candidate) => candidate.key === key)!.permissions as PermissionKey[]));
   assert.deepEqual(navClaims(role("HOD"), "COLLEGE"), {
     "/dashboard/college/courses": ["/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses"],
+    "/dashboard/college/faculty": ["/dashboard/college/departments/[departmentId]/faculty"],
+    "/dashboard/college/students": ["/dashboard/college/departments/[departmentId]/students"],
   });
   assert.deepEqual(navClaims(role("COLLEGE_ADMIN"), "COLLEGE"), {}, "an administrator walks down from Departments");
   assert.deepEqual(navClaims(role("FACULTY"), "COLLEGE"), {});

@@ -62,6 +62,15 @@ export function sectionStudentsHref(
   return typeof page === "string" ? `${base}/${page}` : `${base}/${encodeURIComponent(page.studentId)}`;
 }
 
+/** A department's Faculty or Students page, or a page below one: a person, "Add student", face enrolment. */
+export function departmentPeopleHref(
+  departmentId: string,
+  list: "faculty" | "students",
+  ...below: string[]
+): string {
+  return [`${departmentHref(departmentId)}/${list}`, ...below.map(encodeURIComponent)].join("/");
+}
+
 /** "Physics (PHY401)": a course named for a form that is about it. */
 export function courseWithCode(course: { name: string; code: string | null }): string {
   return course.code ? `${course.name} (${course.code})` : course.name;
@@ -73,7 +82,7 @@ export function withSession(href: string, session: SessionChoice | null, all: re
   return `${href}${href.includes("?") ? "&" : "?"}session=${encodeURIComponent(session.id)}`;
 }
 
-export { COURSES_PATH, courseTitle, courseTrail } from "./trail";
+export { COURSES_PATH, courseTitle, courseTrail, departmentTrail } from "./trail";
 
 /**
  * Runs a page's read, turning a refusal into the same /unauthorized page

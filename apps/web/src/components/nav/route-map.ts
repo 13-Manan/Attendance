@@ -86,7 +86,11 @@ export const DASHBOARD_ROUTES: readonly RouteEntry[] = [
   { pattern: "/dashboard/college/departments", label: "Departments", namedTrail: true },
   { pattern: "/dashboard/college/departments/[departmentId]", namedTrail: true },
   { pattern: "/dashboard/college/departments/[departmentId]/faculty", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]/faculty/[userId]", namedTrail: true },
   { pattern: "/dashboard/college/departments/[departmentId]/students", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]/students/add", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]/students/[studentId]", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]/students/[studentId]/enroll-face", namedTrail: true },
   { pattern: "/dashboard/college/departments/[departmentId]/semesters" },
   {
     pattern: "/dashboard/college/departments/[departmentId]/semesters/[semesterId]",
@@ -126,12 +130,12 @@ export const DASHBOARD_ROUTES: readonly RouteEntry[] = [
       "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]",
     namedTrail: true,
   },
+  // Redirects to the department's page for the student, with the way back to the section.
   {
     pattern:
       "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]/students/[studentId]",
     parent:
       "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]",
-    namedTrail: true,
   },
   { pattern: "/dashboard/college/semesters", label: "Semesters", namedTrail: true },
   { pattern: "/dashboard/college/courses", label: "Courses", namedTrail: true },

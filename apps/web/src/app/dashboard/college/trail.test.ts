@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parentCrumb } from "@/components/nav/trail";
-import { COURSES_PATH, courseTitle, courseTrail } from "./trail.ts";
+import { COURSES_PATH, courseTitle, courseTrail, departmentTrail } from "./trail.ts";
 
 const D = "/dashboard/college/departments/cse";
 const S = `${D}/semesters/s4`;
@@ -64,4 +64,45 @@ test("a course is titled by its code and name, or its name alone", () => {
   assert.equal(courseTitle({ code: "PHY401", name: "Physics" }), "PHY401 · Physics");
   assert.equal(courseTitle({ code: null, name: "Physics" }), "Physics");
   assert.equal(courseTitle({ code: "PHY401", name: "PHY401 Physics" }), "PHY401 Physics");
+});
+
+test("a department's people pages: a head starts from Faculty or Students, an administrator from Departments", () => {
+  const faculty = `${D}/faculty`;
+  const students = `${D}/students`;
+  const list = departmentTrail({ viewer: "hod", department: parts.department, list: { label: "Faculty", href: faculty } });
+  assert.deepEqual(list.items, [{ label: "Faculty" }], "the list page is named, not linked");
+
+  const person = departmentTrail({
+    viewer: "hod",
+    department: parts.department,
+    list: { label: "Students", href: students },
+    leaf: { label: "Aman Kumar", href: `${students}/aman` },
+  });
+  assert.deepEqual(person.items, [{ label: "Students", href: students }, { label: "Aman Kumar" }]);
+  assert.deepEqual(backOf(person), { label: "Students", href: students });
+
+  const face = departmentTrail({
+    viewer: "hod",
+    department: parts.department,
+    list: { label: "Students", href: students },
+    leaf: { label: "Aman Kumar", href: `${students}/aman` },
+    subleaf: "Face enrollment",
+  });
+  assert.deepEqual(face.items.map((item) => item.label), ["Students", "Aman Kumar", "Face enrollment"]);
+  assert.deepEqual(backOf(face), { label: "Aman Kumar", href: `${students}/aman` }, "back to the student, not the list");
+
+  const adminFace = departmentTrail({
+    viewer: "admin",
+    department: parts.department,
+    list: { label: "Students", href: students },
+    leaf: { label: "Aman Kumar", href: `${students}/aman` },
+    subleaf: "Face enrollment",
+  });
+  assert.deepEqual(adminFace.items, [
+    { label: "Departments", href: "/dashboard/college/departments" },
+    { label: "Computer Science", href: D },
+    { label: "Students", href: students },
+    { label: "Aman Kumar", href: `${students}/aman` },
+    { label: "Face enrollment" },
+  ]);
 });

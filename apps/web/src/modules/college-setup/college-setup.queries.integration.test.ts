@@ -164,7 +164,11 @@ function reads(prefix: string) {
     addSuggestions: () => service.searchStudentsForSection(admin, sectionIds, ""),
     addSearch: () => service.searchStudentsForSection(admin, sectionIds, "st"),
     addById: () => service.searchStudentsForSection(admin, sectionIds, student.toUpperCase(), student),
-    student: () => service.getSectionStudent(admin, sectionIds, student),
+    // The department's people pages.
+    student: () => service.getDepartmentStudent(admin, department, student),
+    studentPick: () => service.getDepartmentStudentPick(admin, department, student),
+    departmentSearch: () => service.searchStudentsForDepartment(admin, department, "st"),
+    facultyMember: () => service.getDepartmentFacultyMember(admin, department, `${prefix}-t0`),
   };
 }
 
