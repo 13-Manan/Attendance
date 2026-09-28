@@ -252,7 +252,9 @@ test("a head of department reaches nothing outside their department", { skip: SK
   await assert.rejects(() => college.createDepartment(hod(), { name: "Civil", code: "CE" }), forbidden);
   await assert.rejects(() => college.assignDepartmentHead(hod(), { departmentId: ids.cse, userId: T1 }), forbidden);
   await assert.rejects(() => college.resetDepartmentHeadPassword(hod(), ids.cse), forbidden);
-  await assert.rejects(() => college.inviteTeacherForCourseSection(hod(), { departmentId: ids.cse, semesterId: ids.s4, courseId: ids.phy, sectionId: ids.phyC, name: "N", email: "n@test.local" }), forbidden);
+  // A head may create a teacher from a section page — department faculty, in their own department only
+  // (college-setup.department-faculty.integration.test.ts) — so another department's section is refused.
+  await assert.rejects(() => college.inviteTeacherForCourseSection(hod(), { ...me, name: "N", email: "n@test.local" }), refused(/not part of this college/));
   // The institution-wide screens refuse the head outright.
   await assert.rejects(() => listStudentsForRequest(hod(), { q: "", status: "ACTIVE", cohortId: "", campusId: "", sort: "name_asc", page: 1 } as never), forbidden);
   await assert.rejects(() => enrollStudentInCohortForRequest(hod(), { studentId: "x", cohortId: ids.mecA }), forbidden);

@@ -113,7 +113,7 @@ export default async function DepartmentFacultyPage({ params, searchParams }: Pa
             </Link>
           }
         >
-          <AddFacultyForm departmentId={department.id} facultyHref={here} />
+          <AddFacultyForm departmentId={department.id} facultyHref={here} departmentFaculty={!isAdmin} />
         </Panel>
       ) : null}
 
@@ -183,6 +183,7 @@ export default async function DepartmentFacultyPage({ params, searchParams }: Pa
                         {person.name}
                       </Link>
                       {person.isHead ? <Badge tone="info">Head of department</Badge> : null}
+                      {person.departmentFaculty ? <Badge tone="neutral">Department faculty</Badge> : null}
                       {!person.member ? <Badge tone="neutral">From another department</Badge> : null}
                       {person.status === "ACTIVE" ? (
                         <Badge tone="positive">Active</Badge>

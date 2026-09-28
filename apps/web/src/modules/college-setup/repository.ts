@@ -1,5 +1,7 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { findRoleForKey } from "@/modules/faculty/directory-repository";
+import { DEPARTMENT_FACULTY_ROLE_KEY } from "@/modules/faculty/directory-types";
 import { TEACHING_PERMISSION } from "@/modules/school-setup/repository";
 import { ELIGIBLE_TEMPLATE_WHERE } from "@/modules/recognition-results/eligibility";
 import type { SessionChoice } from "./types";
@@ -25,6 +27,13 @@ export const HOD_ROLE_KEY = "HOD";
 /** The staff roles a head of department's own role replaces, and the one it gives back. */
 export const STAFF_ROLE_KEYS = ["FACULTY", "CLASS_TEACHER", "ATTENDANCE_OPERATOR"] as const;
 export const RESTORED_ROLE_KEY = "FACULTY";
+
+/**
+ * The role of a teacher a head of department adds: it teaches its own
+ * department's sections and reads nothing college-wide. Not among the roles a
+ * head's role replaces — such an account is never made a head.
+ */
+export { DEPARTMENT_FACULTY_ROLE_KEY };
 
 /**
  * Serialises structural changes to one college's academic setup — the
@@ -256,27 +265,34 @@ export async function getPerson(db: Db, institutionId: string, id: string): Prom
   return db.user.findFirst({ where: { institutionId, id }, select: PERSON_SELECT });
 }
 
+/** A teacher with their department and roles — which say whether they are a head's department faculty. */
+const TEACHER_SELECT = {
+  id: true,
+  name: true,
+  email: true,
+  departmentId: true,
+  roleAssignments: { select: { role: { select: { key: true } } } },
+} satisfies Prisma.UserSelect;
+
+export type TeacherRow = Prisma.UserGetPayload<{ select: typeof TEACHER_SELECT }>;
+
 /**
  * Active staff at this college whose role lets them confirm a register — the
  * school screens' rule (`TEACHING_PERMISSION`), with the department attached —
  * and who are not students. `departmentId` narrows to one department.
  */
-export async function listEligibleTeachers(
-  db: Db,
-  institutionId: string,
-  departmentId?: string,
-): Promise<{ id: string; name: string; email: string; departmentId: string | null }[]> {
+export async function listEligibleTeachers(db: Db, institutionId: string, departmentId?: string): Promise<TeacherRow[]> {
   return db.user.findMany({
     where: { ...eligibleTeacherWhere(institutionId), ...(departmentId ? { departmentId } : {}) },
     orderBy: [{ name: "asc" }],
-    select: { id: true, name: true, email: true, departmentId: true },
+    select: TEACHER_SELECT,
   });
 }
 
-export async function findEligibleTeacher(db: Db, institutionId: string, userId: string) {
+export async function findEligibleTeacher(db: Db, institutionId: string, userId: string): Promise<TeacherRow | null> {
   return db.user.findFirst({
     where: { id: userId, ...eligibleTeacherWhere(institutionId) },
-    select: { id: true, name: true, email: true, departmentId: true },
+    select: TEACHER_SELECT,
   });
 }
 
@@ -299,6 +315,8 @@ function eligibleTeacherWhere(institutionId: string): Prisma.UserWhereInput {
  * Staff who could be made a department's head: able to teach, active, not a
  * student, and holding no administrator permission — an administrator
  * already runs every department, and a head's role would sit oddly beside it.
+ * Nor a teacher a head added to their department: that account's password
+ * was in a head's hands, so it is never made a head itself.
  */
 export async function listHeadCandidates(db: Db, institutionId: string) {
   return db.user.findMany({
@@ -306,7 +324,12 @@ export async function listHeadCandidates(db: Db, institutionId: string) {
       ...eligibleTeacherWhere(institutionId),
       NOT: {
         roleAssignments: {
-          some: { role: { permissions: { some: { permission: "academicStructure.manage" } } } },
+          some: {
+            OR: [
+              { role: { permissions: { some: { permission: "academicStructure.manage" } } } },
+              { role: { key: DEPARTMENT_FACULTY_ROLE_KEY } },
+            ],
+          },
         },
       },
     },
@@ -359,6 +382,18 @@ export async function holdsAdministratorRole(db: Db, userId: string): Promise<bo
     where: { userId, role: { permissions: { some: { permission: "academicStructure.manage" } } } },
   });
   return count > 0;
+}
+
+/**
+ * What the Faculty page's account service would grant for this role key —
+ * the very role it picks (`findRoleForKey`), read here so a check of what is
+ * granted is a check of what will be. Null if it is not set up yet.
+ */
+export async function grantedRolePermissions(institutionId: string, key: string): Promise<string[] | null> {
+  const role = await findRoleForKey(institutionId, key);
+  if (!role) return null;
+  const rows = await prisma.rolePermission.findMany({ where: { roleId: role.id }, select: { permission: true } });
+  return rows.map((row) => row.permission);
 }
 
 export async function findRoleByKey(db: Db, institutionId: string, key: string) {

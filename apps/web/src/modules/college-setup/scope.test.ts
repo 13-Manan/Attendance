@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { hasPermission } from "../authorization/service.ts";
-import { SYSTEM_ROLES } from "../authorization/permissions.ts";
+import { PERMISSIONS, SYSTEM_ROLES } from "../authorization/permissions.ts";
 import type { SessionUser } from "../auth-tenancy/types.ts";
+import { DEPARTMENT_FACULTY_ROLE_KEY, FACULTY_ROLE_KEYS } from "../faculty/directory-types.ts";
 import { decideCollegeScope, delegate } from "./scope.ts";
 
 const base = {
@@ -100,4 +101,33 @@ test("department.manage belongs to the HOD role and the platform role only", () 
     .map((role) => role.key)
     .sort();
   assert.deepEqual(holders, ["HOD", "PLATFORM_SUPER_ADMIN"]);
+});
+
+test("a head's teachers get the Department Faculty role: FACULTY's teaching, and nothing the head lacks", () => {
+  const role = SYSTEM_ROLES.find((candidate) => candidate.key === DEPARTMENT_FACULTY_ROLE_KEY);
+  assert.ok(role, "DEPARTMENT_FACULTY is a system role, so bootstrap:system creates it");
+  const granted = [...role.permissions].sort();
+  assert.deepEqual(granted, [
+    "attendanceRecord.correct",
+    "attendanceRecord.read",
+    "attendanceSession.capture",
+    "attendanceSession.create",
+    "attendanceSession.finalize",
+  ]);
+  const of = (key: string) => new Set<string>(SYSTEM_ROLES.find((candidate) => candidate.key === key)!.permissions);
+  // A head can grant it without granting anything they do not hold themselves...
+  for (const permission of granted) assert.ok(of("HOD").has(permission), `HOD must hold ${permission} to grant it`);
+  // ...and it is a strict narrowing of the ordinary teacher's role, never a widening.
+  for (const permission of granted) assert.ok(of("FACULTY").has(permission), `FACULTY holds ${permission} too`);
+  assert.ok(granted.length < of("FACULTY").size);
+  // Everything else in the catalogue is left out: the college-wide directories,
+  // every management, account, role, face and platform permission.
+  const excluded = PERMISSIONS.filter((permission) => !granted.includes(permission));
+  for (const forbidden of ["student.read", "cohort.read", "department.manage", "academicStructure.manage", "cohort.manage", "institution.read", "user.invite", "user.update", "user.deactivate", "role.assign", "role.read", "enrollment.manage", "student.create", "student.update", "faceEmbedding.manage", "auditLog.read", "platform.institution.create"]) {
+    assert.ok((excluded as readonly string[]).includes(forbidden), `DEPARTMENT_FACULTY must not hold ${forbidden}`);
+  }
+});
+
+test("the Faculty page cannot grant the Department Faculty role; only a head's department flow does", () => {
+  assert.equal((FACULTY_ROLE_KEYS as readonly string[]).includes(DEPARTMENT_FACULTY_ROLE_KEY), false);
 });

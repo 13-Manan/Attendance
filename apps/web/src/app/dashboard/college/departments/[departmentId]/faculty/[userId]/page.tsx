@@ -63,6 +63,7 @@ export default async function DepartmentFacultyMemberPage({ params }: PageProps)
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-xl font-semibold text-neutral-900">{person.name}</h1>
           {person.isHead ? <Badge tone="info">Head of department</Badge> : null}
+          {person.departmentFaculty ? <Badge tone="neutral">Department faculty</Badge> : null}
           {person.status === "ACTIVE" ? <Badge tone="positive">Active</Badge> : <Badge tone="danger">Disabled</Badge>}
         </div>
         <p className="break-all text-sm text-neutral-500">

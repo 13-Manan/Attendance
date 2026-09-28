@@ -185,7 +185,7 @@ export default async function CourseSectionPage({ params, searchParams }: PagePr
                 ids={ids}
                 teachers={teachers}
                 current={section.teacher}
-                canInvite={isAdmin && hasPermission(user, "user.invite")}
+                invite={isAdmin ? (hasPermission(user, "user.invite") ? "teacher" : null) : "department"}
               />
             ) : null}
           </dd>

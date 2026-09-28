@@ -31,6 +31,14 @@ export const FACULTY_ROLE_KEYS = ["FACULTY", "CLASS_TEACHER", "ATTENDANCE_OPERAT
 export type FacultyRoleKey = (typeof FACULTY_ROLE_KEYS)[number];
 
 /**
+ * The role of a teacher a college head of department adds to their own
+ * department. Never offered on this screen: it is granted only by
+ * `inviteDepartmentFaculty`, which the department's Faculty page calls. What
+ * it carries is in `SYSTEM_ROLES` — the teaching half of the head's own role.
+ */
+export const DEPARTMENT_FACULTY_ROLE_KEY = "DEPARTMENT_FACULTY";
+
+/**
  * Every role a staff account in an institution can hold — which is a longer
  * list than the three this screen may *grant*.
  *

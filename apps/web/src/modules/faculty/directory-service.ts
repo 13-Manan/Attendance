@@ -20,6 +20,7 @@ import {
   type FacultyFilters,
 } from "./directory-filters";
 import {
+  DEPARTMENT_FACULTY_ROLE_KEY,
   FacultyError,
   TEMP_PASSWORD_NOTICE,
   type FacultyDirectory,
@@ -269,14 +270,53 @@ export async function inviteFaculty(
   },
   overrides: FacultyDeps = {},
 ): Promise<InvitedFaculty> {
+  return createStaffAccount(actor, input, { role: validateFacultyRole, departmentRequired: false }, overrides);
+}
+
+/**
+ * A teacher a college head of department adds to their department: the same
+ * account as `inviteFaculty` makes — its validation, its duplicate-email
+ * check, its audit row and its one-time password — but always with the
+ * department-scoped teaching role and always in a department. Neither is the
+ * caller's to choose: this takes no role, and the college-setup service that
+ * calls it has already checked the department is the head's own.
+ */
+export async function inviteDepartmentFaculty(
+  actor: SessionUser,
+  input: { name: string; email: string; employeeCode?: string; departmentId: string },
+  overrides: FacultyDeps = {},
+): Promise<InvitedFaculty> {
+  return createStaffAccount(
+    actor,
+    { ...input, roleKey: DEPARTMENT_FACULTY_ROLE_KEY },
+    { role: () => DEPARTMENT_FACULTY_ROLE_KEY, departmentRequired: true },
+    overrides,
+  );
+}
+
+async function createStaffAccount(
+  actor: SessionUser,
+  input: {
+    name: string;
+    email: string;
+    employeeCode?: string;
+    departmentId?: string;
+    roleKey: string;
+  },
+  rules: { role: (raw: unknown) => string; departmentRequired: boolean },
+  overrides: FacultyDeps,
+): Promise<InvitedFaculty> {
   const d = deps(overrides);
   const institutionId = requireInstitution(actor, "user.invite");
 
   const name = validateFacultyName(input.name);
   const email = validateFacultyEmail(input.email);
   const employeeCode = validateEmployeeCode(input.employeeCode);
-  const roleKey = validateFacultyRole(input.roleKey);
+  const roleKey = rules.role(input.roleKey);
   const departmentId = await resolveDepartment(d, institutionId, input.departmentId ?? "");
+  if (rules.departmentRequired && departmentId === null) {
+    throw new FacultyError("Choose the department this teacher belongs to.");
+  }
 
   const existing = await d.findByEmail(email);
   if (existing) {

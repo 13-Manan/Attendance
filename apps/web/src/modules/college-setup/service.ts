@@ -14,6 +14,7 @@ import {
 import type { FaceCaptureSource, FaceEnrollmentResult } from "@/modules/face-enrollment/types";
 import {
   deactivateFaculty,
+  inviteDepartmentFaculty,
   inviteFaculty,
   reactivateFaculty,
   resetFacultyPassword,
@@ -126,8 +127,9 @@ import {
  * course, section, teacher, student — is checked to sit inside it, through
  * its parents, before anything is read or written. An id from another
  * department or another college reads as "not here", never as "not yours".
- * Creating departments, naming their heads and adding staff accounts are
- * administrator-only.
+ * Creating departments and naming their heads are administrator-only. A head
+ * adds teachers to their own department with the department-scoped teaching
+ * role (`DEPARTMENT_FACULTY`), which carries nothing the head does not hold.
  *
  * ## Students
  *
@@ -245,13 +247,29 @@ async function requireOpenSessionById(db: repo.Db, institutionId: string, sessio
 }
 
 /**
- * A teacher the actor may give a section to: active staff who can confirm a
- * register — and, for a head of department, a member of their department.
+ * A teacher a head of department added: the department-scoped teaching role
+ * and no college-wide one beside it. Such a teacher teaches only their own
+ * department's sections, whoever assigns them.
+ */
+function isDepartmentFaculty(person: { roleAssignments: readonly { role: { key: string } }[] }): boolean {
+  const keys = person.roleAssignments.map((assignment) => assignment.role.key);
+  return (
+    keys.includes(repo.DEPARTMENT_FACULTY_ROLE_KEY) &&
+    !keys.some((key) => (repo.STAFF_ROLE_KEYS as readonly string[]).includes(key))
+  );
+}
+
+/**
+ * A teacher the actor may give a section of `departmentId` to: active staff
+ * who can confirm a register — for a head of department, a member of their
+ * department; and a teacher a head added, only in the department they were
+ * added to, even when the Director is assigning them.
  */
 async function requireTeacher(
   db: repo.Db,
   scope: CollegeScope,
   userId: string,
+  departmentId: string,
 ): Promise<{ id: string; name: string }> {
   const id = userId.trim();
   if (id === "") throw new CollegeSetupError("Choose a teacher.");
@@ -271,6 +289,11 @@ async function requireTeacher(
   if (scope.kind === "hod" && teacher.departmentId !== scope.departmentId) {
     throw new CollegeSetupError(
       `${teacher.name} is not in your department. Ask the college administrator to add them to it first.`,
+    );
+  }
+  if (isDepartmentFaculty(teacher) && teacher.departmentId !== departmentId) {
+    throw new CollegeSetupError(
+      `${teacher.name} is faculty of another department and teaches only its sections. Move them to this department on the Faculty page first.`,
     );
   }
   return teacher;
@@ -530,7 +553,10 @@ export async function getSemesterDetail(
   };
 }
 
-/** Teachers a section of this department may be given, by who is asking. */
+/**
+ * Teachers a section of this department may be given, by who is asking — never
+ * another department's department faculty, whom `requireTeacher` would refuse.
+ */
 async function teacherChoices(scope: CollegeScope, departmentId: string): Promise<StaffChoice[]> {
   const rows = await repo.listEligibleTeachers(
     prisma,
@@ -538,6 +564,7 @@ async function teacherChoices(scope: CollegeScope, departmentId: string): Promis
     scope.kind === "hod" ? departmentId : undefined,
   );
   return rows
+    .filter((row) => row.departmentId === departmentId || !isDepartmentFaculty(row))
     .map((row) => ({ id: row.id, name: row.name, email: row.email, inDepartment: row.departmentId === departmentId }))
     .sort((a, b) => Number(b.inDepartment) - Number(a.inDepartment));
 }
@@ -1062,6 +1089,7 @@ function toFacultyRow(
     lastLoginAt: person.lastLoginAt,
     isHead: person.id === context.headId && isConsistentHead(person, context.department),
     member: context.member,
+    departmentFaculty: person.roleAssignments.some((assignment) => assignment.role.key === repo.DEPARTMENT_FACULTY_ROLE_KEY),
     manageable,
     enableable: manageable && (context.scope.kind === "admin" || context.deactivatedBy === context.viewer),
     sections: context.sections,
@@ -1348,6 +1376,13 @@ export async function assignDepartmentHead(
     if (await repo.holdsAdministratorRole(tx, teacher.id)) {
       throw new CollegeSetupError(
         `${teacher.name} is a college administrator and already manages every department. Choose a member of the teaching staff.`,
+      );
+    }
+    if (teacher.roleAssignments.some((assignment) => assignment.role.key === repo.DEPARTMENT_FACULTY_ROLE_KEY)) {
+      // A head saw this account's password when they added it, so it never
+      // heads a department — its own or another.
+      throw new CollegeSetupError(
+        `${teacher.name} was added by a head of department as department faculty, so their account can't head a department. Create a new account for the head instead.`,
       );
     }
     const role = await repo.findRoleByKey(tx, scope.institutionId, repo.HOD_ROLE_KEY);
@@ -2001,7 +2036,7 @@ export async function addCourseSections(
 
   return prisma.$transaction(async (tx) => {
     await repo.lockCollegeSetup(tx, scope.institutionId);
-    const { course } = await requireChain(tx, scope, input);
+    const { department, course } = await requireChain(tx, scope, input);
     if (!course!.code) {
       throw new CollegeSetupError(`Give ${course!.name} a course code first: it is what its registers show.`);
     }
@@ -2023,7 +2058,7 @@ export async function addCourseSections(
     }
     const teachers = new Map<string, { id: string; name: string }>();
     for (const id of teacherIds) {
-      if (id && !teachers.has(id)) teachers.set(id, await requireTeacher(tx, scope, id));
+      if (id && !teachers.has(id)) teachers.set(id, await requireTeacher(tx, scope, id, department.id));
     }
 
     const subject = await courseSubject(tx, actor, scope.institutionId, { code: course!.code, name: course!.name });
@@ -2243,10 +2278,10 @@ export async function setCourseSectionTeacher(
 
   return prisma.$transaction(async (tx) => {
     await repo.lockCollegeSetup(tx, scope.institutionId);
-    const { course } = await requireChain(tx, scope, input);
+    const { department, course } = await requireChain(tx, scope, input);
     const { group, session } = await requireSectionOf(tx, scope, course!, input.sectionId);
     requireOpenSession(session);
-    const teacher = await requireTeacher(tx, scope, input.teacherId);
+    const teacher = await requireTeacher(tx, scope, input.teacherId, department.id);
 
     const primaries = group.facultyLinks.filter((link) => link.role === "PRIMARY");
     const others = primaries.filter((link) => link.user.id !== teacher.id);
@@ -2313,29 +2348,31 @@ export async function removeCourseSectionTeacher(
 }
 
 /**
- * A new teacher's account, given this section — administrators only, since it
- * creates a login. The account comes from `inviteFaculty`, in the section's
- * department with the teaching role; if the section cannot then be assigned,
- * the password is still returned, because it is the only time it can be shown.
+ * A new teacher's account, given this section: made by `addDepartmentFaculty`
+ * — the department Faculty page's own path — in the section's department, so
+ * a head of department's new teacher is department faculty and an
+ * administrator's an ordinary teacher. The section is then assigned as its
+ * own page assigns it, checked against the teacher the page showed. If that
+ * fails, the password is still returned, because it is the only time it can
+ * be shown.
  */
 export async function inviteTeacherForCourseSection(
   actor: SessionUser,
-  input: SectionIds & { name: string; email: string; employeeCode?: string },
+  input: SectionIds & { name: string; email: string; employeeCode?: string; expectedTeacherId?: string },
 ): Promise<{ invited: InvitedFaculty; assignError: string | null }> {
-  const scope = await requireCollegeAdmin(actor, ["cohort.manage", "user.invite"]);
+  const scope = await resolveCollegeScope(actor, ["cohort.manage", "user.invite"]);
   const { department, course } = await requireChain(prisma, scope, input);
   const { session } = await requireSectionOf(prisma, scope, course!, input.sectionId);
   requireOpenSession(session);
 
-  const invited = await inviteFaculty(actor, {
+  const invited = await addDepartmentFaculty(actor, {
+    departmentId: department.id,
     name: input.name,
     email: input.email,
     employeeCode: input.employeeCode,
-    departmentId: department.id,
-    roleKey: repo.RESTORED_ROLE_KEY,
   });
   try {
-    await setCourseSectionTeacher(actor, { ...input, teacherId: invited.member.id });
+    await setCourseSectionTeacher(actor, { ...input, teacherId: invited.member.id, expectedTeacherId: input.expectedTeacherId });
     return { invited, assignError: null };
   } catch (error) {
     return {
@@ -2678,25 +2715,54 @@ export async function getDepartmentFacultyMember(
   };
 }
 
+const DEPARTMENT_FACULTY_NOT_SET_UP =
+  "The Department Faculty role is not set up in this system yet. Ask the platform administrator to run the " +
+  "system role sync (bootstrap:system), then try again.";
+
+/**
+ * Before a head of department grants the department-scoped teaching role:
+ * everything it carries must be something the head holds themselves, as
+ * role-management requires of any grant. The head sees the new account's
+ * password once, so an account granted more than the head holds would be a
+ * way for the head to hold more. Read from the database each time — a role's
+ * grants are data — so a role edited there is refused, not granted.
+ */
+async function requireGrantableByHead(actor: SessionUser, institutionId: string): Promise<void> {
+  const granted = await repo.grantedRolePermissions(institutionId, repo.DEPARTMENT_FACULTY_ROLE_KEY);
+  if (!granted) throw new CollegeSetupError(DEPARTMENT_FACULTY_NOT_SET_UP);
+  const held = new Set<string>(actor.roles.flatMap((role) => role.permissions));
+  if (granted.some((permission) => !held.has(permission))) {
+    throw new CollegeSetupError(
+      "The Department Faculty role grants more than a head of department holds, so it can't be granted from here. " +
+        "Ask the platform administrator to run the system role sync (bootstrap:system).",
+    );
+  }
+}
+
 /**
  * Adds a member of staff to this department through the Faculty page's own
  * account service — its validation, its duplicate-email check, its audit row
- * and its one-time password. The department is the one checked here and the
- * role is always the teaching one: a head of department adds teachers to
- * their own department, never an administrator and never to anyone else's.
+ * and its one-time password. The department is the one checked here, never
+ * the one a form sends. A head of department's new teacher gets the
+ * department-scoped teaching role, which carries nothing the head does not
+ * hold; the role is fixed here, so no form can ask for another. An
+ * administrator adding a teacher from the same page makes an ordinary
+ * teacher, as the Faculty page does.
  */
 export async function addDepartmentFaculty(
   actor: SessionUser,
   input: { departmentId: string; name: string; email: string; employeeCode?: string },
 ): Promise<InvitedFaculty> {
   const { scope, department } = await requireDepartmentForChange(actor, input.departmentId, ["user.invite"]);
-  return inviteFaculty(callerFor(actor, scope, ["user.invite"]), {
+  const account = {
     name: input.name,
     email: input.email,
     employeeCode: input.employeeCode,
     departmentId: department.id,
-    roleKey: repo.RESTORED_ROLE_KEY,
-  });
+  };
+  if (scope.kind === "admin") return inviteFaculty(actor, { ...account, roleKey: repo.RESTORED_ROLE_KEY });
+  await requireGrantableByHead(actor, scope.institutionId);
+  return inviteDepartmentFaculty(callerFor(actor, scope, ["user.invite"]), account);
 }
 
 /** A department member's name and faculty ID. Their email — what they sign in with — and department stay. */

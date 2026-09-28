@@ -96,9 +96,10 @@ const FACULTY_PERMISSIONS: PermissionKey[] = [
 ];
 
 // The 8 roles the product requires "at minimum," plus a college's Head of
-// Department. Role NAMES are configurable per institution (Role.name can be
-// edited); these keys and their default permission sets are the seeded
-// starting point. See docs/adr/0006. A database only gains a role added here
+// Department and the teachers a head adds. Role NAMES are configurable per
+// institution (Role.name can be edited); these keys and their default
+// permission sets are the seeded starting point. See docs/adr/0006. A
+// database only gains a role added here
 // when `ensureSystemRolesAndPermissions` runs against it — `npm run prisma:seed`
 // locally, `bootstrap:system` anywhere else (docs/DATABASE_OPERATIONS.md §4.2).
 export const SYSTEM_ROLES: SystemRoleDefinition[] = [
@@ -145,6 +146,37 @@ export const SYSTEM_ROLES: SystemRoleDefinition[] = [
     name: "Head of Department",
     permissions: [
       "department.manage",
+      "attendanceSession.create",
+      "attendanceSession.capture",
+      "attendanceSession.finalize",
+      "attendanceRecord.correct",
+      "attendanceRecord.read",
+    ],
+  },
+  {
+    // A teacher a college head of department adds to their own department.
+    // The account's password is shown to that head, so the role must carry
+    // nothing the head does not hold — otherwise a head could make an account
+    // for themselves and sign in with more than their own. It is FACULTY's
+    // teaching and nothing else:
+    //   - attendanceSession.create   open a register for a section they teach
+    //   - attendanceSession.capture  photograph it, run recognition, offline capture
+    //   - attendanceSession.finalize confirm the register they taught, as FACULTY does
+    //   - attendanceRecord.correct   mark a student while reviewing it
+    //   - attendanceRecord.read      the review screen, their sessions, their reports,
+    //                                and the Overview (without it the dashboard sends
+    //                                a user to the student portal)
+    // Left out on purpose: `student.read` and `cohort.read`, the college-wide
+    // student and class directories — none of the teaching screens reads
+    // through them; each checks the teacher's own section links instead. So
+    // what they can reach is the sections they are given, and only their head
+    // (within the department) or the Director can give them one. No account,
+    // structure, face, role or department permission. Granted only by
+    // modules/college-setup when a head adds a teacher; a Director-created
+    // teacher stays FACULTY.
+    key: "DEPARTMENT_FACULTY",
+    name: "Department Faculty",
+    permissions: [
       "attendanceSession.create",
       "attendanceSession.capture",
       "attendanceSession.finalize",

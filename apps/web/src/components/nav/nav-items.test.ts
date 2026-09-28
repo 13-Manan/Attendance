@@ -299,6 +299,18 @@ test("a college teacher's sidebar is as it was, and a school's has no college li
   }
 });
 
+test("a head's department faculty get the teaching links and nothing else: no Students, no Faculty, no setup", () => {
+  const sections = buildNavSections(role("DEPARTMENT_FACULTY"), "COLLEGE");
+  assert.deepEqual(hrefs(sections), [
+    "/dashboard",
+    "/dashboard/attendance",
+    "/dashboard/attendance/sessions",
+    "/dashboard/offline",
+    "/dashboard/reports",
+  ]);
+  assert.deepEqual(navClaims(role("DEPARTMENT_FACULTY"), "COLLEGE"), {});
+});
+
 test("the order moves links, never access: every role sees exactly what its permissions allow", () => {
   // Worked out from the item list alone, without any grouping or ordering:
   // if the setup order ever offered a page a role may not open, or hid one it

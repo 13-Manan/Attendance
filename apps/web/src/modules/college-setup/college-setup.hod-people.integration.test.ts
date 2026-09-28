@@ -390,8 +390,8 @@ test("2. the head adds a teacher to their department through the Faculty page's 
   });
   assert.deepEqual(
     [row.institutionId, row.departmentId, row.status, row.roleAssignments.map((assignment) => assignment.role.key)],
-    [A, ids.cse, "ACTIVE", ["FACULTY"]],
-    "in this college and this department, with the teaching role and nothing more",
+    [A, ids.cse, "ACTIVE", ["DEPARTMENT_FACULTY"]],
+    "in this college and this department, with the department's teaching role and nothing more",
   );
 
   // The password is handed back once; what is kept is a hash of it, and it is nowhere else.
@@ -597,7 +597,15 @@ test("8. the Director's faculty tools are unchanged, and see what the head did",
 
   // The Director may add to any department, and give a section to a teacher of another department.
   const invited = await college.addDepartmentFaculty(admin(), { departmentId: ids.me, name: "Kiran Rao", email: "hp-it-kiran@test.local" });
-  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: invited.member.id } })).departmentId, ids.me);
+  const kiran = await prisma.user.findUniqueOrThrow({
+    where: { id: invited.member.id },
+    select: { departmentId: true, roleAssignments: { select: { role: { select: { key: true } } } } },
+  });
+  assert.deepEqual(
+    [kiran.departmentId, kiran.roleAssignments.map((assignment) => assignment.role.key)],
+    [ids.me, ["FACULTY"]],
+    "the Director's new teacher is an ordinary teacher, as before",
+  );
   await college.assignFacultyToSection(admin(), { departmentId: ids.me, userId: TA, sectionId: ids.mecA, expectedTeacherId: TM });
   assert.deepEqual(await teachersOf(ids.mecA), [{ userId: TA, role: "PRIMARY" }]);
   await college.assignFacultyToSection(admin(), { departmentId: ids.me, userId: TM, sectionId: ids.mecA, expectedTeacherId: TA });

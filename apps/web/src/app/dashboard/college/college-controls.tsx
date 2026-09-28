@@ -1015,14 +1015,18 @@ export function TeacherEditor({
   ids,
   teachers,
   current,
-  canInvite = false,
+  invite = null,
   compact = false,
 }: {
   ids: SectionIds;
   teachers: readonly StaffChoice[];
   current: SectionTeacher | null;
-  /** An administrator may also create a new teacher's account from here. */
-  canInvite?: boolean;
+  /**
+   * Whether a new teacher's account can be made from here too, and which: an
+   * administrator's ordinary teacher, or a head of department's department
+   * faculty. Either way the server decides the role, not this.
+   */
+  invite?: "teacher" | "department" | null;
   /**
    * On a course's section card: only "Assign teacher", for a section that
    * needs one, and the choice alone — no removal, no new account. The card
@@ -1047,13 +1051,13 @@ export function TeacherEditor({
         <div className="flex flex-col gap-3 rounded-md border border-neutral-200 bg-neutral-50 p-3">
           <SectionTeacherForm ids={ids} teachers={teachers} currentId={current?.userId ?? null} />
           {!compact && current ? <RemoveSectionTeacherButton ids={ids} /> : null}
-          {!compact && canInvite ? (
+          {!compact && invite ? (
             <details className="rounded-md border border-neutral-200 bg-white p-3">
               <summary className="cursor-pointer text-sm font-medium text-neutral-900">
                 Or create a new teacher&apos;s account for this section
               </summary>
               <div className="mt-3">
-                <InviteSectionTeacherForm ids={ids} />
+                <InviteSectionTeacherForm ids={ids} current={current} departmentFaculty={invite === "department"} />
               </div>
             </details>
           ) : null}
@@ -1100,13 +1104,23 @@ export function RemoveSectionTeacherButton({ ids }: { ids: SectionIds }) {
   );
 }
 
-export function InviteSectionTeacherForm({ ids }: { ids: SectionIds }) {
+export function InviteSectionTeacherForm({
+  ids,
+  current,
+  departmentFaculty,
+}: {
+  ids: SectionIds;
+  /** The teacher on screen, whom the new account replaces; checked again on the server. */
+  current: SectionTeacher | null;
+  /** A head of department's new teacher: department faculty, not a college-wide teacher. */
+  departmentFaculty: boolean;
+}) {
   const [state, formAction, pending] = useActionState(inviteSectionTeacherAction, initialState);
   const key = state.attempt ?? 0;
   const id = useId();
   return (
     <form action={formAction} className="flex flex-col gap-3">
-      <Hidden ids={ids} />
+      <Hidden ids={{ ...ids, expectedTeacherId: current?.userId ?? "" }} />
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Full name" htmlFor={`${id}-name`}>
           <Input key={`name-${key}`} id={`${id}-name`} name="name" required defaultValue={state.values?.name ?? ""} />
@@ -1126,6 +1140,13 @@ export function InviteSectionTeacherForm({ ids }: { ids: SectionIds }) {
           <Input key={`code-${key}`} id={`${id}-code`} name="employeeCode" defaultValue={state.values?.employeeCode ?? ""} />
         </Field>
       </div>
+      {departmentFaculty || current ? (
+        <p className="text-xs text-neutral-500">
+          {departmentFaculty ? "They join this department as department faculty: they teach its sections and nothing else." : ""}
+          {departmentFaculty && current ? " " : ""}
+          {current ? `The new account takes this section over from ${current.name}.` : ""}
+        </p>
+      ) : null}
       <div>
         <Button type="submit" variant="secondary" disabled={pending}>
           {pending ? "Creating…" : "Create account and assign"}
@@ -1299,10 +1320,13 @@ export function RemoveStudentButton({
 export function AddFacultyForm({
   departmentId,
   facultyHref,
+  departmentFaculty,
 }: {
   departmentId: string;
   /** The department's faculty page; one person's page is below it — the next step offered once they exist. */
   facultyHref: string;
+  /** A head of department adding a teacher: department faculty, not a college-wide teacher. */
+  departmentFaculty: boolean;
 }) {
   const [state, formAction, pending] = useActionState(addFacultyAction, initialState);
   const key = state.attempt ?? 0;
@@ -1345,7 +1369,9 @@ export function AddFacultyForm({
         </Field>
       </div>
       <p className="text-xs text-neutral-500">
-        They join this department as a teacher, with a password shown once below.
+        {departmentFaculty
+          ? "They join this department as department faculty — they teach its sections and nothing else — with a password shown once below."
+          : "They join this department as a teacher, with a password shown once below."}
       </p>
       <div>
         <Button type="submit" disabled={pending}>

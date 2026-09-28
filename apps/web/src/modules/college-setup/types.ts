@@ -337,6 +337,8 @@ export interface DepartmentFacultyRow {
   isHead: boolean;
   /** Whether this person's department is this one, or they only teach one of its sections. */
   member: boolean;
+  /** A teacher a head of department added: teaches this department's sections and reads nothing college-wide. */
+  departmentFaculty: boolean;
   /**
    * Whether the viewer may edit this person, stop or restore their access, and
    * give them sections: a member of the department who is not a college

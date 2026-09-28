@@ -543,6 +543,8 @@ export async function inviteSectionTeacherAction(
     const { invited, assignError } = await inviteTeacherForCourseSection(actor, {
       ...sectionIds(formData),
       ...values,
+      // The teacher the form showed: a section that has changed hands since is not given away blindly.
+      expectedTeacherId: formData.has("expectedTeacherId") ? text(formData, "expectedTeacherId") : undefined,
     });
     refresh();
     return {
