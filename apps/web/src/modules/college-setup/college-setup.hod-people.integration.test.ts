@@ -247,7 +247,8 @@ const newStudent = (studentCode: string, firstName: string, lastName: string, ad
   studentCode,
   firstName,
   lastName,
-  email: "",
+  // A new student is admitted with their Student Portal login, which needs a college email.
+  email: `hp-it-${studentCode.toLowerCase()}@test.local`,
   phone: "",
   campusId: "",
   admissionNumber,
@@ -682,14 +683,18 @@ test("12. the head admits a new student through the student service, straight in
     { departmentId: ids.cse, sectionId: ids.cheB },
     newStudent("CSE010", "Neha", "Verma", "ADM-20"),
   );
-  ids.neha = created.id;
-  const row = await prisma.student.findUniqueOrThrow({ where: { id: created.id } });
-  assert.deepEqual([row.institutionId, row.studentCode, row.admissionNumber, row.status, row.userId], [A, "CSE010", "ADM-20", "ACTIVE", null]);
-  assert.equal((await enrolment(created.id, ids.cheB))?.status, "ACTIVE");
-  const detail = await college.getDepartmentStudent(hod(), ids.cse, created.id);
+  ids.neha = created.studentId;
+  const row = await prisma.student.findUniqueOrThrow({ where: { id: created.studentId } });
+  assert.deepEqual(
+    [row.institutionId, row.studentCode, row.admissionNumber, row.status, row.email],
+    [A, "CSE010", "ADM-20", "ACTIVE", "hp-it-cse010@test.local"],
+  );
+  assert.ok(row.userId, "admitted with their Student Portal login");
+  assert.equal((await enrolment(created.studentId, ids.cheB))?.status, "ACTIVE");
+  const detail = await college.getDepartmentStudent(hod(), ids.cse, created.studentId);
   assert.deepEqual(detail?.placements.map((placement) => placement.groupName), ["CHE402-B"], "their page opens on the section they joined");
-  const actions = (await prisma.auditLog.findMany({ where: { institutionId: A, actorUserId: HEAD, OR: [{ entityId: created.id }, { action: "enrollment.created" }] } }))
-    .filter((entry) => entry.entityId === created.id || (entry.afterJson as { studentId?: string }).studentId === created.id)
+  const actions = (await prisma.auditLog.findMany({ where: { institutionId: A, actorUserId: HEAD, OR: [{ entityId: created.studentId }, { action: "enrollment.created" }] } }))
+    .filter((entry) => entry.entityId === created.studentId || (entry.afterJson as { studentId?: string }).studentId === created.studentId)
     .map((entry) => entry.action)
     .sort();
   assert.deepEqual(actions, ["enrollment.created", "student.created"]);

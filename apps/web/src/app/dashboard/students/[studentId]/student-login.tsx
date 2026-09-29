@@ -12,6 +12,7 @@ import {
   type StudentLoginToggleState,
 } from "@/modules/students/directory-actions";
 import type { StudentLoginAccount } from "@/modules/students/login-provisioning";
+import { PortalPasswordReveal } from "@/components/account/portal-password-reveal";
 
 /**
  * The student's own way in — and their parents', on any device.
@@ -22,9 +23,12 @@ import type { StudentLoginAccount } from "@/modules/students/login-provisioning"
  * plainly what the account can and cannot reach.
  *
  * The student signs in with their student ID on the school's student sign-in
- * link; an email address is optional. A password is shown once, from the
- * action's return value. Reloading the page does not bring it back; there is
- * no stored copy to bring back, and no screen that can reveal the current one.
+ * link; an email address is optional. A new or reset password is shown once,
+ * from the action's return value, and is temporary: the student must choose
+ * their own at their first sign-in. Whoever may manage the login can also
+ * reveal the current password — whatever the student last chose — with "Show
+ * current password", which asks the server, is recorded, and is never part of
+ * this page.
  */
 
 const INITIAL: StudentLoginFormState = { error: null, issued: null };
@@ -39,6 +43,8 @@ interface Props {
   institutionId: string;
   /** When the login last signed in, formatted on the server like every other time on the record. */
   lastSignIn: string | null;
+  /** When the password was last set and by whom, formatted on the server; null if nothing records it. */
+  lastPasswordChange: string | null;
   canManage: boolean;
 }
 
@@ -58,6 +64,7 @@ export function StudentLogin({
   studentOnRoll,
   institutionId,
   lastSignIn,
+  lastPasswordChange,
   canManage,
 }: Props) {
   const [adding, setAdding] = useState(false);
@@ -93,7 +100,7 @@ export function StudentLogin({
           </div>
           <p className="text-xs text-emerald-900">{showIssued.notice}</p>
           <p className="text-xs text-emerald-900">
-            Once signed in, they can choose their own password under Account.
+            It is temporary: they must choose their own password the first time they sign in.
           </p>
           <div>
             <Button type="button" variant="secondary" onClick={() => setDismissed(showIssued.password)}>
@@ -157,11 +164,32 @@ export function StudentLogin({
                 {lastSignIn ?? <span className="text-neutral-400">Never</span>}
               </dd>
             </div>
+            <div className="flex flex-col gap-0.5">
+              <dt className="text-xs uppercase tracking-wide text-neutral-500">Password</dt>
+              <dd className="flex flex-wrap items-center gap-2">
+                {login.mustChangePassword ? (
+                  <>
+                    <Badge tone="warning">Temporary</Badge>
+                    <span className="text-xs text-neutral-500">They choose their own at next sign-in.</span>
+                  </>
+                ) : (
+                  <Badge tone="positive">Password set</Badge>
+                )}
+              </dd>
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <dt className="text-xs uppercase tracking-wide text-neutral-500">Last password change</dt>
+              <dd className="text-neutral-900">
+                {lastPasswordChange ?? <span className="text-neutral-400">Not recorded</span>}
+              </dd>
+            </div>
           </dl>
           <p className="text-xs text-neutral-500">
             Signs in to the student portal only — their own attendance and nothing else. The same
             student ID and password work on several phones and computers at once.
           </p>
+
+          {canManage ? <PortalPasswordReveal studentId={studentId} recoverable={login.passwordRecoverable} /> : null}
 
           {canManage ? (
             <div className="flex flex-wrap items-start gap-2">

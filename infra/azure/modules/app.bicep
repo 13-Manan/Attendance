@@ -115,6 +115,15 @@ var webSecrets = enableKeyVaultSecretRefs ? [
     keyVaultUrl: '${keyVaultUri}secrets/FACE-AI-SERVICE-TOKEN'
     identity: 'system'
   }
+  // The key student portal passwords are sealed under, so authorised staff
+  // can reveal a student's current one (apps/web/src/modules/auth-tenancy/
+  // student-password-keyring.ts). Its own secret — not AUTH-SECRET. The web
+  // app refuses to store or reveal a student password without it.
+  {
+    name: 'student-password-encryption-key'
+    keyVaultUrl: '${keyVaultUri}secrets/STUDENT-PASSWORD-ENCRYPTION-KEY'
+    identity: 'system'
+  }
 ] : []
 
 // Both Azure-backed backends need the endpoint and the key: one calls Detect
@@ -152,6 +161,10 @@ var webSecretEnv = enableKeyVaultSecretRefs ? [
   {
     name: 'FACE_AI_SERVICE_TOKEN'
     secretRef: 'face-ai-service-token'
+  }
+  {
+    name: 'STUDENT_PASSWORD_ENCRYPTION_KEY'
+    secretRef: 'student-password-encryption-key'
   }
 ] : []
 

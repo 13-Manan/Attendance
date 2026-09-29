@@ -27,6 +27,54 @@ Anything not in this table is another project's and is out of scope.
 
 ---
 
+## Before the first deploy with recoverable student passwords
+
+The release that adds `RecoverableStudentPassword` (migration
+`20260930120000_recoverable_student_password`) needs one new Key Vault secret,
+`STUDENT-PASSWORD-ENCRYPTION-KEY`, **before** it is pushed. The deploy workflow
+attaches a Key Vault reference to it on the web app; it does not, and cannot,
+create it — its identity has no vault access. Without the secret, the web
+deploy step fails and web stays on its previous revision.
+
+With a **Key Vault Secrets Officer** assignment on the vault:
+
+```sh
+# 1. Create it — 32 random bytes. --output none: the CLI would otherwise print it.
+az keyvault secret set --vault-name attendance-prod-keyvault \
+  --name STUDENT-PASSWORD-ENCRYPTION-KEY --value "$(openssl rand -base64 32)" \
+  --output none
+
+# 2. Confirm it exists — by name and state only, never by value.
+az keyvault secret show --vault-name attendance-prod-keyvault \
+  --name STUDENT-PASSWORD-ENCRYPTION-KEY --query "attributes.enabled" -o tsv
+
+# 3. Confirm the web app's identity can read it: its principal must hold
+#    Key Vault Secrets User on the vault (it already does for AUTH-SECRET).
+principal=$(az containerapp show -n attendance-prod-web -g attendance-production-rg \
+  --query "identity.principalId" -o tsv)
+az role assignment list --assignee "$principal" --all \
+  --query "[?roleDefinitionName=='Key Vault Secrets User'].scope" -o tsv
+```
+
+Then push. After the deploy, the web app's environment differs from the
+previous revision by exactly one variable, `STUDENT_PASSWORD_ENCRYPTION_KEY`
+(a `secretref`), and its secrets by exactly one reference,
+`student-password-encryption-key`. Compare names only:
+
+```sh
+az containerapp show -n attendance-prod-web -g attendance-production-rg \
+  --query "properties.template.containers[0].env[].name" -o tsv
+az containerapp secret list -n attendance-prod-web -g attendance-production-rg \
+  --query "[].name" -o tsv
+```
+
+**Never replace this secret's value.** Every stored student password was
+sealed under it; a new value makes all of them read as "not available" until
+each student is reset. A replacement key is a new key version
+(`modules/auth-tenancy/student-password-keyring.ts`).
+
+---
+
 ## Images
 
 Three images, each tagged with the **full Git commit SHA** and never `latest`:

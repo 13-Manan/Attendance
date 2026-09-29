@@ -1,4 +1,4 @@
-import { requireUser } from "@/modules/auth-tenancy/session";
+import { requireUserForPasswordChange } from "@/modules/auth-tenancy/session";
 import { hasPermission } from "@/modules/authorization/service";
 import { getStudentProfileByUserId } from "@/modules/attendance-analytics/repository";
 import { resolveSelfEnrollmentEnabled } from "@/modules/face-enrollment/policy";
@@ -16,7 +16,10 @@ import { portalLinks } from "@/components/portal/portal-links";
  * a different, minimal shell — no admin sidebar.
  */
 export default async function PortalLayout({ children }: { children: React.ReactNode }) {
-  const user = await requireUser();
+  // The lenient check: the password change is a portal page, and the shell
+  // has to render around it. Every portal page makes its own `requireUser`
+  // check, which sends a session that still owes a password change there.
+  const user = await requireUserForPasswordChange();
   // Same reason as the staff shell: a student should be able to see which
   // institution's record they are looking at, resolved from the server session
   // rather than anything the page was asked for.
@@ -24,6 +27,27 @@ export default async function PortalLayout({ children }: { children: React.React
     user.institutionId ? getInstitutionById(user.institutionId) : null,
     getStudentProfileByUserId(user.userId),
   ]);
+  const topbar = (
+    <Topbar
+      user={user}
+      institutionName={institution?.name ?? null}
+      // A student account is known by its student ID; its email may be a
+      // stand-in that means nothing to anyone.
+      accountLabel={student ? `Student account · ${student.studentCode}` : undefined}
+    />
+  );
+
+  // Until a password somebody else issued is replaced, the portal is that one
+  // page — no links to the rest, each of which would only lead back to it.
+  if (user.mustChangePassword) {
+    return (
+      <div className="flex min-h-screen flex-col">
+        {topbar}
+        <main className="flex-1 p-4 sm:p-6">{children}</main>
+      </div>
+    );
+  }
+
   const links = portalLinks({
     faceEnrollment:
       hasPermission(user, "faceEmbedding.enroll.own") &&
@@ -32,13 +56,7 @@ export default async function PortalLayout({ children }: { children: React.React
 
   return (
     <div className="flex min-h-screen flex-col">
-      <Topbar
-        user={user}
-        institutionName={institution?.name ?? null}
-        // A student account is known by its student ID; its email may be a
-        // stand-in that means nothing to anyone.
-        accountLabel={student ? `Student account · ${student.studentCode}` : undefined}
-      />
+      {topbar}
       {/* Scrolls sideways rather than wrapping or squashing once a phone runs
           out of width. */}
       <nav

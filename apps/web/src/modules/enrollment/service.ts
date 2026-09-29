@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { recordAuditLog } from "@/modules/audit/service";
 import { requirePermission, requireSameInstitution } from "@/modules/authorization/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
@@ -54,10 +55,7 @@ export async function enrollStudentInCohortForRequest(
   const cohort = await getCohort(input.cohortId);
   if (!cohort) throw new Error("cohort_not_found");
 
-  requireSameInstitution(actor, cohort.institutionId);
-  if (student.institutionId !== cohort.institutionId) {
-    throw new Error("cross_institution_enrollment");
-  }
+  requirePlaceable(actor, student, cohort);
 
   const upsertFn = deps.upsertEnrollment ?? upsertEnrollmentRepo;
   const enrollment = await upsertFn({
@@ -74,6 +72,60 @@ export async function enrollStudentInCohortForRequest(
     actorUserId: actor.userId,
     afterJson: enrollment,
   });
+  return enrollment;
+}
+
+/** The cross-institution guard both ways of placing a student pass. */
+function requirePlaceable(
+  actor: SessionUser,
+  student: { institutionId: string },
+  cohort: { institutionId: string },
+): void {
+  requireSameInstitution(actor, cohort.institutionId);
+  if (student.institutionId !== cohort.institutionId) {
+    throw new Error("cross_institution_enrollment");
+  }
+}
+
+/**
+ * `enrollStudentInCohortForRequest` inside a transaction the caller holds —
+ * the same permission, cross-institution guard, upsert and audit row — for a
+ * student admitted and placed in one step. Such a student exists only inside
+ * that transaction until it commits, so both rows are read through it.
+ */
+export async function enrollStudentInCohortWithin(
+  tx: Prisma.TransactionClient,
+  actor: SessionUser,
+  input: EnrollStudentInput,
+): Promise<Enrollment> {
+  requirePermission(actor, "enrollment.manage");
+
+  const student = await tx.student.findUnique({ where: { id: input.studentId }, select: { institutionId: true } });
+  if (!student) throw new Error("student_not_found");
+  const cohort = await tx.cohort.findUnique({ where: { id: input.cohortId }, select: { institutionId: true } });
+  if (!cohort) throw new Error("cohort_not_found");
+  requirePlaceable(actor, student, cohort);
+
+  const enrollment = await upsertEnrollmentRepo(
+    {
+      institutionId: cohort.institutionId,
+      studentId: input.studentId,
+      cohortId: input.cohortId,
+      status: input.status ?? "ACTIVE",
+    },
+    tx,
+  );
+  await recordAuditLog(
+    {
+      action: "enrollment.created",
+      entityType: "Enrollment",
+      entityId: enrollment.id,
+      institutionId: cohort.institutionId,
+      actorUserId: actor.userId,
+      afterJson: enrollment,
+    },
+    tx,
+  );
   return enrollment;
 }
 

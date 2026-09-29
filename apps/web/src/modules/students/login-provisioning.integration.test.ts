@@ -277,7 +277,7 @@ test("a reset refuses a student with no login", { skip: SKIP }, async () => {
 });
 
 test("reading a login is tenant-scoped and never returns a secret", { skip: SKIP }, async () => {
-  await mod.provisionStudentLogin(admin(), "slp-stu-1", { email: "read@student.test" });
+  const issued = await mod.provisionStudentLogin(admin(), "slp-stu-1", { email: "read@student.test" });
 
   const own = await mod.getStudentLogin(admin(), "slp-stu-1");
   assert.equal(own?.email, "read@student.test");
@@ -285,9 +285,20 @@ test("reading a login is tenant-scoped and never returns a secret", { skip: SKIP
   // the panel shows about a login, and never a password, hash or token.
   assert.equal(
     Object.keys(own!).sort().join(","),
-    "email,institutionId,lastLoginAt,loginId,status,studentOnRoll,userId",
+    "email,institutionId,lastLoginAt,lastPasswordChange,loginId,mustChangePassword,passwordRecoverable,status,studentOnRoll,userId",
   );
-  assert.ok(!/password|hash|token/i.test(JSON.stringify(own)), "a secret-shaped field was returned");
+  // Three fields are about the password — whether it is still the temporary
+  // one, when it was last set, and whether it can be revealed — and none can
+  // carry one: two booleans, and a date with who set it. Every other field is
+  // held to the old rule.
+  const { mustChangePassword, lastPasswordChange, passwordRecoverable, ...rest } = own!;
+  assert.equal(typeof mustChangePassword, "boolean");
+  assert.equal(passwordRecoverable, true);
+  assert.deepEqual(Object.keys(lastPasswordChange ?? {}).sort(), ["at", "by"]);
+  assert.ok(lastPasswordChange?.at instanceof Date);
+  assert.ok(!/password|hash|token/i.test(JSON.stringify(rest)), "a secret-shaped field was returned");
+  const returned = JSON.stringify(own);
+  assert.ok(!returned.includes(issued.password) && !returned.includes("scrypt$"), "a password or its hash was returned");
 
   const foreign = await mod.getStudentLogin(admin(), "slp-stu-x");
   assert.equal(foreign, null, "another institution's student must read as null");

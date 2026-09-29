@@ -20,13 +20,12 @@ import { requireUser } from "@/modules/auth-tenancy/session";
 import { ForbiddenError } from "@/modules/authorization/types";
 import type { FaceEnrollmentResult } from "@/modules/face-enrollment/types";
 import { FacultyError } from "@/modules/faculty/directory-types";
-import type { StudentActionState, StudentFormValues } from "@/modules/students/directory-actions";
+import type { StudentFormValues } from "@/modules/students/directory-actions";
 import { StudentError } from "@/modules/students/directory-types";
 import { sectionLabel } from "./policy";
 import {
   addCourseSections,
   addDepartmentFaculty,
-  addNewStudentToSection,
   addStudentToDepartmentSection,
   addStudentToSection,
   addStudentsToSection,
@@ -36,6 +35,7 @@ import {
   createDepartment,
   createDepartmentHead,
   createDepartmentStudent,
+  createDepartmentStudentLogin,
   createSemester,
   enrollDepartmentStudentFace,
   inviteTeacherForCourseSection,
@@ -48,6 +48,7 @@ import {
   removeStudentFromSection,
   renameCourseSection,
   resetDepartmentHeadPassword,
+  resetDepartmentStudentPassword,
   setCourseSectionTeacher,
   setCurrentSemester,
   setDepartmentFacultyActive,
@@ -581,29 +582,6 @@ function readStudentForm(formData: FormData): StudentFormValues {
 }
 
 /**
- * The existing Add student form, submitted from a section: the same fields,
- * checked by the same student service, and placed in this section only.
- */
-export async function addNewStudentToSectionAction(
-  prev: StudentActionState,
-  formData: FormData,
-): Promise<StudentActionState> {
-  const actor = await requireUser();
-  const ids = sectionIds(formData);
-  const values = readStudentForm(formData);
-  const attempt = (prev.attempt ?? 0) + 1;
-  let studentId: string;
-  try {
-    ({ id: studentId } = await addNewStudentToSection(actor, ids, values));
-  } catch (error) {
-    return { error: describe(error, "The student could not be added."), values, attempt };
-  }
-  // The section names the student from its own list, so the notice can only
-  // ever be about somebody who really is in it.
-  redirect(`${sectionPath(ids)}?added=${encodeURIComponent(studentId)}`);
-}
-
-/**
  * Adds one student chosen from the add-student search. The page it came from
  * shows the result — the search kept, the student now marked as in the
  * section — so several can be added one after another.
@@ -846,29 +824,122 @@ export async function removeStudentFromDepartmentSectionAction(
 }
 
 /**
- * The college's usual Add student form, submitted from the department with
- * the section the student joins first: created by the student service, placed
- * by it, and opened so the next step is right there.
+ * The new-student form's state. `created` is the only place a new student's
+ * temporary password exists once the request is over: in the browser that
+ * admitted them, until that page is left or Done is pressed.
+ */
+export interface NewStudentState {
+  error?: string;
+  /** What was typed, echoed back on a refusal so the form does not clear itself. */
+  values?: Record<string, string>;
+  attempt?: number;
+  created?: {
+    studentId: string;
+    name: string;
+    studentCode: string;
+    email: string;
+    password: string;
+    /** The student's page, where Done leads. */
+    href: string;
+  };
+}
+
+/**
+ * A new student and their Student Portal login, admitted from the
+ * department's Add student page or from a section's own — into the section
+ * chosen, which the service checks is the department's. The temporary
+ * password comes back in this response and nowhere else: not in a URL or a
+ * redirect, and not kept anywhere it could be read from again.
  */
 export async function createDepartmentStudentAction(
-  prev: StudentActionState,
+  prev: NewStudentState,
   formData: FormData,
-): Promise<StudentActionState> {
+): Promise<NewStudentState> {
   const actor = await requireUser();
-  const departmentId = text(formData, "departmentId");
+  const sectionId = text(formData, "sectionId");
   const values = readStudentForm(formData);
-  const attempt = (prev.attempt ?? 0) + 1;
-  let studentId: string;
+  const attempt = next(prev);
   try {
-    ({ id: studentId } = await createDepartmentStudent(
+    const admitted = await createDepartmentStudent(
       actor,
-      { departmentId, sectionId: text(formData, "sectionId") },
+      { departmentId: text(formData, "departmentId"), sectionId },
       values,
-    ));
+    );
+    return {
+      attempt,
+      created: {
+        studentId: admitted.studentId,
+        name: admitted.name,
+        studentCode: admitted.studentCode,
+        email: admitted.email,
+        password: admitted.password,
+        href: `${studentPath(admitted.departmentId, admitted.studentId)}?created=1`,
+      },
+    };
   } catch (error) {
-    return { error: describe(error, "The student could not be added."), values, attempt };
+    return { error: describe(error, "The student could not be added."), values: { ...values, sectionId }, attempt };
   }
-  redirect(`${studentPath(departmentId, studentId)}?created=1`);
+}
+
+/** Under every temporary password issued for a student here. */
+const STUDENT_PASSWORD_NOTE =
+  "Hand it over in person or by a channel you trust. The student must choose a new password when they first sign in. Their current password can be revealed later with Show current password on this page, and every reveal is recorded.";
+
+/**
+ * A Student Portal login for one of the department's students who has none,
+ * with the college email they will sign in with. The password is shown once.
+ */
+export async function createDepartmentStudentLoginAction(
+  prev: CollegeActionState,
+  formData: FormData,
+): Promise<CollegeActionState> {
+  const actor = await requireUser();
+  const email = text(formData, "email");
+  try {
+    const created = await createDepartmentStudentLogin(actor, {
+      departmentId: text(formData, "departmentId"),
+      studentId: text(formData, "studentId"),
+      email,
+    });
+    refresh();
+    return {
+      message: `${created.name} can now sign in to the Student Portal with ${created.email}.`,
+      password: created.password,
+      passwordLabel: `Temporary password for ${created.name} (student ID ${created.loginId})`,
+      passwordNote: STUDENT_PASSWORD_NOTE,
+      attempt: next(prev),
+    };
+  } catch (error) {
+    return { error: describe(error, "The login could not be created."), values: { email }, attempt: next(prev) };
+  }
+}
+
+/**
+ * A new temporary password for one of the department's students. The old one
+ * stops working at once and every device is signed out; the new one is shown
+ * once, and the student must replace it when they next sign in.
+ */
+export async function resetDepartmentStudentPasswordAction(
+  prev: CollegeActionState,
+  formData: FormData,
+): Promise<CollegeActionState> {
+  const actor = await requireUser();
+  try {
+    const issued = await resetDepartmentStudentPassword(actor, {
+      departmentId: text(formData, "departmentId"),
+      studentId: text(formData, "studentId"),
+    });
+    refresh();
+    return {
+      message: `${issued.name}'s old password has stopped working, and they have been signed out everywhere.`,
+      password: issued.password,
+      passwordLabel: `New temporary password for ${issued.name} (student ID ${issued.loginId})`,
+      passwordNote: STUDENT_PASSWORD_NOTE,
+      attempt: next(prev),
+    };
+  } catch (error) {
+    return { error: describe(error, "A new password could not be issued."), attempt: next(prev) };
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -197,7 +197,7 @@ Never permitted against production:
 
 ## Secrets
 
-Four secrets, all in Key Vault, all resolved by managed identity. None appear in
+Five secrets, all in Key Vault, all resolved by managed identity. None appear in
 git, in a Bicep file, in a `.bicepparam`, in a container image, or in logs.
 
 | Key Vault secret | Consumer |
@@ -206,16 +206,35 @@ git, in a Bicep file, in a `.bicepparam`, in a container image, or in logs.
 | `AUTH-SECRET` | web |
 | `API-KEY-PEPPER` | web |
 | `FACE-AI-SERVICE-TOKEN` | web (sends) **and** face-ai (verifies) |
+| `STUDENT-PASSWORD-ENCRYPTION-KEY` | web — `STUDENT_PASSWORD_ENCRYPTION_KEY` |
 
-The last one is a single shared value with two names — `FACE_AI_SERVICE_TOKEN`
-in `apps/web`, `FACE_AI_AUTH_TOKEN` in `services/face-ai` — on the two sides of
-the internal contract.
+`FACE-AI-SERVICE-TOKEN` is a single shared value with two names —
+`FACE_AI_SERVICE_TOKEN` in `apps/web`, `FACE_AI_AUTH_TOKEN` in
+`services/face-ai` — on the two sides of the internal contract.
+
+`STUDENT-PASSWORD-ENCRYPTION-KEY` is the AES-256-GCM key student portal
+passwords are sealed under so authorised staff can reveal a student's current
+one (docs/SECURITY.md). 32 random bytes, base64 — its own value, never a copy of
+`AUTH-SECRET`. Without it the web app refuses to create, reset or reveal a
+student password rather than store one it cannot protect. Never overwrite it
+with a new value: every stored student password would stop opening. A new key
+is a new key version (see `student-password-keyring.ts`). The deploy workflow
+attaches the reference to the web app; the secret itself is set once, here.
 
 Set them after deployment, never through a template parameter:
 
 ```sh
 az keyvault secret set --vault-name attendance-prod-keyvault \
   --name AUTH-SECRET --value "$(openssl rand -base64 32)"
+```
+
+The student password key is the same, with `--output none` so the CLI does not
+print the value it just set:
+
+```sh
+az keyvault secret set --vault-name attendance-prod-keyvault \
+  --name STUDENT-PASSWORD-ENCRYPTION-KEY --value "$(openssl rand -base64 32)" \
+  --output none
 ```
 
 > ⚠️ `production.bicepparam` reads the database password via

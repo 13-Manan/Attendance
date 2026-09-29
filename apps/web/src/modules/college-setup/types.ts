@@ -280,6 +280,46 @@ export const STUDENT_LOGIN_LABEL: Record<StudentLoginState, string> = {
   disabled: "Sign-in disabled",
 };
 
+/**
+ * A student's Student Portal account, as their department page shows it.
+ * Facts about the password — never the password, nor its hash.
+ */
+export interface DepartmentStudentLogin {
+  state: StudentLoginState;
+  /** Their student ID, which also signs in on the college's student link. */
+  loginId: string;
+  /** The address the account signs in with; null without an account, or for an account that has none. */
+  email: string | null;
+  /** The password is still a temporary one staff issued; the student is asked for a new one at sign-in. */
+  mustChangePassword: boolean;
+  /** When the password was last set, and whether staff issued it or the student chose it. */
+  lastPasswordChange: { at: Date; by: "staff" | "student" } | null;
+  lastLoginAt: Date | null;
+  /**
+   * Whether a recoverable copy of the current password exists for authorised
+   * staff to reveal on request — never the password itself, which no page
+   * carries. False for a login from before one was kept, until it is reset.
+   */
+  passwordRecoverable: boolean;
+  /**
+   * Whether the viewer may issue a new temporary password, reveal the current
+   * one, or create the login if there is none: a head of department for their
+   * department's current students, an administrator who may manage accounts.
+   */
+  canManage: boolean;
+}
+
+/** A student just admitted with their login. `password` is the temporary one, returned this once. */
+export interface AdmittedStudent {
+  studentId: string;
+  name: string;
+  studentCode: string;
+  /** The college email they sign in to the Student Portal with. */
+  email: string;
+  password: string;
+  departmentId: string;
+}
+
 /** One of the department's sections a student is in, as a list names it. */
 export interface StudentSectionRef {
   sectionId: string;
@@ -441,7 +481,7 @@ export interface DepartmentStudentDetail {
      */
     canEnroll: boolean;
   };
-  login: { state: StudentLoginState; loginId: string };
+  login: DepartmentStudentLogin;
   /** The department's sections this session, for "Add to section". */
   sectionChoices: StudentSectionChoice[];
 }

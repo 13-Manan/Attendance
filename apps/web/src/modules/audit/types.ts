@@ -13,6 +13,14 @@ export type AuditAction =
   // webhook cannot disagree about what happened.
   | "student.archived"
   | "student.restored"
+  // A student's current portal password shown to a member of staff who asked
+  // for it (modules/student-password-reveal) — written before it is shown,
+  // and a refused request. Both are required by the product: revealing a
+  // credential must be accountable. They record who asked, whose account and
+  // through which department, or why not — never the password, its hash, its
+  // ciphertext or the key.
+  | "student.password_viewed"
+  | "student.password_view_denied"
   // Phase 10 integration hub. Linking an external identifier is a change to
   // *who a record is* as far as another system is concerned, so it belongs in
   // the same trail as a role change rather than in integration logs only.

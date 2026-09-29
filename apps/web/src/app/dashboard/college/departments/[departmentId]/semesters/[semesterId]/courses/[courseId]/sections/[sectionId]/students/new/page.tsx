@@ -2,13 +2,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { hasPermission } from "@/modules/authorization/service";
-import { addNewStudentToSectionAction } from "@/modules/college-setup/actions";
 import { sectionFullName } from "@/modules/college-setup/policy";
 import { getSectionPlacement } from "@/modules/college-setup/service";
 import { getStudentFormOptionsForRequest } from "@/modules/students/directory-service";
 import { PageTrail } from "@/components/nav/page-trail";
 import { EmptyState } from "@/components/ui/panel";
-import { StudentForm } from "@/app/dashboard/students/student-form";
+import { NewStudentWithLoginForm } from "@/app/dashboard/college/new-student-form";
 import {
   COURSES_PATH,
   LINK_SECONDARY,
@@ -26,14 +25,14 @@ interface PageProps {
 }
 
 /**
- * Admit a new student straight into a course section.
+ * Admit a new student straight into a course section, with their Student
+ * Portal login.
  *
- * The college's usual Add student form — the same fields, checked by the same
- * student service with its duplicate-code check and audit rows — submitted to
- * an action that places the student in this section and nowhere else, then
- * returns to the section with the new student named. There is no class to
- * choose, so the list of every class in the college is never sent to the
- * browser.
+ * The same form as the department's Add student page — the student service's
+ * fields and checks, a required college email, the temporary password shown
+ * once — with this section fixed: there is no class to choose, so the list of
+ * every class in the college is never sent to the browser. Done opens the new
+ * student's page.
  */
 export default async function AddSectionStudentPage({ params }: PageProps) {
   const user = await requireUser();
@@ -79,8 +78,8 @@ export default async function AddSectionStudentPage({ params }: PageProps) {
           {session.name}).
         </p>
         <p className="max-w-xl text-sm text-neutral-500">
-          Only a name and a student ID are required. The student can be added to other courses&apos; sections
-          afterwards.
+          A name, a student ID and their college email are required — the email is how they sign in to the Student
+          Portal. They can be added to other courses&apos; sections afterwards.
         </p>
       </header>
 
@@ -99,17 +98,11 @@ export default async function AddSectionStudentPage({ params }: PageProps) {
       {!session.isActive ? (
         <EmptyState>{session.name} is archived, so students can&apos;t be added to its sections.</EmptyState>
       ) : (
-        <StudentForm
-          mode="create"
-          options={options}
-          canPlace={false}
-          action={addNewStudentToSectionAction}
-          hidden={{
-            departmentId: department.id,
-            semesterId: semester.id,
-            courseId: course.id,
-            sectionId: section.id,
-          }}
+        <NewStudentWithLoginForm
+          departmentId={department.id}
+          sections={[]}
+          fixedSection={{ sectionId: section.id, label: `${fullName} (${section.groupName}, ${session.name})` }}
+          campuses={options.campuses}
         />
       )}
     </div>

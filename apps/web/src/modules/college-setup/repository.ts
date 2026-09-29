@@ -544,7 +544,22 @@ export async function studentsCurrentlyIn(
 export async function getStudentDetail(db: Db, institutionId: string, studentId: string) {
   return db.student.findFirst({
     where: { id: studentId, institutionId },
-    select: { ...STUDENT_SELECT, email: true, phone: true, user: { select: { status: true } } },
+    select: {
+      ...STUDENT_SELECT,
+      email: true,
+      phone: true,
+      user: {
+        select: {
+          id: true,
+          email: true,
+          status: true,
+          lastLoginAt: true,
+          mustChangePassword: true,
+          // Whether one exists — its id, never its contents.
+          recoverablePassword: { select: { id: true } },
+        },
+      },
+    },
   });
 }
 

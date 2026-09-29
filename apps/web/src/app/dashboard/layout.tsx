@@ -1,4 +1,6 @@
+import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
+import { hasPermission } from "@/modules/authorization/service";
 import { getInstitutionIdentity } from "@/modules/institutions/repository";
 import { Breadcrumbs } from "@/components/nav/breadcrumbs";
 import { Sidebar } from "@/components/nav/sidebar";
@@ -10,6 +12,18 @@ export default async function DashboardLayout({ children }: LayoutProps<"/dashbo
   // only redirects on cookie presence as a UX nicety, this is what actually
   // enforces authentication (see ARCHITECTURE.md).
   const user = await requireUser();
+
+  // A student's account has no staff screen. `/dashboard` itself already sends
+  // one to the portal; this does the same for every page under it. It matters
+  // because the STUDENT role holds `cohort.read` for the portal's sake, which
+  // on its own opens the institution-wide class directory — and a student
+  // account a head of department created, and whose first password they were
+  // shown, must not open a directory the head's own role deliberately lacks.
+  // The same test as dashboard/page.tsx: only a student account reads its own
+  // attendance without reading anyone else's.
+  if (!hasPermission(user, "attendanceRecord.read") && hasPermission(user, "attendanceRecord.read.own")) {
+    redirect("/portal");
+  }
 
   // Two columns, so the sidebar can call a thing by the name this institution
   // uses for it and the topbar can say which institution that is. Deliberately

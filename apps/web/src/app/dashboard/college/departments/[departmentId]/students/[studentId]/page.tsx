@@ -4,13 +4,13 @@ import { requireUser } from "@/modules/auth-tenancy/session";
 import { hasPermission } from "@/modules/authorization/service";
 import { sectionFullName } from "@/modules/college-setup/policy";
 import { getDepartmentStudent } from "@/modules/college-setup/service";
-import { STUDENT_LOGIN_LABEL, type StudentLoginState } from "@/modules/college-setup/types";
 import { STUDENT_STATUS_LABEL } from "@/modules/students/directory-types";
 import { parseReturnPath } from "@/lib/return-path";
 import { PageTrail } from "@/components/nav/page-trail";
-import { Badge, type BadgeTone } from "@/components/ui/badge";
+import { Badge } from "@/components/ui/badge";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { RemovePlacementButton, StudentSectionForm } from "@/app/dashboard/college/college-controls";
+import { StudentAccountPanel } from "@/app/dashboard/college/student-account";
 import {
   LINK_PRIMARY,
   LINK_SECONDARY,
@@ -29,8 +29,6 @@ interface PageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
-const LOGIN_TONE: Record<StudentLoginState, BadgeTone> = { none: "neutral", enabled: "info", disabled: "danger" };
-
 /** A section page a student was opened from, which the way back can lead to. */
 const SECTION_ORIGIN =
   "/dashboard/college/departments/[departmentId]/semesters/[semesterId]/courses/[courseId]/sections/[sectionId]";
@@ -38,9 +36,11 @@ const SECTION_ORIGIN =
 /**
  * One of the department's students: who they are, the department's course
  * sections they are in this session and who teaches each, their face and
- * their sign-in — with adding them to another section, taking them out of
- * one, and enrolling their face, each through the service every other screen
- * uses. Only a student in one of this department's sections can be opened.
+ * their Student Portal account — with adding them to another section, taking
+ * them out of one, enrolling their face, and a new temporary password or a
+ * login, each through the service every other screen uses. Only a student in
+ * one of this department's sections can be opened. No password is ever read
+ * here: there is none to read.
  */
 export default async function DepartmentStudentPage({ params, searchParams }: PageProps) {
   const user = await requireUser();
@@ -124,8 +124,9 @@ export default async function DepartmentStudentPage({ params, searchParams }: Pa
 
       {created ? (
         <Notice>
-          {name} was added to the college{placements[0] ? ` and to ${sectionFullName(placements[0].course.name, placements[0].label)}` : ""}.
-          Next: enroll their face, and add them to their other courses below.
+          {name} was added to the college{placements[0] ? ` and to ${sectionFullName(placements[0].course.name, placements[0].label)}` : ""}
+          {login.state !== "none" ? ", with a Student Portal account" : ""}. Next: enroll their face, and add them to their
+          other courses below.
         </Notice>
       ) : null}
       {added ? <Notice>Added to {added}.</Notice> : null}
@@ -255,26 +256,34 @@ export default async function DepartmentStudentPage({ params, searchParams }: Pa
           </div>
         </Panel>
 
-        <Panel title="Sign-in" description="Students sign in with their student ID on the college's student link.">
-          <div className="flex flex-col gap-3 text-sm">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge tone={LOGIN_TONE[login.state]}>{STUDENT_LOGIN_LABEL[login.state]}</Badge>
-              {login.state !== "none" ? (
-                <span className="text-neutral-600">
-                  Signs in as <span className="font-mono text-neutral-900">{login.loginId}</span>
-                </span>
-              ) : null}
-            </div>
-            {canOpenRecord && hasPermission(user, "user.invite") ? (
-              <div>
-                <Link href={`/dashboard/students/${encodeURIComponent(student.studentId)}`} className={LINK_SECONDARY}>
-                  Manage sign-in on their record
-                </Link>
-              </div>
-            ) : (
-              <p className="text-neutral-600">Student sign-ins are created and reset by the college administrator.</p>
-            )}
-          </div>
+        <Panel
+          title="Student Portal account"
+          description="How they sign in to see their own attendance: with the email below, or their student ID on the college's student link."
+        >
+          <StudentAccountPanel
+            departmentId={department.id}
+            studentId={student.studentId}
+            studentName={name}
+            recordEmail={student.email}
+            onRoll={student.status === "ACTIVE"}
+            account={{
+              state: login.state,
+              loginId: login.loginId,
+              email: login.email,
+              mustChangePassword: login.mustChangePassword,
+              lastPasswordChange: login.lastPasswordChange
+                ? { at: MOMENT_FORMAT.format(login.lastPasswordChange.at), by: login.lastPasswordChange.by }
+                : null,
+              lastLoginAt: login.lastLoginAt ? MOMENT_FORMAT.format(login.lastLoginAt) : null,
+              passwordRecoverable: login.passwordRecoverable,
+              canManage: login.canManage,
+            }}
+            recordHref={
+              canOpenRecord && hasPermission(user, "user.invite")
+                ? `/dashboard/students/${encodeURIComponent(student.studentId)}`
+                : null
+            }
+          />
         </Panel>
       </div>
     </div>

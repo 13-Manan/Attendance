@@ -1,6 +1,7 @@
 "use server";
 
 import { z } from "zod";
+import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { hasPermission, isPlatformUser } from "@/modules/authorization/service";
@@ -11,8 +12,13 @@ import {
   logoutService,
   type LoginResult,
 } from "./service";
-import { DEFAULT_POST_LOGIN_PATH, safeNextPath } from "./redirect";
-import { SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS, requireUser } from "./session";
+import { DEFAULT_POST_LOGIN_PATH, afterSignInPath, safeNextPath } from "./redirect";
+import {
+  SESSION_COOKIE_NAME,
+  SESSION_COOKIE_OPTIONS,
+  requireUser,
+  requireUserForPasswordChange,
+} from "./session";
 import {
   SCHOOL_COOKIE_NAME,
   STUDENT_LOGIN_THROTTLE,
@@ -130,7 +136,7 @@ export async function login(prevState: LoginState, formData: FormData): Promise<
   (await cookies()).set(SESSION_COOKIE_NAME, result.rawToken, SESSION_COOKIE_OPTIONS);
   // Outside the try/catch above on purpose: redirect() signals by throwing,
   // and catching it here would turn a successful login into "unavailable".
-  redirect(next);
+  redirect(afterSignInPath(result.user.mustChangePassword, next));
 }
 
 /** How long a browser remembers the school it last signed a student in to. */
@@ -183,7 +189,7 @@ async function studentLogin(formData: FormData, school: string, attempt: number)
     ...SESSION_COOKIE_OPTIONS,
     maxAge: SCHOOL_COOKIE_MAX_AGE_SECONDS,
   });
-  redirect(next === DEFAULT_POST_LOGIN_PATH ? "/portal" : next);
+  redirect(afterSignInPath(result.user.mustChangePassword, next === DEFAULT_POST_LOGIN_PATH ? "/portal" : next));
 }
 
 export interface ChangePasswordState {
@@ -220,6 +226,40 @@ export async function changePasswordAction(
   });
   if (!result.ok) return { error: result.error, attempt };
   return { changed: { otherSessionsEnded: result.otherSessionsEnded }, attempt };
+}
+
+/**
+ * A password somebody else issued — a new student login, or a reset —
+ * replaced by the person it was issued to, on the page every other screen
+ * sends them to until they have. The same service, rules and audit row as the
+ * Account page's change (the issued password may not be kept, and stops
+ * working in the same write); then on into the portal.
+ */
+export async function replaceIssuedPasswordAction(
+  prevState: ChangePasswordState,
+  formData: FormData,
+): Promise<ChangePasswordState> {
+  const attempt = (prevState.attempt ?? 0) + 1;
+  const user = await requireUserForPasswordChange();
+  const home = hasPermission(user, "student.read.own") ? "/portal" : DEFAULT_POST_LOGIN_PATH;
+  // Nothing owed any more — replaced in another tab, say. The ordinary change
+  // lives under Account.
+  if (!user.mustChangePassword) redirect(home);
+
+  const rawToken = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
+  if (!rawToken) redirect("/login");
+
+  const result = await changeOwnPasswordService(user.userId, rawToken, {
+    current: String(formData.get("currentPassword") ?? ""),
+    next: String(formData.get("newPassword") ?? ""),
+    confirm: String(formData.get("confirmPassword") ?? ""),
+  });
+  if (!result.ok) return { error: result.error, attempt };
+  // The portal's layout was drawn as the bare shell a pending change gets; a
+  // redirect alone would keep it, since /portal shares that layout. This has
+  // it drawn again, with the portal's navigation, for the page it lands on.
+  revalidatePath("/portal", "layout");
+  redirect(home);
 }
 
 export async function logout(): Promise<void> {

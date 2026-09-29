@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { Enrollment, EnrollmentStatus } from "./types";
 
@@ -21,8 +22,12 @@ export interface UpsertEnrollmentData {
   status?: EnrollmentStatus;
 }
 
-export function upsertEnrollment(data: UpsertEnrollmentData): Promise<Enrollment> {
-  return prisma.enrollment.upsert({
+/** `db` is a transaction when the placement must commit with other writes. */
+export function upsertEnrollment(
+  data: UpsertEnrollmentData,
+  db: Prisma.TransactionClient = prisma,
+): Promise<Enrollment> {
+  return db.enrollment.upsert({
     where: { studentId_cohortId: { studentId: data.studentId, cohortId: data.cohortId } },
     create: {
       institutionId: data.institutionId,

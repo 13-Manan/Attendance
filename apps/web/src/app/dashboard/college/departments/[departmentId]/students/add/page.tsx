@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { hasPermission } from "@/modules/authorization/service";
-import { createDepartmentStudentAction } from "@/modules/college-setup/actions";
 import { MIN_STUDENT_SEARCH } from "@/modules/college-setup/policy";
 import {
   getDepartmentStudentPick,
@@ -15,12 +14,10 @@ import { STUDENT_STATUS_LABEL, type StudentFormOptions } from "@/modules/student
 import { PageTrail } from "@/components/nav/page-trail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { EmptyState, Panel } from "@/components/ui/panel";
-import { Select } from "@/components/ui/select";
-import { StudentForm } from "@/app/dashboard/students/student-form";
 import { StudentSectionForm } from "@/app/dashboard/college/college-controls";
+import { NewStudentWithLoginForm } from "@/app/dashboard/college/new-student-form";
 import {
   LINK_PRIMARY,
   LINK_SECONDARY,
@@ -43,9 +40,9 @@ const TAB_CURRENT =
  * Adding a student to the department, from the department: an existing
  * student of the college — found by student ID, name or admission number, then
  * placed in one of the department's course sections — or a new one, admitted
- * through the college's usual Add student form straight into the section
- * chosen on it. Either way the student's own page opens next, with their face
- * enrolment and their other courses a click away.
+ * with their Student Portal login straight into the section chosen, their
+ * temporary password shown once. Either way the student's own page opens
+ * next, with their face enrolment and their other courses a click away.
  */
 export default async function AddDepartmentStudentPage({ params, searchParams }: PageProps) {
   const user = await requireUser();
@@ -259,9 +256,9 @@ export default async function AddDepartmentStudentPage({ params, searchParams }:
 }
 
 /**
- * The college's usual Add student form — the same fields, checked by the same
- * student service — with the course section the new student joins first, from
- * this department only.
+ * A new student with their Student Portal login: the student service's
+ * fields and checks, the course section they join first — from this
+ * department only — and the college email they sign in with.
  */
 function NewStudent({
   departmentId,
@@ -284,24 +281,13 @@ function NewStudent({
     );
   }
   return (
-    <StudentForm
-      mode="create"
-      options={{ campuses, cohorts: [] }}
-      canPlace={false}
-      action={createDepartmentStudentAction}
-      hidden={{ departmentId }}
-      leading={
-        <Field label="Course and section they join" htmlFor="new-student-section">
-          <Select id="new-student-section" name="sectionId" required defaultValue="">
-            <option value="">Choose…</option>
-            {sections.map((section) => (
-              <option key={section.sectionId} value={section.sectionId}>
-                {section.course.name} — {section.label} ({section.groupName})
-              </option>
-            ))}
-          </Select>
-        </Field>
-      }
+    <NewStudentWithLoginForm
+      departmentId={departmentId}
+      sections={sections.map((section) => ({
+        sectionId: section.sectionId,
+        label: `${section.course.name} — ${section.label} (${section.groupName})`,
+      }))}
+      campuses={campuses}
     />
   );
 }

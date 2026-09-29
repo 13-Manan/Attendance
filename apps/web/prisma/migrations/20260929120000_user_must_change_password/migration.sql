@@ -1,0 +1,13 @@
+-- Whether an account's password was issued by somebody else — a new student
+-- login, or a reset by a college administrator or head of department — and
+-- still has to be replaced by its holder before the session reaches anything
+-- but the password change.
+--
+-- A flag, not a credential: the password itself is never stored, and only its
+-- scrypt hash is kept in "passwordHash" as before.
+--
+-- NOT NULL DEFAULT false. Every existing account gets false, so nobody who
+-- could sign in before this migration is asked to change their password
+-- because of it. On PostgreSQL 11+ a constant default is recorded in the
+-- catalogue rather than written to each row, so this does not rewrite "User".
+ALTER TABLE "User" ADD COLUMN "mustChangePassword" BOOLEAN NOT NULL DEFAULT false;

@@ -14,6 +14,22 @@
 export const DEFAULT_POST_LOGIN_PATH = "/dashboard";
 
 /**
+ * The one page a session can reach while its password is one somebody else
+ * issued — a new student login, or a reset — until its holder chooses their
+ * own (`SessionUser.mustChangePassword`).
+ */
+export const PASSWORD_CHANGE_PATH = "/portal/password";
+
+/**
+ * Where a sign-in that has just succeeded goes: to the password change when
+ * one is owed, ahead of wherever it was going — which the portal's own links
+ * reach once the password is the holder's — and otherwise straight there.
+ */
+export function afterSignInPath(mustChangePassword: boolean | undefined, destination: string): string {
+  return mustChangePassword ? PASSWORD_CHANGE_PATH : destination;
+}
+
+/**
  * Header the proxy uses to tell a Server Component which path is being
  * rendered, since there is no other way to ask.
  *

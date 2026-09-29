@@ -18,20 +18,32 @@ const ERROR_ID = "change-password-error";
  * The fields are remounted after every submission (the `attempt` key), so a
  * password never lingers in a box after the server has answered — right or
  * wrong, it has to be typed again.
+ *
+ * Also the form a student replaces a temporary password with, before the
+ * portal opens: the same fields and rules, another action, other words.
  */
 export function ChangePasswordForm({
   hint = "At least 8 characters. Not the same as the student ID.",
+  action = changePasswordAction,
+  currentLabel = "Current password",
+  submitLabel = "Change password",
+  pendingLabel = "Changing…",
 }: {
   /** The rule under the new-password box, in the words of whoever is signed in. */
   hint?: string;
+  /** The action the fields go to — the Account page's change, unless the page says otherwise. */
+  action?: (state: ChangePasswordState, formData: FormData) => Promise<ChangePasswordState>;
+  currentLabel?: string;
+  submitLabel?: string;
+  pendingLabel?: string;
 } = {}) {
-  const [state, formAction, pending] = useActionState(changePasswordAction, INITIAL);
+  const [state, formAction, pending] = useActionState(action, INITIAL);
   const attempt = state.attempt ?? 0;
   const invalid = Boolean(state.error);
 
   return (
     <form action={formAction} className="flex flex-col gap-4">
-      <Field label="Current password" htmlFor="currentPassword">
+      <Field label={currentLabel} htmlFor="currentPassword">
         <Input
           key={`current-${attempt}`}
           id="currentPassword"
@@ -99,7 +111,7 @@ export function ChangePasswordForm({
 
       <div>
         <Button type="submit" disabled={pending}>
-          {pending ? "Changing…" : "Change password"}
+          {pending ? pendingLabel : submitLabel}
         </Button>
       </div>
     </form>

@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/modules/audit/service";
 import { requirePermission, requireSameInstitution } from "@/modules/authorization/service";
@@ -72,29 +73,46 @@ export async function createStudent(
   input: CreateStudentInput,
   deps: StudentWebhookDeps = {},
 ): Promise<Student> {
+  const student = await prisma.$transaction((tx) => createStudentWithin(tx, actor, input));
+  announceStudentCreated(student, deps);
+  return student;
+}
+
+/**
+ * `createStudent`'s write — the same checks, the row and its audit row —
+ * inside a transaction the caller already holds, for a student created
+ * together with rows that must commit or fail with it: their class and their
+ * login, admitted in one step. The caller announces the student with
+ * `announceStudentCreated` once its transaction has committed, never inside it.
+ */
+export async function createStudentWithin(
+  tx: Prisma.TransactionClient,
+  actor: SessionUser,
+  input: CreateStudentInput,
+): Promise<Student> {
   requirePermission(actor, "student.create");
   requireSameInstitution(actor, input.institutionId);
 
-  const student = await prisma.$transaction(async (tx) => {
-    const student = await tx.student.create({ data: input });
+  const student = await tx.student.create({ data: input });
 
-    await recordAuditLog(
-      {
-        action: "student.created",
-        entityType: "Student",
-        entityId: student.id,
-        institutionId: input.institutionId,
-        actorUserId: actor.userId,
-        afterJson: student,
-      },
-      tx,
-    );
+  await recordAuditLog(
+    {
+      action: "student.created",
+      entityType: "Student",
+      entityId: student.id,
+      institutionId: input.institutionId,
+      actorUserId: actor.userId,
+      afterJson: student,
+    },
+    tx,
+  );
 
-    return student;
-  });
-
-  emitStudentEvent(deps, "student.created", student);
   return student;
+}
+
+/** The "student.created" webhook, for a student whose transaction has committed. */
+export function announceStudentCreated(student: Student, deps: StudentWebhookDeps = {}): void {
+  emitStudentEvent(deps, "student.created", student);
 }
 
 export interface UpdateStudentInput {

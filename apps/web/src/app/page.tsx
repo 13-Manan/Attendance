@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/modules/auth-tenancy/session";
+import { PASSWORD_CHANGE_PATH } from "@/modules/auth-tenancy/redirect";
+import { getCurrentUser, isPasswordChangePending } from "@/modules/auth-tenancy/session";
 
 /**
  * The application root.
@@ -43,7 +44,9 @@ export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
   const user = await getCurrentUser();
-  if (!user) redirect("/login");
+  // A student still holding a password somebody else issued is signed in for
+  // one thing only; they go back to it rather than to a sign-in form.
+  if (!user) redirect((await isPasswordChangePending()) ? PASSWORD_CHANGE_PATH : "/login");
   // `/dashboard` owns role dispatch (platform → /dashboard/platform,
   // student → /portal, institution admin / faculty → stay). Delegating
   // there keeps the ladder in one place; adding another role or renaming

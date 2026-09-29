@@ -12,7 +12,6 @@ import { getRollup, normalizeFilters } from "@/modules/attendance-reporting/serv
 import { enrollStudentInCohortForRequest } from "@/modules/enrollment/service";
 import { createStudentForRequest, listStudentsForRequest } from "@/modules/students/directory-service";
 import { StudentError } from "@/modules/students/directory-types";
-import { provisionStudentLogin } from "@/modules/students/login-provisioning";
 import { resolveCollegeScope } from "./scope.ts";
 import * as college from "./service.ts";
 import { CollegeSetupError } from "./types.ts";
@@ -276,11 +275,17 @@ test("students: admitted into a section, added to other courses by ID, removed w
   const cheB = { departmentId: ids.cse, semesterId: ids.s4, courseId: ids.che, sectionId: ids.cheB };
   const form = { email: "", phone: "", campusId: "", admissionNumber: "", admissionDate: "" };
 
-  const aman = await college.addNewStudentToSection(hod(), phyA, { ...form, studentCode: "CSE2601", firstName: "Aman", lastName: "Sharma" });
-  ids.aman = aman.id;
-  const placed = await prisma.enrollment.findUniqueOrThrow({ where: { studentId_cohortId: { studentId: aman.id, cohortId: ids.phyA } } });
+  const aman = await college.addNewStudentToSection(hod(), phyA, {
+    ...form,
+    email: "cs-it-cse2601@test.local",
+    studentCode: "CSE2601",
+    firstName: "Aman",
+    lastName: "Sharma",
+  });
+  ids.aman = aman.studentId;
+  const placed = await prisma.enrollment.findUniqueOrThrow({ where: { studentId_cohortId: { studentId: aman.studentId, cohortId: ids.phyA } } });
   assert.equal(placed.status, "ACTIVE");
-  const created = await prisma.auditLog.findFirstOrThrow({ where: { entityId: aman.id, action: "student.created" } });
+  const created = await prisma.auditLog.findFirstOrThrow({ where: { entityId: aman.studentId, action: "student.created" } });
   assert.equal(created.actorUserId, T2, "the student service's audit row, naming the head");
   // The head was lent the permission for that one call only.
   await assert.rejects(
@@ -299,15 +304,15 @@ test("students: admitted into a section, added to other courses by ID, removed w
   assert.deepEqual(first.skipped, ["No student has the ID NOPE9.", "Left Early (CSE2690) is not on roll."]);
   assert.deepEqual((await college.addStudentsToSection(hod(), cheB, "CSE2601")).skipped, ["Aman Sharma (CSE2601) is already in CHE402-B."]);
 
-  await college.removeStudentFromSection(hod(), cheB, aman.id);
-  const ended = await prisma.enrollment.findUniqueOrThrow({ where: { studentId_cohortId: { studentId: aman.id, cohortId: ids.cheB } } });
+  await college.removeStudentFromSection(hod(), cheB, aman.studentId);
+  const ended = await prisma.enrollment.findUniqueOrThrow({ where: { studentId_cohortId: { studentId: aman.studentId, cohortId: ids.cheB } } });
   assert.equal(ended.status, "INACTIVE");
   assert.ok(ended.unenrolledAt, "ended, not deleted");
   await college.addStudentsToSection(hod(), cheB, "CSE2601");
   await college.addStudentsToSection(hod(), { departmentId: ids.cse, semesterId: ids.s4, courseId: ids.mat, sectionId: ids.matA }, "CSE2601");
 
   const department = await college.getDepartmentStudents(hod(), ids.cse);
-  const row = department?.students.find((student) => student.studentId === aman.id);
+  const row = department?.students.find((student) => student.studentId === aman.studentId);
   assert.deepEqual(row?.sections.map((section) => section.groupName).sort(), ["CHE402-B", "MAT403-A", "PHY401-A"]);
   const phyB = { departmentId: ids.cse, semesterId: ids.s4, courseId: ids.phy, sectionId: ids.phyB };
   const offered = await college.searchStudentsForSection(hod(), phyB, "");
@@ -353,8 +358,9 @@ test("a college student's portal lists each course on its own, and agrees with t
   await register("cs-it-c1", ids.cheB, 10, "PRESENT");
   await register("cs-it-c2", ids.cheB, 11, "PRESENT");
 
-  await provisionStudentLogin(admin(), ids.aman, {});
+  // Aman was admitted with his Student Portal login, so there is no login to provision.
   const account = await prisma.student.findUniqueOrThrow({ where: { id: ids.aman }, select: { userId: true } });
+  assert.ok(account.userId, "admitted with a login");
   const view = await getStudentDashboard(actor(account.userId!, "STUDENT", A));
   assert.equal(view?.attendanceMode, "SUBJECT_WISE");
   assert.deepEqual(view?.overall, { present: 4, absent: 1, total: 5, percentage: 80 });

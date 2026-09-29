@@ -200,12 +200,20 @@ model User {
   departmentId  String?
   department    AcademicUnit? @relation(fields: [departmentId], references: [id])
   lastLoginAt   DateTime?
+  // True while the password is one somebody else issued — a new student
+  // login, or a reset — and its holder has not replaced it yet. Such a session
+  // reaches the password change and nothing else (auth-tenancy/session.ts);
+  // choosing a password clears it. A fact about the password, never the
+  // password: no column holds one in the clear. False by default, so no
+  // account that existed before this column is asked to change anything.
+  mustChangePassword Boolean  @default(false)
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
   roleAssignments UserRoleAssignment[]
   sessions        Session[]
   studentProfile  Student?
+  recoverablePassword RecoverableStudentPassword?
   facultyCohorts  CohortFaculty[]
   subjectLinks    CohortSubject[]
   openedSessions  AttendanceSession[]    @relation("SessionFaculty")
@@ -236,6 +244,31 @@ model Session {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+// A student account's current password, encrypted so that authorised college
+// staff can reveal it on request — a business requirement for STUDENT accounts
+// only; no staff account ever has a row. Never the password itself: AES-256-GCM
+// ciphertext, its nonce and its authentication tag, under
+// STUDENT_PASSWORD_ENCRYPTION_KEY — a key held in Key Vault, never in this
+// database — with the account's id as additional authenticated data, so a row
+// copied to another account does not decrypt. Replaced in the same transaction
+// as User.passwordHash every time the password is set, so the two always name
+// the same password and no earlier one is kept. Sign-in never reads this:
+// passwordHash stays the only thing a password is checked against.
+// See modules/auth-tenancy/recoverable-student-password.ts.
+model RecoverableStudentPassword {
+  id         String   @id @default(cuid())
+  userId     String   @unique
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ciphertext Bytes
+  nonce      Bytes
+  authTag    Bytes
+  // Which key sealed it: 1 is STUDENT_PASSWORD_ENCRYPTION_KEY; 0 is the
+  // development-only key, which production never accepts.
+  keyVersion Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 // ---------------------------------------------------------------------------

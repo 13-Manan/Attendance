@@ -1,8 +1,10 @@
-import { Prisma, type Student } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/modules/audit/service";
-import { pickByStudentCode } from "@/modules/auth-tenancy/student-login-policy";
+import { isPlaceholderLoginEmail, pickByStudentCode } from "@/modules/auth-tenancy/student-login-policy";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
+import type { PermissionKey } from "@/modules/authorization/permissions";
+import { hasPermission } from "@/modules/authorization/service";
 import { enrollStudentInCohortForRequest, unenrollStudentFromCohortForRequest } from "@/modules/enrollment/service";
 import {
   enrollFaceForStudentRequest,
@@ -22,7 +24,15 @@ import {
   type InvitedFaculty,
 } from "@/modules/faculty/directory-service";
 import type { IssuedPassword } from "@/modules/faculty/directory-types";
-import { createStudentForRequest, type StudentInput } from "@/modules/students/directory-service";
+import { createStudentWithLoginForRequest, type StudentInput } from "@/modules/students/directory-service";
+import {
+  lastPasswordChangeOf,
+  provisionStudentLogin,
+  resetStudentLoginPassword,
+  revealStudentLoginPassword,
+  type RevealedStudentPassword,
+} from "@/modules/students/login-provisioning";
+import { ForbiddenError } from "@/modules/authorization/types";
 import * as repo from "./repository";
 import {
   courseStatus,
@@ -62,8 +72,10 @@ import {
   type DepartmentFacultyFilters,
   type DepartmentFacultyMember,
   type DepartmentFacultyRow,
+  type AdmittedStudent,
   type DepartmentStudentDetail,
   type DepartmentStudentFilters,
+  type DepartmentStudentLogin,
   type DepartmentStudentPick,
   type DepartmentStudentRow,
   type DepartmentStudentSearch,
@@ -137,6 +149,19 @@ import {
  * services — the only writers of those tables — with their validation and
  * audit rows. See `delegate` in `scope.ts` for how a head of department, who
  * has no institution-wide student permission, reaches them for one section.
+ *
+ * A new student is admitted with their Student Portal login, in one
+ * transaction (`createStudentWithLoginForRequest`); a head can also give a
+ * login to one of their department's current students who has none, and
+ * issue a new temporary password for one who has. Each goes through the
+ * student login service — the only writer of those accounts — with
+ * `user.invite` lent for that one call after the department check, and can
+ * only ever create or reset a STUDENT account linked to that student. A
+ * temporary password is returned once where it is issued. Afterwards a head
+ * can reveal the current password of a student in one of their department's
+ * current sections — whatever the student last chose — through the audited
+ * reveal (`revealDepartmentStudentPassword`); nothing else reads it back.
+ * Switching a login off stays with the college's administrators.
  *
  * ## Concurrency
  *
@@ -2412,21 +2437,38 @@ function callerFor(
   return scope.kind === "hod" ? delegate(actor, permissions) : actor;
 }
 
+/** What admitting a student with their login lends a head of department, for that one call. */
+const ADMIT_WITH_LOGIN = ["student.create", "enrollment.manage", "user.invite"] as const;
+
 /**
- * Admits a new student straight into this section, through the student
- * service — its validation, its duplicate-code check and its audit rows. The
- * only class the new student can be placed in is this section.
+ * Admits a new student straight into this section with their Student Portal
+ * login, through the student directory's one-step admission: the student
+ * service's validation and duplicate-code check, a required college email
+ * that no account holds, and the student, their place in this section and
+ * their STUDENT account written in one transaction with the audit rows of
+ * each — all of it, or nothing. The only class the new student can be placed
+ * in is this section, and the only account made is theirs.
+ *
+ * The temporary password comes back once, for the page that admitted them.
  */
 export async function addNewStudentToSection(
   actor: SessionUser,
   ids: SectionIds,
   input: Omit<StudentInput, "cohortId" | "status">,
-): Promise<Student> {
+): Promise<AdmittedStudent> {
   const { scope, group } = await requireWritableSection(actor, ids);
-  return createStudentForRequest(callerFor(actor, scope, ["student.create", "enrollment.manage"]), {
+  const { student, login } = await createStudentWithLoginForRequest(callerFor(actor, scope, ADMIT_WITH_LOGIN), {
     ...input,
     cohortId: group.id,
   });
+  return {
+    studentId: student.id,
+    name: `${student.firstName} ${student.lastName}`.trim(),
+    studentCode: student.studentCode,
+    email: login.account.email ?? "",
+    password: login.password,
+    departmentId: ids.departmentId,
+  };
 }
 
 /**
@@ -2900,8 +2942,35 @@ export async function getDepartmentStudent(
       lastEnrolledAt: face.lastEnrolledAt,
       canEnroll: current,
     },
-    login: { state: loginStateOf(student.userId, student.user?.status), loginId: student.studentCode },
+    login: await departmentStudentLogin(actor, loaded.scope, student, current),
     sectionChoices: withStudentFlags(choices, inSections),
+  };
+}
+
+/**
+ * A student's Student Portal account as their page shows it: the address it
+ * signs in with, whether it is switched on, whether its password is still one
+ * staff issued, and when it was last set. Never a password or a hash — there
+ * is nothing that could read either back. Whether the viewer may issue a new
+ * password, or create the login: a head for their department's current
+ * students, an administrator who may manage accounts.
+ */
+async function departmentStudentLogin(
+  actor: SessionUser,
+  scope: CollegeScope,
+  student: NonNullable<Awaited<ReturnType<typeof repo.getStudentDetail>>>,
+  current: boolean,
+): Promise<DepartmentStudentLogin> {
+  const account = student.user;
+  return {
+    state: loginStateOf(student.userId, account?.status),
+    loginId: student.studentCode,
+    email: account && !isPlaceholderLoginEmail(account.email) ? account.email : null,
+    mustChangePassword: account?.mustChangePassword ?? false,
+    lastPasswordChange: account ? await lastPasswordChangeOf(account.id) : null,
+    lastLoginAt: account?.lastLoginAt ?? null,
+    passwordRecoverable: Boolean(account?.recoverablePassword),
+    canManage: current && (scope.kind === "hod" || hasPermission(actor, "user.invite")),
   };
 }
 
@@ -3025,28 +3094,111 @@ export async function removeStudentFromDepartmentSection(
 }
 
 /**
- * Admits a new student through the college's usual Add student form and
- * service, straight into the department section chosen on that form.
+ * Admits a new student with their Student Portal login, straight into the
+ * department section chosen on the form — see `addNewStudentToSection`.
  */
 export async function createDepartmentStudent(
   actor: SessionUser,
   input: { departmentId: string; sectionId: string },
   student: Omit<StudentInput, "cohortId" | "status">,
-): Promise<Student> {
+): Promise<AdmittedStudent> {
   const scope = await resolveCollegeScope(actor, ["enrollment.manage"]);
   const ids = await sectionIdsInDepartment(scope, input.departmentId, input.sectionId);
   return addNewStudentToSection(actor, ids, student);
 }
 
 /**
- * One of the department's students, for face enrolment: in one of its
- * sections in a session that has not been archived, in the actor's college,
- * with the department inside the actor's scope. A student whose only place in
- * the department was in an archived session is no longer theirs to enrol.
- * Face enrolment from the department starts here, every time.
+ * Gives one of the department's current students — who has no login yet — a
+ * Student Portal login, with the college email they will sign in with,
+ * through the student login service: its checks (on roll, no login already,
+ * an address no account holds), one STUDENT account, the link, the audit row.
+ * A student who already has a login is refused, never given a second one.
+ * The temporary password comes back once.
  */
-async function requireDepartmentStudent(actor: SessionUser, departmentId: string, studentId: string) {
-  const scope = await resolveCollegeScope(actor, ["faceEmbedding.manage"]);
+export async function createDepartmentStudentLogin(
+  actor: SessionUser,
+  input: { departmentId: string; studentId: string; email: string },
+): Promise<{ name: string; loginId: string; email: string; password: string }> {
+  const { scope, student } = await requireDepartmentStudent(actor, input.departmentId, input.studentId, ["user.invite"]);
+  if (input.email.trim() === "") {
+    throw new CollegeSetupError("Enter the student's college email. It is what they sign in to the Student Portal with.");
+  }
+  const created = await provisionStudentLogin(callerFor(actor, scope, ["user.invite"]), student.id, { email: input.email });
+  return {
+    name: `${student.firstName} ${student.lastName}`.trim(),
+    loginId: created.account.loginId,
+    email: created.account.email ?? "",
+    password: created.password,
+  };
+}
+
+/**
+ * Issues a new temporary password for one of the department's current
+ * students, through the student login service: the old password and every
+ * session it opened stop working at once, the new one is returned once and
+ * becomes the one staff can reveal, and the student must replace it at their
+ * next sign-in.
+ */
+export async function resetDepartmentStudentPassword(
+  actor: SessionUser,
+  input: { departmentId: string; studentId: string },
+): Promise<{ name: string; loginId: string; password: string }> {
+  const { scope, student } = await requireDepartmentStudent(actor, input.departmentId, input.studentId, ["user.invite"]);
+  const issued = await resetStudentLoginPassword(callerFor(actor, scope, ["user.invite"]), student.id);
+  return {
+    name: `${student.firstName} ${student.lastName}`.trim(),
+    loginId: student.studentCode,
+    password: issued.password,
+  };
+}
+
+/**
+ * A head of department revealing the current password of one of their
+ * department's students.
+ *
+ * Only a student id comes from the request. The department is the head's
+ * own, from their session and the database — an active head, designated head
+ * of the department that is also their own — never a department id from the
+ * page. The student must be in one of that department's sections in a session
+ * that has not been archived; a student elsewhere, in another college, or
+ * gone from the department reads as "not in this department". Only then is
+ * `user.invite` lent, for this one call, to the student login service's
+ * reveal — which checks the account, writes the audit row and decrypts.
+ *
+ * Administrators do not come this way: their reveal is the account-management
+ * one, on the permissions they already hold.
+ */
+export async function revealDepartmentStudentPassword(
+  actor: SessionUser,
+  studentId: string,
+  request: { ipAddress?: string | null; userAgent?: string | null } = {},
+): Promise<RevealedStudentPassword> {
+  const scope = await resolveCollegeScope(actor);
+  if (scope.kind !== "hod") throw new ForbiddenError("department.manage");
+  const { department, student } = await requireDepartmentStudent(actor, scope.departmentId, studentId, []);
+  return revealStudentLoginPassword(delegate(actor, ["user.invite"]), student.id, {
+    actorRoles: actor.roles.map((role) => role.key),
+    departmentId: department.id,
+    ipAddress: request.ipAddress,
+    userAgent: request.userAgent,
+  });
+}
+
+/**
+ * One of the department's students, for face enrolment or their login: in
+ * one of its sections in a session that has not been archived, in the actor's
+ * college, with the department inside the actor's scope. A student whose only
+ * place in the department was in an archived session is no longer theirs to
+ * enrol, or to manage the login of. Both start here, every time.
+ * `adminPermissions` are what an administrator needs for the operation.
+ */
+async function requireDepartmentStudent(
+  actor: SessionUser,
+  departmentId: string,
+  studentId: string,
+  adminPermissions: readonly PermissionKey[] = ["faceEmbedding.manage"],
+) {
+  const scope = await resolveCollegeScope(actor, adminPermissions);
   const tree = buildTree(await repo.listCollegeUnits(prisma, scope.institutionId));
   const department = tree.byId.get(departmentId);
   if (!department || department.kind !== "DEPARTMENT" || !departmentInScope(scope, department.id)) {

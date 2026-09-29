@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_POST_LOGIN_PATH, loginPathFor, safeNextPath } from "./redirect.ts";
+import {
+  DEFAULT_POST_LOGIN_PATH,
+  PASSWORD_CHANGE_PATH,
+  afterSignInPath,
+  loginPathFor,
+  safeNextPath,
+} from "./redirect.ts";
 
 /**
  * `?next=` is attacker-controlled input that the login flow turns into a
@@ -159,4 +165,14 @@ test("a refusal never sends the user back to the login page itself", () => {
   // Otherwise an expired session on /login would bounce between the two.
   assert.equal(loginPathFor("/login"), "/login");
   assert.equal(loginPathFor("/unauthorized"), "/login");
+});
+
+test("a sign-in with a password somebody else issued goes to the password change, whatever `next` says", () => {
+  assert.equal(PASSWORD_CHANGE_PATH, "/portal/password");
+  for (const destination of ["/portal", "/portal/attendance", DEFAULT_POST_LOGIN_PATH, "/dashboard/reports"]) {
+    assert.equal(afterSignInPath(true, destination), PASSWORD_CHANGE_PATH, destination);
+    assert.equal(afterSignInPath(false, destination), destination, destination);
+    // A session user built without the flag — every account that existed before it — goes where it was going.
+    assert.equal(afterSignInPath(undefined, destination), destination, destination);
+  }
 });

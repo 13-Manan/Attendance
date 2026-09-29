@@ -113,6 +113,9 @@ env:
   MIGRATE_JOB: attendance-prod-migrate
   POSTGRES_SERVER: attendance-prod-psql
   EXPECTED_PROJECT_TAG: Attendance
+  # The vault the web app's Key Vault references point into. An address, not
+  # a credential: this workflow's identity has no access to the vault itself.
+  KEY_VAULT_URI: https://attendance-prod-keyvault.vault.azure.net/
 
 jobs:
   validate:
@@ -452,16 +455,31 @@ jobs:
           echo "revision=${revision}" >> "$GITHUB_OUTPUT"
           echo "Face AI revision: ${revision}"
 
+      # One secret is attached here rather than carried forward: the key
+      # student portal passwords are sealed under, without which the web app
+      # refuses to create, reset or reveal a student password. It is a Key
+      # Vault *reference*, resolved by the web app's own system identity (Key
+      # Vault Secrets User on the vault) — neither this job nor GitHub ever
+      # holds the value, and this identity has no vault access at all. Setting
+      # it is idempotent. It mirrors infra/azure/modules/app.bicep, the
+      # declaration of record, and the secret must exist in Key Vault before
+      # the first deploy that includes it (docs/RUNBOOK_DEPLOYMENT.md).
       - id: web
         name: Deploy web
         run: |
           set -euo pipefail
           image="${ACR_LOGIN_SERVER}/web@${WEB_DIGEST}"
           echo "Web image: ${image}"
+          az containerapp secret set \
+            --name "$WEB_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --secrets "student-password-encryption-key=keyvaultref:${KEY_VAULT_URI}secrets/STUDENT-PASSWORD-ENCRYPTION-KEY,identityref:system" \
+            --output none
           revision=$(az containerapp update \
             --name "$WEB_APP" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "$image" \
+            --set-env-vars STUDENT_PASSWORD_ENCRYPTION_KEY=secretref:student-password-encryption-key \
             --query "properties.latestRevisionName" -o tsv)
           echo "revision=${revision}" >> "$GITHUB_OUTPUT"
           echo "Web revision: ${revision}"

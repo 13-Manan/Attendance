@@ -1,8 +1,11 @@
+import { Prisma } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/modules/authorization/service";
 import type { PermissionKey } from "@/modules/authorization/permissions";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import {
   enrollStudentInCohortForRequest,
+  enrollStudentInCohortWithin,
   unenrollStudentFromCohortForRequest,
 } from "@/modules/enrollment/service";
 import * as repo from "./directory-repository";
@@ -16,7 +19,22 @@ import {
   validateStudentPhone,
   validateStudentStatus,
 } from "./directory-policy";
-import { createStudent, updateStudent } from "./service";
+import {
+  STUDENT_TEMP_PASSWORD_NOTICE,
+  createStudentLoginWithin,
+  issueTemporaryPassword,
+  prepareLogin,
+  requireEmail,
+  requireStudentPasswordStorage,
+  type ProvisionedStudentLogin,
+} from "./login-provisioning";
+import {
+  announceStudentCreated,
+  createStudent,
+  createStudentWithin,
+  updateStudent,
+  type CreateStudentInput,
+} from "./service";
 import type { StudentFilters } from "./directory-filters";
 import {
   STUDENT_STATUS_LABEL,
@@ -55,6 +73,11 @@ import { studentDisplayName, type Student } from "./types";
  * same reason — it is the only writer of `Enrollment`, and the guard that a
  * student and a cohort belong to the same institution lives inside it.
  *
+ * A student admitted together with their login is the one place this module
+ * opens a transaction: it holds it while those three writers — the student,
+ * the placement, the login — each write their own rows and audit rows in it,
+ * so that all of it commits, or none of it.
+ *
  * ## Permissions
  *
  * `student.read` to look, `student.create` to admit, `student.update` to edit
@@ -71,6 +94,7 @@ export interface StudentDirectoryDeps {
   listCampuses?: typeof repo.listCampusChoices;
   findCohort?: typeof repo.findCohortForInstitution;
   findCampus?: typeof repo.findCampusForInstitution;
+  findByEmail?: typeof repo.findStudentByEmail;
   create?: typeof createStudent;
   update?: typeof updateStudent;
   enroll?: typeof enrollStudentInCohortForRequest;
@@ -87,6 +111,7 @@ function deps(overrides: StudentDirectoryDeps) {
     listCampuses: overrides.listCampuses ?? repo.listCampusChoices,
     findCohort: overrides.findCohort ?? repo.findCohortForInstitution,
     findCampus: overrides.findCampus ?? repo.findCampusForInstitution,
+    findByEmail: overrides.findByEmail ?? repo.findStudentByEmail,
     create: overrides.create ?? createStudent,
     update: overrides.update ?? updateStudent,
     enroll: overrides.enroll ?? enrollStudentInCohortForRequest,
@@ -212,8 +237,30 @@ export async function createStudentForRequest(
   input: StudentInput,
   overrides: StudentDirectoryDeps = {},
 ): Promise<Student> {
-  const institutionId = requireInstitution(actor, "student.create");
   const d = deps(overrides);
+  const { cohortId, data } = await prepareNewStudent(actor, input, d);
+
+  const student = await d.create(actor, data);
+
+  if (cohortId !== null) {
+    await d.enroll(actor, { studentId: student.id, cohortId });
+  }
+
+  return student;
+}
+
+/**
+ * Everything a new student is checked for before anything is written, in
+ * order: the permissions, the fields, the campus, a code no other student
+ * has, a class of this institution. Shared by both ways of admitting a
+ * student, so neither accepts what the other refuses.
+ */
+async function prepareNewStudent(
+  actor: SessionUser,
+  input: StudentInput,
+  d: ReturnType<typeof deps>,
+): Promise<{ institutionId: string; cohortId: string | null; data: CreateStudentInput }> {
+  const institutionId = requireInstitution(actor, "student.create");
 
   const cohortId = optionalId(input.cohortId);
   // Checked before anything is validated or written: placing a student in a
@@ -244,23 +291,130 @@ export async function createStudentForRequest(
     if (!cohort) throw new StudentError("That class does not exist.");
   }
 
-  const student = await d.create(actor, {
+  return {
     institutionId,
-    campusId,
-    studentCode: values.studentCode,
-    firstName: values.firstName,
-    lastName: values.lastName,
-    email: values.email,
-    phone: values.phone,
-    admissionNumber: values.admissionNumber,
-    admissionDate: values.admissionDate,
-  });
+    cohortId,
+    data: {
+      institutionId,
+      campusId,
+      studentCode: values.studentCode,
+      firstName: values.firstName,
+      lastName: values.lastName,
+      email: values.email,
+      phone: values.phone,
+      admissionNumber: values.admissionNumber,
+      admissionDate: values.admissionDate,
+    },
+  };
+}
 
-  if (cohortId !== null) {
-    await d.enroll(actor, { studentId: student.id, cohortId });
+export interface StudentWithLogin {
+  student: Student;
+  login: ProvisionedStudentLogin;
+}
+
+/**
+ * A new student and their Student Portal login, admitted in one step: the
+ * record, their place in a class, the account with its one STUDENT role, and
+ * the audit rows of all three commit together or not at all. A refusal — or a
+ * failure part-way — leaves nothing behind: never a student without the login
+ * they were admitted with, nor a login without its student.
+ *
+ * The email is required here, as it is not on the plain Add student form: it
+ * is the address the student signs in with, so it is both the record's email
+ * and the account's. It must be a real address, belong to no account, and not
+ * be another student's here already — that would be the same person admitted
+ * twice. Every other field passes exactly the plain form's checks.
+ *
+ * The temporary password comes back once, for whoever admitted the student to
+ * hand over. Only its hash is stored, and the account must replace it at the
+ * first sign-in.
+ */
+export async function createStudentWithLoginForRequest(
+  actor: SessionUser,
+  input: StudentInput,
+  overrides: StudentDirectoryDeps = {},
+): Promise<StudentWithLogin> {
+  const d = deps(overrides);
+  // Checked before anything else, like the class's permission: creating an
+  // account is part of what was asked, so lacking it refuses the whole step.
+  requirePermission(actor, "user.invite");
+  const { institutionId, cohortId, data } = await prepareNewStudent(actor, input, d);
+  if (cohortId === null) throw new StudentError("Choose the class they join.");
+  if (!data.email) {
+    throw new StudentError("Enter the student's college email. It is what they sign in to the Student Portal with.");
+  }
+  const email = requireEmail(data.email);
+  if (await d.findByEmail(institutionId, email)) {
+    throw new StudentError(
+      "Another student already has this email. If this is the same student, use “Add existing student” instead of admitting them again.",
+    );
+  }
+  const roleId = await prepareLogin(email);
+  requireStudentPasswordStorage("admit");
+  const { password, passwordHash } = await issueTemporaryPassword();
+
+  let created: { student: Student; userId: string };
+  try {
+    created = await prisma.$transaction(
+      async (tx) => {
+        const student = await createStudentWithin(tx, actor, { ...data, email });
+        await enrollStudentInCohortWithin(tx, actor, { studentId: student.id, cohortId });
+        const userId = await createStudentLoginWithin(tx, actor, {
+          institutionId,
+          roleId,
+          student,
+          email,
+          realEmail: email,
+          password,
+          passwordHash,
+        });
+        return { student, userId };
+      },
+      { timeout: 20_000 },
+    );
+  } catch (error) {
+    throw uniqueConflict(error, { email, studentCode: data.studentCode }) ?? error;
   }
 
-  return student;
+  announceStudentCreated(created.student);
+  return {
+    student: created.student,
+    login: {
+      account: {
+        userId: created.userId,
+        loginId: created.student.studentCode,
+        email,
+        status: "ACTIVE",
+        studentOnRoll: true,
+        lastLoginAt: null,
+        institutionId,
+        mustChangePassword: true,
+        lastPasswordChange: { at: created.student.createdAt, by: "staff" },
+        passwordRecoverable: true,
+      },
+      password,
+      notice: STUDENT_TEMP_PASSWORD_NOTICE,
+    },
+  };
+}
+
+/**
+ * The checks above run before the transaction, so two people admitting the
+ * same student at the same moment can both pass them; the unique indexes are
+ * what stop the second, and its whole transaction rolls back. Said in the
+ * words the checks would have used.
+ */
+function uniqueConflict(error: unknown, attempted: { email: string; studentCode: string }): StudentError | null {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") return null;
+  const target = JSON.stringify(error.meta?.target ?? "");
+  if (target.includes("email")) {
+    return new StudentError(`An account already uses ${attempted.email}. An address can only belong to one account.`);
+  }
+  if (target.includes("studentCode")) {
+    return new StudentError(`Student code "${attempted.studentCode}" was just given to another student. Use a different code.`);
+  }
+  return new StudentError("Somebody else changed this student at the same moment. Nothing was saved; try again.");
 }
 
 export async function updateStudentForRequest(

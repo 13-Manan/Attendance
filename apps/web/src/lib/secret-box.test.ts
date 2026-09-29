@@ -5,9 +5,12 @@ import {
   CURRENT_KEY_VERSION,
   SecretBoxError,
   isSealed,
+  openParts,
   openSecret,
+  sealParts,
   sealSecret,
   verifySeal,
+  type Keyring,
 } from "./secret-box.ts";
 
 /**
@@ -210,5 +213,70 @@ test("sealing is not reversible without a key", () => {
     for (const part of sealed.split(".").slice(2)) {
       assert.ok(!Buffer.from(part, "base64url").toString("utf8").includes(secret));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyrings and binding — the same cipher for other secrets, each under its own
+// keys, in parts, bound to the record it belongs to
+// ---------------------------------------------------------------------------
+
+const ringOf = (current: number, keys: Record<number, Buffer>): Keyring => ({
+  current,
+  key(version) {
+    const key = keys[version];
+    if (!key) throw new SecretBoxError("unknown_key_version", `no key ${version}`);
+    return key;
+  },
+});
+const RING_A = ringOf(1, { 1: randomBytes(32) });
+
+test("parts round-trip under a keyring, with a 12-byte nonce and a 16-byte tag", () => {
+  const sealed = sealParts(RING_A, "correct horse", "account:one");
+  assert.deepEqual([sealed.keyVersion, sealed.nonce.length, sealed.authTag.length], [1, 12, 16]);
+  assert.ok(!sealed.ciphertext.toString("utf8").includes("correct horse"));
+  assert.equal(openParts(RING_A, sealed, "account:one"), "correct horse");
+});
+
+test("every sealing draws a fresh nonce", () => {
+  const nonces = new Set(Array.from({ length: 50 }, () => sealParts(RING_A, "same", "a").nonce.toString("hex")));
+  assert.equal(nonces.size, 50);
+});
+
+test("the binding is checked: another record's value does not open, nor one with no binding", () => {
+  const sealed = sealParts(RING_A, "correct horse", "account:one");
+  for (const aad of ["account:two", "account:one ", undefined]) {
+    assert.throws(
+      () => openParts(RING_A, sealed, aad),
+      (e: unknown) => e instanceof SecretBoxError && e.reason === "tampered_or_wrong_key",
+      String(aad),
+    );
+  }
+});
+
+test("another keyring's key does not open it, and neither does an altered part", () => {
+  const sealed = sealParts(RING_A, "correct horse", "a");
+  const other = ringOf(1, { 1: randomBytes(32) });
+  assert.throws(() => openParts(other, sealed, "a"), (e: unknown) => e instanceof SecretBoxError && e.reason === "tampered_or_wrong_key");
+  for (const part of ["ciphertext", "authTag", "nonce"] as const) {
+    const altered = { ...sealed, [part]: Buffer.from(sealed[part]) };
+    altered[part][0] ^= 0xff;
+    assert.throws(() => openParts(RING_A, altered, "a"), SecretBoxError, part);
+  }
+});
+
+test("a key version the keyring does not hold is refused", () => {
+  const sealed = sealParts(RING_A, "x", "a");
+  assert.throws(
+    () => openParts(ringOf(2, { 2: randomBytes(32) }), sealed, "a"),
+    (e: unknown) => e instanceof SecretBoxError && e.reason === "unknown_key_version",
+  );
+});
+
+test("the webhook format is unchanged: a webhook secret still seals and opens without a binding", () => {
+  withKek(KEY_A, () => {
+    const sealed = sealSecret("whsec_unchanged");
+    assert.equal(sealed.split(".").length, 5);
+    assert.equal(openSecret(sealed), "whsec_unchanged");
   });
 });

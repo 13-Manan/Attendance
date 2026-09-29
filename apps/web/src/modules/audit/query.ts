@@ -72,6 +72,8 @@ export const AUDIT_MODULES: readonly AuditModule[] = [
       "student.updated",
       "student.archived",
       "student.restored",
+      "student.password_viewed",
+      "student.password_view_denied",
       "enrollment.created",
       "enrollment.updated",
       "student_subject_enrollment.created",

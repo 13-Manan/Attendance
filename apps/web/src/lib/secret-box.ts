@@ -47,6 +47,19 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes, timingSafeEqua
  * decrypting under their own version until they are re-encrypted. Nothing in
  * this phase rotates a key — the mechanism exists so that doing so later is a
  * configuration change rather than a migration.
+ *
+ * ## Other secrets
+ *
+ * The same cipher serves any value the application must read back, each kind
+ * under its own keys: `sealParts` and `openParts` take a `Keyring` — the key
+ * version new values are sealed under, and the key for each version this
+ * deployment holds — so one purpose's key never opens another's. They return
+ * and take the pieces separately, for a table that keeps them in their own
+ * columns. They can also bind a value to the record it belongs to (`aad`,
+ * GCM's additional authenticated data): the binding is not stored, and a value
+ * copied to another record fails the tag check exactly as tampering does. The
+ * webhook functions below are this cipher with the webhook keyring, no
+ * binding, and the one-string format, exactly as they always were.
  */
 
 const FORMAT = "v1";
@@ -66,6 +79,76 @@ export class SecretBoxError extends Error {
     super(message);
     this.name = "SecretBoxError";
     this.reason = reason;
+  }
+}
+
+/** Where one kind of secret's keys come from. */
+export interface Keyring {
+  /** The key version new values are sealed under. */
+  current: number;
+  /**
+   * The 32-byte key for a version, or a `SecretBoxError` when this deployment
+   * does not hold it: `unknown_key_version`, `no_kek` or `bad_kek`.
+   */
+  key(version: number): Buffer;
+}
+
+/** One sealed value, in its parts. */
+export interface SealedParts {
+  keyVersion: number;
+  /** 12 random bytes, never reused. */
+  nonce: Buffer;
+  /** GCM's 16-byte authentication tag. */
+  authTag: Buffer;
+  ciphertext: Buffer;
+}
+
+/**
+ * Seals `plaintext` under the keyring's current key with a fresh random
+ * nonce. `aad`, when given, binds the value to what it belongs to: the same
+ * string must be given again, unchanged, to open it.
+ */
+export function sealParts(keyring: Keyring, plaintext: string, aad?: string): SealedParts {
+  if (plaintext === "") {
+    throw new SecretBoxError("empty", "Refusing to encrypt an empty secret.");
+  }
+  const keyVersion = keyring.current;
+  const key = keyring.key(keyVersion);
+  const nonce = randomBytes(IV_BYTES);
+  const cipher = createCipheriv(ALGORITHM, key, nonce);
+  if (aad !== undefined) cipher.setAAD(Buffer.from(aad, "utf8"));
+  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  return { keyVersion, nonce, authTag: cipher.getAuthTag(), ciphertext };
+}
+
+/**
+ * Opens what `sealParts` sealed, with the key for the version it records and
+ * the same `aad`. Tampering, the wrong key and the wrong `aad` all fail GCM's
+ * tag check and are one answer, `tampered_or_wrong_key` — none says which.
+ */
+export function openParts(keyring: Keyring, sealed: SealedParts, aad?: string): string {
+  if (sealed.nonce.length !== IV_BYTES || sealed.authTag.length !== TAG_BYTES) {
+    throw new SecretBoxError("malformed", "The stored secret has a malformed IV or tag.");
+  }
+  const key = keyring.key(sealed.keyVersion);
+  const decipher = createDecipheriv(ALGORITHM, key, sealed.nonce);
+  decipher.setAuthTag(sealed.authTag);
+  if (aad !== undefined) decipher.setAAD(Buffer.from(aad, "utf8"));
+  let plaintext: Buffer | undefined;
+  try {
+    plaintext = Buffer.concat([decipher.update(sealed.ciphertext), decipher.final()]);
+    return plaintext.toString("utf8");
+  } catch {
+    // GCM's tag check failed: the ciphertext was altered, or the key is not
+    // the one it was sealed with. Both are the same answer to a caller, and
+    // neither should say which.
+    throw new SecretBoxError(
+      "tampered_or_wrong_key",
+      "The stored secret could not be decrypted. It was altered, or the encryption key changed.",
+    );
+  } finally {
+    // The string returned is a copy; the buffer it came from is not kept.
+    plaintext?.fill(0);
   }
 }
 
@@ -101,27 +184,22 @@ function deriveKey(version: number): Buffer {
   return Buffer.from(hkdfSync("sha256", authSecret, "", HKDF_INFO, KEY_BYTES));
 }
 
+/** The webhook signing secrets' keys: one version, `WEBHOOK_SECRET_KEK` or derived from `AUTH_SECRET`. */
+const WEBHOOK_KEYRING: Keyring = { current: CURRENT_KEY_VERSION, key: deriveKey };
+
 /** True when a stored value is already in this module's format. */
 export function isSealed(value: string): boolean {
   return value.startsWith(`${FORMAT}.`);
 }
 
 export function sealSecret(plaintext: string, version = CURRENT_KEY_VERSION): string {
-  if (plaintext === "") {
-    throw new SecretBoxError("empty", "Refusing to encrypt an empty secret.");
-  }
-  const key = deriveKey(version);
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv(ALGORITHM, key, iv);
-  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-
+  const sealed = sealParts({ current: version, key: deriveKey }, plaintext);
   return [
     FORMAT,
-    String(version),
-    iv.toString("base64url"),
-    tag.toString("base64url"),
-    ciphertext.toString("base64url"),
+    String(sealed.keyVersion),
+    sealed.nonce.toString("base64url"),
+    sealed.authTag.toString("base64url"),
+    sealed.ciphertext.toString("base64url"),
   ].join(".");
 }
 
@@ -146,28 +224,12 @@ export function openSecret(stored: string): string {
     throw new SecretBoxError("malformed", "The stored secret has no usable key version.");
   }
 
-  const key = deriveKey(version);
-  const iv = Buffer.from(ivRaw, "base64url");
-  const tag = Buffer.from(tagRaw, "base64url");
-  const ciphertext = Buffer.from(ciphertextRaw, "base64url");
-
-  if (iv.length !== IV_BYTES || tag.length !== TAG_BYTES) {
-    throw new SecretBoxError("malformed", "The stored secret has a malformed IV or tag.");
-  }
-
-  const decipher = createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(tag);
-  try {
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
-  } catch {
-    // GCM's tag check failed: the ciphertext was altered, or the key is not
-    // the one it was sealed with. Both are the same answer to a caller, and
-    // neither should say which.
-    throw new SecretBoxError(
-      "tampered_or_wrong_key",
-      "The stored secret could not be decrypted. It was altered, or the encryption key changed.",
-    );
-  }
+  return openParts(WEBHOOK_KEYRING, {
+    keyVersion: version,
+    nonce: Buffer.from(ivRaw, "base64url"),
+    authTag: Buffer.from(tagRaw, "base64url"),
+    ciphertext: Buffer.from(ciphertextRaw, "base64url"),
+  });
 }
 
 /**

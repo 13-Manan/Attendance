@@ -451,6 +451,64 @@ verify-before-replace: each row is sealed, opened again, compared against the
 original, and only then written. A round-trip failure stops the run with the
 remaining rows untouched. `--dry-run` reports without writing.
 
+### Student portal passwords are recoverable by authorised staff
+
+**IMPLEMENTED — a deliberate business requirement, with its cost stated.** A
+college head of department, and a college administrator who manages accounts,
+must be able to tell a student their *current* portal password. A one-way hash
+cannot do that, so student accounts — and only student accounts — also keep an
+encrypted copy.
+
+**What is stored.** `RecoverableStudentPassword`: one row per student account,
+AES-256-GCM ciphertext, 12-byte random nonce and 16-byte tag in their own
+columns, sealed through `lib/secret-box.ts` with the account id as additional
+authenticated data — a row copied onto another account fails its tag check.
+The plaintext is never stored, logged or audited. `User.passwordHash` (scrypt)
+is still the only thing sign-in checks.
+
+**Always the current password.** A new login, a reset and a student's own
+change each write the hash and the encrypted copy in one transaction, after
+taking the account's row lock, so concurrent writes serialise and whichever
+commits last leaves its password in both. A student's change replaces the
+copy; no earlier password is kept anywhere. If the copy cannot be sealed, the
+login, reset or change does not happen.
+
+**The key.** `STUDENT_PASSWORD_ENCRYPTION_KEY`: 32 random bytes, base64, from
+Key Vault (`STUDENT-PASSWORD-ENCRYPTION-KEY`) through the web app's managed
+identity — its own secret, not `AUTH_SECRET` and not derived from it. In
+production a missing key means student passwords are neither stored nor
+revealed: creating, resetting and changing them refuse with nothing changed.
+Development and tests fall back to a fixed, public key (version 0) that
+production never seals under and refuses to open. See
+`modules/auth-tenancy/student-password-keyring.ts`.
+
+**Who can reveal.** One server action takes one student id; everything else
+comes from the session (`modules/student-password-reveal`):
+
+- `user.invite` (the existing account-management permission) — any student of
+  the actor's own institution;
+- an active, designated head of department — a student in one of their own
+  department's sections in a non-archived session, the department taken from
+  the session and database, never the request.
+
+Nobody else — teachers, department faculty, students, platform accounts. The
+student's login must be on and the student on roll. Nothing about the password
+is in any page, list or ordinary response; "Show current password" fetches it
+on click, in a Server Action response (`Cache-Control: no-store`), shown until
+Hide, a minute, or leaving the page.
+
+**Accountability.** `student.password_viewed` is written before the password
+is returned; `student.password_view_denied` records refusals with their reason.
+Both carry the actor, roles, institution and — for a head — department, never a
+secret. Each attempt also writes one `student_password.reveal` log line.
+
+**The cost.** Anyone holding both the database and this key can read every
+student's current password, and staff who can reveal a password can sign in as
+that student. Students are told, where they choose a password, that authorised
+staff may reveal it, and not to reuse one from elsewhere. Staff passwords are
+never recoverable. Accounts created before this have no copy until their next
+reset or change; nothing tries to recover a password from its hash.
+
 ### Outbound requests
 
 **IMPLEMENTED.** `modules/integrations/safe-fetch.ts` is the only way this

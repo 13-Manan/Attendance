@@ -2,9 +2,16 @@ import { randomBytes } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { env } from "@/lib/env";
 import { hmacHash } from "@/lib/crypto";
+import { SecretBoxError } from "@/lib/secret-box";
 import { recordAuditLog } from "@/modules/audit/service";
 import type { PermissionKey } from "@/modules/authorization/permissions";
 import { hashPassword, verifyPassword } from "./password";
+import {
+  discardRecoverablePasswordWithin,
+  lockAccountForPasswordWrite,
+  requireStudentPasswordKey,
+  storeRecoverablePasswordWithin,
+} from "./recoverable-student-password";
 import {
   countRecentLoginFailures,
   findActiveSessionByTokenHash,
@@ -45,6 +52,7 @@ export function toSessionUser(user: UserWithRoles): SessionUser {
     institutionId: user.institutionId,
     campusId: user.campusId,
     roles,
+    mustChangePassword: user.mustChangePassword,
   };
 }
 
@@ -263,6 +271,20 @@ export type ChangePasswordResult =
  * out, which is the point of changing a password someone else may know — and
  * the session making the change stays signed in. The audit row says that it
  * happened and how many sessions ended; it carries no password, hash or token.
+ *
+ * This is also how a password somebody else issued — a new student login, or
+ * a reset — is replaced: the same checks (the new one may not be the issued
+ * one, which `newPasswordProblem` refuses as "the current one"), and the same
+ * write clears `mustChangePassword`, so the session that made the change is
+ * let into the rest of the app on its next request. The issued password stops
+ * working in the same transaction, because its hash is the one overwritten.
+ *
+ * A student account's password is also kept recoverable for the college's
+ * staff (`recoverable-student-password.ts`): the new one is sealed and
+ * replaces the last in the same transaction as the hash, under the account's
+ * row lock, so the copy staff can reveal is always this password and never
+ * the one before. If it cannot be sealed, nothing changes. Nobody else's
+ * password is kept that way — a staff account's change removes any copy.
  */
 export async function changeOwnPasswordService(
   userId: string,
@@ -276,7 +298,9 @@ export async function changeOwnPasswordService(
       institutionId: true,
       email: true,
       passwordHash: true,
+      mustChangePassword: true,
       studentProfile: { select: { studentCode: true } },
+      roleAssignments: { select: { role: { select: { key: true } } } },
     },
   });
   if (!user?.passwordHash || !(await verifyPassword(input.current, user.passwordHash))) {
@@ -292,28 +316,65 @@ export async function changeOwnPasswordService(
   });
   if (problem) return { ok: false, error: problem };
 
+  const studentAccount =
+    Boolean(user.studentProfile) &&
+    user.roleAssignments.length > 0 &&
+    user.roleAssignments.every((assignment) => assignment.role.key === "STUDENT");
+  if (studentAccount) {
+    try {
+      requireStudentPasswordKey();
+    } catch (error) {
+      if (!(error instanceof SecretBoxError)) throw error;
+      console.error(JSON.stringify({ log: "student_password.key_unavailable", operation: "change", reason: error.reason }));
+      return { ok: false, error: "Your password can't be changed right now. Please try again later, or ask your college." };
+    }
+  }
+
   const passwordHash = await hashPassword(input.next);
   const currentTokenHash = hmacHash(env.AUTH_SECRET, currentRawToken);
 
-  const otherSessionsEnded = await prisma.$transaction(async (tx) => {
-    await tx.user.update({ where: { id: user.id }, data: { passwordHash } });
-    const ended = await tx.session.updateMany({
-      where: { userId: user.id, revokedAt: null, tokenHash: { not: currentTokenHash } },
-      data: { revokedAt: new Date() },
+  let otherSessionsEnded: number;
+  try {
+    otherSessionsEnded = await prisma.$transaction(async (tx) => {
+      // Under the account's lock the password must still be the one just
+      // checked: a reset between the check and here wins, rather than being
+      // overwritten by a change the old password authorised.
+      if ((await lockAccountForPasswordWrite(tx, user.id)) !== user.passwordHash) throw new PasswordChangedMeanwhile();
+      await tx.user.update({ where: { id: user.id }, data: { passwordHash, mustChangePassword: false } });
+      if (studentAccount) await storeRecoverablePasswordWithin(tx, user.id, input.next);
+      else await discardRecoverablePasswordWithin(tx, user.id);
+      const ended = await tx.session.updateMany({
+        where: { userId: user.id, revokedAt: null, tokenHash: { not: currentTokenHash } },
+        data: { revokedAt: new Date() },
+      });
+      await recordAuditLog(
+        {
+          action: "user.updated",
+          entityType: "User",
+          entityId: user.id,
+          actorUserId: user.id,
+          institutionId: user.institutionId,
+          afterJson: {
+            passwordChanged: true,
+            changedBy: "self",
+            otherSessionsEnded: ended.count,
+            // Whether the password replaced was one somebody else had issued.
+            replacedIssuedPassword: user.mustChangePassword,
+          },
+        },
+        tx,
+      );
+      return ended.count;
     });
-    await recordAuditLog(
-      {
-        action: "user.updated",
-        entityType: "User",
-        entityId: user.id,
-        actorUserId: user.id,
-        institutionId: user.institutionId,
-        afterJson: { passwordChanged: true, changedBy: "self", otherSessionsEnded: ended.count },
-      },
-      tx,
-    );
-    return ended.count;
-  });
+  } catch (error) {
+    if (error instanceof PasswordChangedMeanwhile) {
+      return { ok: false, error: "Your password was changed a moment ago. Sign in again with the new one." };
+    }
+    throw error;
+  }
 
   return { ok: true, otherSessionsEnded };
 }
+
+/** The password changed between being checked and being replaced. */
+class PasswordChangedMeanwhile extends Error {}

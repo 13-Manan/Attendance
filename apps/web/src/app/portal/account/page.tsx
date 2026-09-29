@@ -61,7 +61,7 @@ export default async function StudentAccountPage() {
 
       <Panel
         title="Password"
-        description="Changing it signs out every other phone or computer using this account."
+        description="Changing it signs out every other phone or computer using this account. Your password is stored securely. Authorized college staff may be able to reset or reveal your current portal password, so don't use one you use anywhere else."
       >
         <ChangePasswordForm />
       </Panel>

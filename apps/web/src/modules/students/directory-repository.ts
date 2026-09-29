@@ -246,6 +246,17 @@ export function findStudentByCode(
   });
 }
 
+/** A student of this institution recorded with this email, ignoring case — or null. */
+export function findStudentByEmail(
+  institutionId: string,
+  email: string,
+): Promise<{ id: string; firstName: string; lastName: string } | null> {
+  return prisma.student.findFirst({
+    where: { institutionId, email: { equals: email, mode: "insensitive" } },
+    select: { id: true, firstName: true, lastName: true },
+  });
+}
+
 /**
  * The classes a student can be placed in.
  *

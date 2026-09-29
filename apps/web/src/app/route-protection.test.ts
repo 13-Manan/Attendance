@@ -30,10 +30,13 @@ const APP_DIR = dirname(fileURLToPath(import.meta.url));
  * Calls that establish a server-side identity. `getCurrentUser` is included
  * because routes that answer non-browser callers use it and turn `null` into
  * a 401 rather than a redirect — both are enforcement, they differ in how
- * they report failure.
+ * they report failure. `requireUserForPasswordChange` is `requireUser` for the
+ * password change alone: it too sends anyone without a session to sign in,
+ * and differs only in also admitting a session that still owes that change.
  */
 const AUTH_MARKERS = [
   "requireUser(",
+  "requireUserForPasswordChange(",
   "requirePermissionOrRedirect(",
   "requirePermission(",
   "getCurrentUser(",

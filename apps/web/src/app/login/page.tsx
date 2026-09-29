@@ -2,8 +2,8 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
-import { getCurrentUser } from "@/modules/auth-tenancy/session";
-import { safeNextPath } from "@/modules/auth-tenancy/redirect";
+import { getCurrentUser, isPasswordChangePending } from "@/modules/auth-tenancy/session";
+import { PASSWORD_CHANGE_PATH, safeNextPath } from "@/modules/auth-tenancy/redirect";
 import {
   SCHOOL_COOKIE_NAME,
   normalizeSchoolId,
@@ -41,6 +41,9 @@ export default async function LoginPage({ searchParams }: PageProps) {
   // the dashboard, so a bookmarked deep link survives a visit to /login.
   const user = await getCurrentUser();
   if (user) redirect(safeNext);
+  // Signed in, but with a password somebody else issued: that is replaced
+  // first, and signing in again would only lead back to it.
+  if (await isPasswordChangePending()) redirect(PASSWORD_CHANGE_PATH);
 
   // A student signs in with their student ID, read within one institution:
   // the school's student sign-in link names it, and a browser that has signed

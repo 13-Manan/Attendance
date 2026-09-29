@@ -296,6 +296,11 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
         studentOnRoll={student.status === "ACTIVE"}
         institutionId={user.institutionId ?? ""}
         lastSignIn={login?.lastLoginAt ? MOMENT_FORMAT.format(login.lastLoginAt) : null}
+        lastPasswordChange={
+          login?.lastPasswordChange
+            ? `${MOMENT_FORMAT.format(login.lastPasswordChange.at)} · ${login.lastPasswordChange.by === "student" ? "by the student" : "issued by staff"}`
+            : null
+        }
         canManage={canManageLogin}
       />
 
