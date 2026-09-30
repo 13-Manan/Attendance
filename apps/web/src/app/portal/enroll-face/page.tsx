@@ -1,5 +1,9 @@
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
-import { getOwnFaceEnrollment } from "@/modules/face-enrollment/service";
+import { MAX_SAMPLES_PER_STUDENT } from "@/modules/face-enrollment/policy";
+import {
+  getOwnFaceEnrollmentOverview,
+  type OwnFaceEnrollmentOverview,
+} from "@/modules/face-enrollment/self-enrollment";
 import { SelfEnrollmentClient } from "./self-enrollment-client";
 
 /**
@@ -13,6 +17,12 @@ import { SelfEnrollmentClient } from "./self-enrollment-client";
  * is a property of the shape of the call rather than of a check somebody
  * remembered to write.
  *
+ * ## Camera only
+ *
+ * The capture below offers the device camera and nothing else, and the server
+ * refuses anything that did not come through it (self-enrollment.ts). Staff
+ * enrollment, which accepts uploads, is a different page and a different path.
+ *
  * ## Where self-enrollment is permitted
  *
  * Not everywhere. A college student has a device, an account and a reason to
@@ -25,9 +35,9 @@ import { SelfEnrollmentClient } from "./self-enrollment-client";
 export default async function StudentSelfEnrollFacePage() {
   const user = await requirePermissionOrRedirect("faceEmbedding.enroll.own");
 
-  let enrollment: Awaited<ReturnType<typeof getOwnFaceEnrollment>>;
+  let enrollment: OwnFaceEnrollmentOverview;
   try {
-    enrollment = await getOwnFaceEnrollment(user);
+    enrollment = await getOwnFaceEnrollmentOverview(user);
   } catch {
     // The only expected failure is an account with no linked Student profile,
     // which is a data problem a student cannot fix and should not be shown a
@@ -56,6 +66,8 @@ export default async function StudentSelfEnrollFacePage() {
         </p>
       </header>
 
+      <EnrollmentStatus enrollment={enrollment} />
+
       <SelfEnrollmentClient
         initialStatus={status}
         unavailableReason={
@@ -76,5 +88,65 @@ export default async function StudentSelfEnrollFacePage() {
         </section>
       ) : null}
     </div>
+  );
+}
+
+function formatEnrolledOn(value: Date): string {
+  return value.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
+/**
+ * Where the student stands, in a sentence, before the camera. As of this
+ * render: the capture below keeps its own count as photographs are saved, and
+ * refreshes this.
+ */
+function EnrollmentStatus({ enrollment }: { enrollment: OwnFaceEnrollmentOverview }) {
+  const { status, selfEnrollmentEnabled, enrolledOn } = enrollment;
+
+  let title: string;
+  let details: string[];
+  if (status.status === "ENROLLED") {
+    title = "Your face is enrolled.";
+    details = [
+      enrolledOn ? `Enrolled on ${formatEnrolledOn(enrolledOn)}` : null,
+      `${status.usableSamples} of ${MAX_SAMPLES_PER_STUDENT} photos saved`,
+      status.modelUnknown
+        ? "The face service could not be reached just now, so this was not re-checked."
+        : null,
+    ].filter((line): line is string => line !== null);
+  } else if (status.status === "NEEDS_REENROLLMENT") {
+    title = "Your face needs to be enrolled again.";
+    details = [
+      "The attendance recognition system was updated, so your earlier photos can no longer be used.",
+      status.remainingSlots > 0
+        ? selfEnrollmentEnabled
+          ? "Take new photos with your camera below."
+          : ""
+        : "Your photo slots are full. Please ask your institution's office to clear your earlier photos, then enroll again.",
+    ].filter((line) => line.length > 0);
+  } else {
+    title = "Your face has not been enrolled yet.";
+    details = selfEnrollmentEnabled
+      ? ["Enroll your face using your device camera so attendance can recognize you."]
+      : [];
+  }
+
+  const tone =
+    status.status === "ENROLLED"
+      ? "border-green-200 bg-green-50 text-green-900"
+      : "border-neutral-200 bg-neutral-50 text-neutral-900";
+
+  return (
+    <section
+      aria-label="Face enrollment status"
+      className={`flex flex-col gap-1 rounded-md border px-4 py-3 ${tone}`}
+    >
+      <p className="text-sm font-medium">{title}</p>
+      {details.map((line) => (
+        <p key={line} className="text-xs text-neutral-600">
+          {line}
+        </p>
+      ))}
+    </section>
   );
 }

@@ -6,10 +6,15 @@ import { imageBase64Field } from "@/lib/image-validation";
 import {
   deactivateFaceEmbeddingRequest,
   enrollFaceForStudentRequest,
-  enrollOwnFaceRequest,
   replaceFaceEnrollmentRequest,
 } from "./service";
-import type { FaceEnrollmentResult } from "./types";
+import { MAX_SELF_CAPTURE_TOKEN_CHARS } from "./self-capture";
+import {
+  enrollOwnFaceFromCameraRequest,
+  startOwnFaceCaptureRequest,
+  type OwnFaceCaptureStart,
+} from "./self-enrollment";
+import type { FaceCaptureOutcome, FaceEnrollmentResult } from "./types";
 
 /**
  * The Server Action boundary for enrollment.
@@ -23,7 +28,7 @@ import type { FaceEnrollmentResult } from "./types";
  * say the Python service was the authoritative validator of image bytes; it
  * was not, and nothing else was either. See lib/image-validation.ts.
  *
- * ## Why `captureSource` is trusted
+ * ## Why `captureSource` is trusted on the staff paths
  *
  * The client says whether the bytes came from the camera or from a file, and
  * the server records it without being able to verify it. That is acceptable
@@ -31,6 +36,9 @@ import type { FaceEnrollmentResult } from "./types";
  * validation, identical quality gating and identical duplicate checks. It is
  * provenance for an investigation, not a permission, and a client that lies
  * about it gains nothing but a misleading row in its own institution's log.
+ *
+ * Student self-enrollment is the exception: it is camera only, so there the
+ * source is a rule rather than provenance, and `enrollOwnFace` checks it.
  */
 
 const captureSourceField = z.enum(["CAMERA", "UPLOAD"]);
@@ -63,17 +71,38 @@ export async function replaceFaceEnrollment(
 
 const enrollOwnSchema = z.object({
   imageBase64: imageBase64Field(),
+  // Parsed as either value so that an upload is refused with a reason the
+  // student can read (`camera_required`) rather than a schema error.
   captureSource: captureSourceField,
+  // The camera session from `startOwnFaceCapture`. Optional here for the same
+  // reason; its absence is refused by the service.
+  captureToken: z.string().max(MAX_SELF_CAPTURE_TOKEN_CHARS).optional(),
 });
 
+/**
+ * Starts a self-enrollment camera session. Takes nothing from the browser:
+ * the student, and whether they may enrol, are resolved from the session.
+ */
+export async function startOwnFaceCapture(): Promise<OwnFaceCaptureStart> {
+  const actor = await requireUser();
+  return startOwnFaceCaptureRequest(actor);
+}
+
+/**
+ * Student self-enrollment: camera only. Unlike the staff actions above, this
+ * one does not take `captureSource` on trust — see self-enrollment.ts for
+ * what the server checks, and why.
+ */
 export async function enrollOwnFace(
   input: z.infer<typeof enrollOwnSchema>,
-): Promise<FaceEnrollmentResult> {
+): Promise<FaceCaptureOutcome> {
   const actor = await requireUser();
   const parsed = enrollOwnSchema.parse(input);
   // No studentId is accepted here and none is read from the session beyond the
   // user id: the service resolves the caller's own linked Student profile.
-  return enrollOwnFaceRequest(actor, parsed);
+  // Unknown keys — a smuggled studentId among them — are stripped by the
+  // schema before this line.
+  return enrollOwnFaceFromCameraRequest(actor, parsed);
 }
 
 const deactivateSchema = z.object({ embeddingId: z.string().min(1) });

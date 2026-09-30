@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_IMAGE_BASE64_CHARS, MIN_IMAGE_BASE64_CHARS } from "@/lib/image-validation";
 import {
+  CAMERA_REQUIRED,
   MAX_CAPTURE_EDGE,
   captureDimensions,
   describeCameraError,
@@ -165,6 +166,44 @@ test("a thrown value that is not a DOMException still produces a usable sentence
     const message = describeCameraError(thrown);
     assert.ok(message.length > 0);
     assert.match(message, /upload/i);
+  }
+});
+
+test("camera only: no failure suggests an upload, because there is none to offer", () => {
+  // Student self-enrollment has no file input at all. A message pointing at
+  // one would send the student looking for a control that is not there.
+  for (const thrown of [
+    { name: "NotAllowedError" },
+    { name: "SecurityError" },
+    { name: "NotFoundError" },
+    { name: "OverconstrainedError" },
+    { name: "NotReadableError" },
+    { name: "AbortError" },
+    { name: "TypeError" },
+    { name: "SomethingNobodyHasSeen" },
+    null,
+    "boom",
+  ]) {
+    const message = describeCameraError(thrown, { cameraOnly: true });
+    assert.ok(message.length > 0);
+    assert.doesNotMatch(message, /upload|choose|photograph instead|file/i, JSON.stringify(thrown));
+  }
+});
+
+test("camera only: each failure still names its fix, and a missing camera says the camera is required", () => {
+  const only = (name: string) => describeCameraError({ name }, { cameraOnly: true });
+  assert.match(only("NotAllowedError"), /allow camera permission/i, "permission denied or dismissed");
+  assert.match(only("NotAllowedError"), /required for self enrollment/i);
+  assert.ok(only("NotFoundError").includes(CAMERA_REQUIRED), "no camera on the device");
+  assert.match(only("NotReadableError"), /already in use/i);
+  assert.match(only("TypeError"), /HTTPS/);
+  assert.ok(only("SomethingNobodyHasSeen").includes(CAMERA_REQUIRED));
+});
+
+test("the staff wording is unchanged by the camera-only variant", () => {
+  for (const name of ["NotAllowedError", "NotFoundError", "NotReadableError", "TypeError", "Other"]) {
+    assert.equal(describeCameraError({ name }, {}), describeCameraError({ name }));
+    assert.equal(describeCameraError({ name }, { cameraOnly: false }), describeCameraError({ name }));
   }
 });
 

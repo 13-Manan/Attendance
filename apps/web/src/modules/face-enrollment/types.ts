@@ -54,7 +54,14 @@ export type FaceEnrollmentRefusal =
   | "recognition_not_enabled"
   /** A gallery provider keeps one gallery per class, and this student is in
    * no class to add them to. */
-  | "no_active_class";
+  | "no_active_class"
+  /** Self-enrollment only: the image did not come through this app's camera
+   * flow — no camera session, an expired one, or a file rather than a frame.
+   * See self-capture.ts. */
+  | "camera_required"
+  /** Self-enrollment only: another enrollment for the same student is still
+   * running. See self-enrollment.ts. */
+  | "enrollment_in_progress";
 
 /**
  * The externally-safe shape returned to a caller (Server Action, Route
@@ -98,6 +105,17 @@ export type FaceEnrollmentResult =
        */
       collidedWith?: { studentId: string; label: string | null };
     };
+
+/**
+ * A result as the capture UI uses it — and all that the student's own path
+ * returns. The stored template's id and the model's quality score are the
+ * server's business; a student's browser has no use for either, so the self
+ * path does not send them. Staff callers still receive the full
+ * `FaceEnrollmentResult`, which is assignable to this.
+ */
+export type FaceCaptureOutcome =
+  | Omit<Extract<FaceEnrollmentResult, { ok: true }>, "embeddingId" | "qualityScore">
+  | Extract<FaceEnrollmentResult, { ok: false }>;
 
 /**
  * One stored template, as an administrator sees it.
@@ -165,6 +183,30 @@ export const HUMAN_REASON: Record<FaceQualityReason, string> = {
 };
 
 /**
+ * The same reasons, said to the student holding their own phone.
+ *
+ * `HUMAN_REASON` is written for a member of staff photographing somebody else
+ * ("make sure only the student is in frame"), and staff keep that wording.
+ * The gates behind these sentences are the same; only the person being
+ * addressed changes.
+ */
+const SELF_QUALITY_REASON: Record<Exclude<FaceQualityReason, "ok">, string> = {
+  no_face: "No face detected. Position your face inside the frame and look at the camera.",
+  multiple_faces: "More than one face was detected. Make sure only you are in the frame.",
+  face_too_small: "Face is too small. Move closer to the camera.",
+  blurred: "Image is too blurry. Hold your device steady and let the camera focus.",
+  too_dark: "Lighting is too dark. Move to a brighter area.",
+  too_bright: "Image is too bright. Move out of direct light or away from a window.",
+  occluded: "Face is partially covered. Remove anything covering your face, such as a mask or hair.",
+  bad_angle: "Please look toward the camera.",
+  low_quality: "Image quality is too low. Try again in better light, holding your device steady.",
+};
+
+/** What a student sees when their own photograph is saved. */
+export const SELF_ENROLLMENT_COMPLETE =
+  "Face enrollment complete. Your face is now available for attendance recognition.";
+
+/**
  * Refusals a different photograph cannot fix.
  *
  * Everything else is a quality reason, and every quality reason is about the
@@ -223,7 +265,7 @@ export function describeRefusal(
   context: { channel: FaceEnrollmentChannel; otherStudentLabel?: string | null },
 ): string {
   if (isQualityRefusal(reason)) {
-    return HUMAN_REASON[reason];
+    return context.channel === "SELF" ? SELF_QUALITY_REASON[reason] : HUMAN_REASON[reason];
   }
 
   const staff = context.channel === "STAFF";
@@ -284,6 +326,14 @@ export function describeRefusal(
       return staff
         ? "This student is not in any class yet. Faces are enrolled per class, so add the student to their class first, then capture again."
         : "You are not in any class yet, so your face cannot be saved. Please ask your institution's office.";
+
+    case "camera_required":
+      // Never reached on the staff path, which accepts uploads; worded for
+      // the student it exists for.
+      return "Photos for self enrollment must be taken with the camera on this page. Start the camera and take the photo again.";
+
+    case "enrollment_in_progress":
+      return "Another face enrollment for your account is still being processed. Wait a moment, then try again.";
 
     default: {
       // Exhaustiveness: a reason added to the union without a sentence here

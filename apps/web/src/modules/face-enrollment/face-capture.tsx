@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/use-confirm";
 import type { FaceEnrollmentStatusSummary } from "./policy";
 import {
+  CAMERA_REQUIRED,
   CAPTURE_JPEG_QUALITY,
   cameraIsAvailable,
   captureDimensions,
@@ -18,7 +19,7 @@ import {
   currentGuidedStep,
   guidedStep,
 } from "./guided-steps";
-import type { FaceCaptureSource, FaceEnrollmentResult } from "./types";
+import type { FaceCaptureOutcome, FaceCaptureSource } from "./types";
 
 /**
  * Capture a face, look at it, and decide whether to send it.
@@ -42,12 +43,23 @@ import type { FaceCaptureSource, FaceEnrollmentResult } from "./types";
  * student, or two faces. Sending on capture would make every one of those a
  * round trip and a rejection message instead of a glance.
  *
+ * ## Camera only
+ *
+ * A student enrolling their own face gets one way in, not two (`cameraOnly`):
+ * no file input is rendered at all, nothing offers a photograph instead, and a
+ * camera that cannot start says so rather than suggesting an upload. The
+ * server enforces the same rule on its own (self-enrollment.ts); this is the
+ * half that keeps an honest student from being shown a door that is locked.
+ *
  * ## What this component never holds
  *
  * An embedding — it is never sent one. And no image after it has been
  * submitted: the captured bytes are cleared from state on success, nothing is
  * written to `localStorage`, and the only copy that ever existed outside this
- * component's memory is the request body.
+ * component's memory is the request body. Nor a recording: the stream is
+ * shown live and read for exactly one frame per capture, and it is stopped on
+ * capture, on cancel, when the page is left, and — camera only — when the tab
+ * is hidden.
  */
 
 type Stage =
@@ -65,7 +77,7 @@ export interface FaceCaptureProps {
     /** Staff confirmation that a duplicate is a different person; see
      * EnrollFaceForStudentInput. Ignored on the self-enrollment path. */
     confirmDistinctFromStudentId?: string;
-  }) => Promise<FaceEnrollmentResult>;
+  }) => Promise<FaceCaptureOutcome>;
   /**
    * Retires every stored sample and stores this one instead. Staff only —
    * omitted on the student portal, where being able to retire your own
@@ -75,7 +87,7 @@ export interface FaceCaptureProps {
     imageBase64: string;
     captureSource: FaceCaptureSource;
     confirmDistinctFromStudentId?: string;
-  }) => Promise<FaceEnrollmentResult>;
+  }) => Promise<FaceCaptureOutcome>;
   /** The subject's enrollment status as of the last server render. */
   initialStatus: FaceEnrollmentStatusSummary;
   /** Changes the second person: a member of staff captures someone else. */
@@ -86,9 +98,23 @@ export interface FaceCaptureProps {
    * rather than letting somebody take a photograph that will be refused.
    */
   unavailableReason?: string | null;
+  /**
+   * The camera is the only way in: no file input, no upload control, and no
+   * error that suggests one. Student self-enrollment.
+   */
+  cameraOnly?: boolean;
+  /**
+   * Called once the live preview is running and before a photograph can be
+   * taken — the self-enrollment page opens its camera session here. A refusal
+   * stops the camera and shows the message instead.
+   */
+  onCameraStarted?: () => Promise<{ ok: true } | { ok: false; message: string }>;
 }
 
 const ACCEPTED_FILE_TYPES = "image/jpeg,image/png,image/webp";
+
+/** A subscription for values that cannot change while the page is open. */
+const noSubscription = () => () => {};
 
 export function FaceCapture({
   onSubmit,
@@ -96,15 +122,20 @@ export function FaceCapture({
   initialStatus,
   subject,
   unavailableReason = null,
+  cameraOnly = false,
+  onCameraStarted,
 }: FaceCaptureProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Set for the length of one submission, synchronously — a second click that
+  // lands before React re-renders the disabled button must not send twice.
+  const submittingRef = useRef(false);
 
   const [stage, setStage] = useState<Stage>({ name: "choosing" });
   const [status, setStatus] = useState(initialStatus);
-  const [result, setResult] = useState<FaceEnrollmentResult | null>(null);
+  const [result, setResult] = useState<FaceCaptureOutcome | null>(null);
   // Set after a staff `duplicate_identity` refusal: whom a "different people"
   // confirmation would name, and which action to repeat with it.
   const [distinct, setDistinct] = useState<{
@@ -126,11 +157,21 @@ export function FaceCapture({
    * outside React, with a server snapshot that is allowed to differ from the
    * client one. The subscribe function is a no-op because the answer cannot
    * change while the page is open — a device does not grow a camera.
+   *
+   * Null on the server: not yet known. Staff read that as "not offered", as
+   * they always have; camera only, it holds back the "camera required"
+   * message until the browser has actually been asked.
    */
-  const cameraOffered = useSyncExternalStore(
-    () => () => {},
+  const cameraSupport = useSyncExternalStore<boolean | null>(
+    noSubscription,
     cameraIsAvailable,
-    () => false,
+    () => null,
+  );
+  const cameraOffered = cameraSupport === true;
+  const secureContext = useSyncExternalStore(
+    noSubscription,
+    () => window.isSecureContext,
+    () => true,
   );
 
   const canReplace = onReplace !== undefined && status.usableSamples + status.staleSamples > 0;
@@ -151,9 +192,54 @@ export function FaceCapture({
     if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
-  useEffect(() => stopStream, [stopStream]);
+  /**
+   * Which camera start is current. Bumped by every start and every release,
+   * so a start still waiting on the permission prompt when it is superseded —
+   * a second click, a cancel, the page being left — stops the stream it is
+   * eventually handed instead of adopting it.
+   */
+  const cameraGeneration = useRef(0);
+  const releaseCamera = useCallback(() => {
+    cameraGeneration.current += 1;
+    stopStream();
+  }, [stopStream]);
+
+  useEffect(() => releaseCamera, [releaseCamera]);
+
+  // Leaving the page by any route — a link, the back button, closing the tab
+  // — releases the camera. Unmounting covers navigation inside the app;
+  // `pagehide` covers the rest, including a page kept in the back/forward
+  // cache, where nothing unmounts.
+  useEffect(() => {
+    window.addEventListener("pagehide", releaseCamera);
+    return () => window.removeEventListener("pagehide", releaseCamera);
+  }, [releaseCamera]);
+
+  // Camera only: a student who switches to another app or tab has left the
+  // enrollment, and a running camera goes off with it. They start it again
+  // when they come back. Only a running one: a start still waiting on the
+  // permission prompt is left alone, because some browsers hide the page
+  // behind that prompt.
+  const streaming = stage.name === "streaming";
+  useEffect(() => {
+    if (!cameraOnly || !streaming) return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "hidden") return;
+      releaseCamera();
+      setStage({ name: "choosing" });
+      setCameraError("The camera was turned off because you left the page. Start it again when you are ready.");
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [cameraOnly, streaming, releaseCamera]);
 
   const startCamera = useCallback(async () => {
+    // One stream at a time: a stream still open from an earlier start would
+    // otherwise lose its only reference here and keep the camera on.
+    stopStream();
+    const generation = ++cameraGeneration.current;
+    const superseded = () => generation !== cameraGeneration.current;
+
     setCameraError(null);
     setFileError(null);
     setResult(null);
@@ -164,6 +250,10 @@ export function FaceCapture({
         video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
       });
+      if (superseded()) {
+        for (const track of stream.getTracks()) track.stop();
+        return;
+      }
       streamRef.current = stream;
       const video = videoRef.current;
       if (!video) {
@@ -176,13 +266,29 @@ export function FaceCapture({
       }
       video.srcObject = stream;
       await video.play();
+      if (superseded()) return;
+
+      if (onCameraStarted) {
+        const started = await onCameraStarted().catch(() => ({
+          ok: false as const,
+          message: "The camera could not be prepared for enrollment. Check the connection and try again.",
+        }));
+        if (superseded()) return;
+        if (!started.ok) {
+          releaseCamera();
+          setCameraError(started.message);
+          setStage({ name: "choosing" });
+          return;
+        }
+      }
       setStage({ name: "streaming" });
     } catch (error) {
+      if (superseded()) return;
       stopStream();
-      setCameraError(describeCameraError(error));
+      setCameraError(describeCameraError(error, { cameraOnly }));
       setStage({ name: "choosing" });
     }
-  }, [stopStream]);
+  }, [cameraOnly, onCameraStarted, releaseCamera, stopStream]);
 
   // -- capture --------------------------------------------------------------
 
@@ -201,7 +307,11 @@ export function FaceCapture({
     canvas.height = height;
     const context = canvas.getContext("2d");
     if (!context) {
-      setCameraError("This browser could not read a frame from the camera. Upload a photograph instead.");
+      setCameraError(
+        cameraOnly
+          ? "This browser could not read a frame from the camera. Try again, or use a different browser."
+          : "This browser could not read a frame from the camera. Upload a photograph instead.",
+      );
       return;
     }
 
@@ -216,13 +326,17 @@ export function FaceCapture({
     const dataUrl = canvas.toDataURL("image/jpeg", CAPTURE_JPEG_QUALITY);
     const base64 = stripDataUrlPrefix(dataUrl);
     if (!base64) {
-      setCameraError("The captured frame could not be encoded. Try again, or upload a photograph.");
+      setCameraError(
+        cameraOnly
+          ? "The captured frame could not be encoded. Try again."
+          : "The captured frame could not be encoded. Try again, or upload a photograph.",
+      );
       return;
     }
 
     stopStream();
     setStage({ name: "review", imageBase64: base64, previewUrl: dataUrl, source: "CAMERA" });
-  }, [stopStream]);
+  }, [cameraOnly, stopStream]);
 
   // -- upload ---------------------------------------------------------------
 
@@ -266,7 +380,8 @@ export function FaceCapture({
 
   const send = useCallback(
     async (mode: "add" | "replace", confirmDistinctFromStudentId?: string) => {
-      if (stage.name !== "review") return;
+      if (stage.name !== "review" || submittingRef.current) return;
+      submittingRef.current = true;
       const payload = {
         imageBase64: stage.imageBase64,
         captureSource: stage.source,
@@ -307,6 +422,11 @@ export function FaceCapture({
           // A retake cannot resolve this one, but a confirmation can — and it
           // needs this photograph. Kept only until it is sent or discarded.
           setStage(held);
+        } else if (outcome.reason === "camera_required") {
+          // Self-enrollment: the camera session this still belongs to is over,
+          // or it never had one. Sending it again cannot work; a new capture
+          // from the camera can.
+          setStage({ name: "choosing" });
         } else if (outcome.retryable) {
           // Keep the still on screen: the reason is about this photograph, and
           // being able to look at it while reading "the face is too small" is
@@ -320,21 +440,28 @@ export function FaceCapture({
       } catch {
         setResult(null);
         setCameraError(
-          "The enrollment could not be submitted. Check the connection and try again.",
+          cameraOnly
+            ? "Enrollment could not be completed. Please try again."
+            : "The enrollment could not be submitted. Check the connection and try again.",
         );
         setStage(held);
+      } finally {
+        submittingRef.current = false;
       }
     },
-    [onReplace, onSubmit, setConfirmingReplace, stage, subject],
+    [cameraOnly, onReplace, onSubmit, setConfirmingReplace, stage, subject],
   );
 
   const discard = useCallback(() => {
+    // "Cancel" while the camera is live lands here too, and must turn it off
+    // rather than just hide the preview.
+    releaseCamera();
     setResult(null);
     setDistinct(null);
     setCameraError(null);
     setFileError(null);
     setStage({ name: "choosing" });
-  }, []);
+  }, [releaseCamera]);
 
   // -- render ---------------------------------------------------------------
 
@@ -374,6 +501,7 @@ export function FaceCapture({
             aria-label={`Live camera preview of ${them}`}
             className={`w-full -scale-x-100 ${showCameraTile ? "block" : "hidden"}`}
           />
+          {cameraOnly && stage.name === "streaming" ? <FramingGuide /> : null}
           {previewUrl ? (
             /* A data URL held in memory for the length of one review step.
                next/image optimises assets served from a URL and has nothing to
@@ -385,11 +513,19 @@ export function FaceCapture({
           ) : null}
           {!showCameraTile && !previewUrl ? (
             <div className="flex aspect-[4/3] items-center justify-center px-6 text-center">
-              <p className="text-sm text-neutral-500">
-                {atCapacity
-                  ? `${subject === "self" ? "You have" : "This student has"} the maximum number of samples.`
-                  : "Start the camera, or choose a photograph."}
-              </p>
+              {cameraOnly ? (
+                <CameraOnlyIdle
+                  atCapacity={atCapacity}
+                  cameraMissing={cameraSupport === false}
+                  secureContext={secureContext}
+                />
+              ) : (
+                <p className="text-sm text-neutral-500">
+                  {atCapacity
+                    ? `${subject === "self" ? "You have" : "This student has"} the maximum number of samples.`
+                    : "Start the camera, or choose a photograph."}
+                </p>
+              )}
             </div>
           ) : null}
         </div>
@@ -398,6 +534,15 @@ export function FaceCapture({
         <Controls
           stage={stage}
           cameraOffered={cameraOffered}
+          cameraPending={cameraSupport === null}
+          cameraOnly={cameraOnly}
+          startLabel={
+            cameraOnly
+              ? status.usableSamples === 0
+                ? "Enroll my face"
+                : "Take the next photo"
+              : "Use the camera"
+          }
           atCapacity={atCapacity}
           canReplace={canReplace}
           replaceMode={replaceMode}
@@ -412,18 +557,22 @@ export function FaceCapture({
           subject={subject}
         />
 
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept={ACCEPTED_FILE_TYPES}
-          onChange={onFileChosen}
-          className="sr-only"
-          // Labelled for the accessibility tree even though it is driven by a
-          // button: a screen-reader user who reaches it by other means should
-          // still be told what it takes.
-          aria-label="Choose a photograph to upload"
-          tabIndex={-1}
-        />
+        {/* Not rendered at all when the camera is the only way in: a hidden
+            input is still an upload path, reachable by anyone who looks. */}
+        {cameraOnly ? null : (
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ACCEPTED_FILE_TYPES}
+            onChange={onFileChosen}
+            className="sr-only"
+            // Labelled for the accessibility tree even though it is driven by a
+            // button: a screen-reader user who reaches it by other means should
+            // still be told what it takes.
+            aria-label="Choose a photograph to upload"
+            tabIndex={-1}
+          />
+        )}
       </div>
 
       <Guidance subject={subject} />
@@ -554,9 +703,63 @@ function SlotSummary({
   );
 }
 
+/**
+ * An oval to put the face in, over the live preview. A prompt, like the
+ * guided steps: nothing checks the face is inside it, and the quality gates
+ * judge the photograph on its own terms.
+ */
+function FramingGuide() {
+  return (
+    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+      <div
+        aria-hidden
+        className="aspect-[3/4] h-[72%] rounded-[50%] border-2 border-white/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.3)]"
+      />
+      <p className="absolute inset-x-0 bottom-0 bg-black/50 px-3 py-1.5 text-center text-xs text-white">
+        Position your face inside the frame. Hold still, facing the light.
+      </p>
+    </div>
+  );
+}
+
+/** What the capture area says before the camera starts, when the camera is the only way in. */
+function CameraOnlyIdle({
+  atCapacity,
+  cameraMissing,
+  secureContext,
+}: {
+  atCapacity: boolean;
+  cameraMissing: boolean;
+  secureContext: boolean;
+}) {
+  if (atCapacity) {
+    return <p className="text-sm text-neutral-500">You have the maximum number of samples.</p>;
+  }
+  if (cameraMissing) {
+    return (
+      <p className="text-sm text-neutral-700">
+        {CAMERA_REQUIRED}
+        {secureContext ? null : " This page must be opened over a secure (HTTPS) connection."}
+      </p>
+    );
+  }
+  return (
+    <ol className="flex list-decimal flex-col gap-1 pl-5 text-left text-xs text-neutral-600 sm:text-sm">
+      <li>Allow camera access when your browser asks.</li>
+      <li>Position your face inside the frame.</li>
+      <li>Follow the tips — good light, face centered, hold still.</li>
+      <li>Take the guided photos. Each one is checked before it is saved.</li>
+    </ol>
+  );
+}
+
 interface ControlsProps {
   stage: Stage;
   cameraOffered: boolean;
+  /** Not yet known whether the browser has a camera (server render). */
+  cameraPending: boolean;
+  cameraOnly: boolean;
+  startLabel: string;
   atCapacity: boolean;
   canReplace: boolean;
   replaceMode: boolean;
@@ -574,6 +777,9 @@ interface ControlsProps {
 function Controls({
   stage,
   cameraOffered,
+  cameraPending,
+  cameraOnly,
+  startLabel,
   atCapacity,
   canReplace,
   replaceMode,
@@ -653,9 +859,11 @@ function Controls({
         <Button type="button" variant="secondary" onClick={onStartCamera}>
           Retake
         </Button>
-        <Button type="button" variant="secondary" onClick={onChooseFile}>
-          Choose another file
-        </Button>
+        {cameraOnly ? null : (
+          <Button type="button" variant="secondary" onClick={onChooseFile}>
+            Choose another file
+          </Button>
+        )}
         <Button type="button" variant="secondary" onClick={onDiscard}>
           Discard
         </Button>
@@ -664,12 +872,25 @@ function Controls({
   }
 
   // stage.name === "choosing"
+  if (cameraOnly) {
+    // The camera or nothing. Without one, the capture area above says what is
+    // needed; there is no second button to offer instead.
+    if (!cameraOffered && !cameraPending) return null;
+    return (
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={onStartCamera} disabled={cameraPending || atCapacity}>
+          {startLabel}
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap gap-2">
         {cameraOffered ? (
           <Button onClick={onStartCamera} disabled={atCapacity && !canReplace}>
-            Use the camera
+            {startLabel}
           </Button>
         ) : null}
         <Button

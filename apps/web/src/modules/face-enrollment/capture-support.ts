@@ -137,6 +137,10 @@ export function inspectImageInBrowser(base64: string): ClientImageInspection {
 // Camera failures
 // ---------------------------------------------------------------------------
 
+/** Shown wherever self-enrollment finds no usable camera. */
+export const CAMERA_REQUIRED =
+  "Camera access is required for self enrollment. Please use a device with a working camera and allow camera permission.";
+
 /**
  * What a `getUserMedia` rejection means, in words the person can act on.
  *
@@ -145,12 +149,34 @@ export function inspectImageInBrowser(base64: string): ClientImageInspection {
  * different actions from the user. Matched on `DOMException.name`, which is
  * specified, rather than on the message text, which is not and differs between
  * browsers.
+ *
+ * `cameraOnly` is the student's own enrollment, where there is no upload to
+ * fall back on and suggesting one would point at a control that is not there.
  */
-export function describeCameraError(error: unknown): string {
+export function describeCameraError(error: unknown, options: { cameraOnly?: boolean } = {}): string {
   const name =
     typeof error === "object" && error !== null && "name" in error
       ? String((error as { name: unknown }).name)
       : "";
+
+  if (options.cameraOnly) {
+    switch (name) {
+      case "NotAllowedError":
+      case "SecurityError":
+        // Also what a dismissed permission prompt reports.
+        return "Camera access was not allowed. Camera access is required for self enrollment — allow camera permission for this site in your browser settings, then try again.";
+      case "NotFoundError":
+      case "OverconstrainedError":
+        return `No camera was found on this device. ${CAMERA_REQUIRED}`;
+      case "NotReadableError":
+      case "AbortError":
+        return "The camera is already in use by another app. Close that app, then try again.";
+      case "TypeError":
+        return "The camera can only be used over a secure (HTTPS) connection. Open this page over HTTPS and try again.";
+      default:
+        return `The camera could not be started. ${CAMERA_REQUIRED}`;
+    }
+  }
 
   switch (name) {
     case "NotAllowedError":

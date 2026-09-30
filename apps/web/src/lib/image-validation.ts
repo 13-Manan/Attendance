@@ -123,6 +123,51 @@ export function detectImageFormat(bytes: Uint8Array): ImageFormat | null {
   return null;
 }
 
+/** Start-of-frame markers: SOF0–SOF15, less the three that share the range (DHT, JPG, DAC). */
+function isStartOfFrame(marker: number): boolean {
+  return marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+}
+
+/**
+ * A JPEG's pixel dimensions, as its frame header declares them, or null.
+ *
+ * Walks the marker segments from the start of the file to the first start of
+ * frame and reads the height and width there, without decoding a pixel. Null
+ * for anything that is not a well-formed JPEG header: no SOI, a segment that
+ * runs past the end, or a scan that starts before any frame is declared. Pure
+ * and dependency-free, like everything else in this file.
+ */
+export function jpegDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let offset = 2;
+  while (offset < bytes.length) {
+    if (bytes[offset] !== 0xff) return null;
+    // Any number of 0xFF fill bytes may precede a marker.
+    let markerAt = offset + 1;
+    while (markerAt < bytes.length && bytes[markerAt] === 0xff) markerAt += 1;
+    if (markerAt >= bytes.length) return null;
+    const marker = bytes[markerAt];
+    offset = markerAt + 1;
+    // Standalone markers carry no length.
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    // A second start of image, the end of it, or the start of a scan before a
+    // frame has said how big the image is.
+    if (marker === 0xd8 || marker === 0xd9 || marker === 0xda) return null;
+    if (offset + 2 > bytes.length) return null;
+    const length = (bytes[offset] << 8) | bytes[offset + 1];
+    if (length < 2) return null;
+    if (isStartOfFrame(marker)) {
+      // Length (2), precision (1), height (2), width (2).
+      if (offset + 7 > bytes.length) return null;
+      const height = (bytes[offset + 3] << 8) | bytes[offset + 4];
+      const width = (bytes[offset + 5] << 8) | bytes[offset + 6];
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    offset += length;
+  }
+  return null;
+}
+
 /**
  * The single entry point. Pure, synchronous, allocation-light, and takes no
  * dependency on `env` or Prisma so it can be imported by an action, a route

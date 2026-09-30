@@ -84,7 +84,16 @@ Three keys, all pre-existing, none invented for this work:
 
 - `faceEmbedding.enroll.own` — a student enrolling their own face. The
   service path takes **no** `studentId`; it resolves the student from the
-  session, so there is no parameter to point elsewhere.
+  session, so there is no parameter to point elsewhere. It is **camera
+  only**, enforced on the server (`modules/face-enrollment/self-enrollment.ts`),
+  not by hiding a button: a capture must carry a short-lived camera session —
+  an HMAC over the student, account and institution, issued when the portal's
+  camera starts and valid for ten minutes — and be a JPEG no larger than the
+  capture code writes (longest edge 1280px). Anything else, an upload included,
+  is refused as `camera_required` before the image reaches face-ai. A
+  per-student advisory lock, held for the whole enrollment, refuses a second
+  concurrent submission (`enrollment_in_progress`) instead of storing it.
+  Staff enrollment, uploads included, does not pass through this path.
 - `faceEmbedding.manage` — staff enrollment, deactivation, deletion and the
   retention sweep.
 - `institution.read` / `institution.update` — reading and changing the
@@ -395,6 +404,14 @@ Stated here rather than left for someone to find.
   rejected before it consumes an allowance. That tradeoff is documented in
   `modules/integrations/api-route.ts`; an edge rate limit is the deployment's
   responsibility.
+- **Self-enrollment cannot prove a frame came from a physical camera.** The
+  browser belongs to the student: a virtual camera, or a script that opens a
+  camera session and posts a JPEG of the right size, passes the camera-only
+  checks. No web server can tell a real sensor from a faked one without device
+  attestation, which browsers do not offer. What stands between a student and
+  enrolling somebody else's face is what stands on every path: the quality
+  gates, the duplicate scan against every enrolled student, and the audit row
+  naming the account that did it.
 - ~~No end-to-end browser verification.~~ **Resolved** — a pgvector-capable
   Postgres now exists locally and the flows in this document are exercised in
   a real browser (Phases 7–11).

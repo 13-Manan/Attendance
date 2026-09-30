@@ -157,6 +157,10 @@ export function captureFeedbackHeadline(
       return "Face enrolment paused";
     case "no_active_class":
       return "Add the student to a class first";
+    case "camera_required":
+      return "Use the camera on this page";
+    case "enrollment_in_progress":
+      return "Already in progress";
     default: {
       const exhaustive: never = outcome.reason;
       return exhaustive;

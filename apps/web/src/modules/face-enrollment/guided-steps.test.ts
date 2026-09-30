@@ -59,3 +59,8 @@ test("a refusal about another student's face gives nothing away in the headline"
     assert.equal(captureFeedbackHeadline({ ok: false, reason }), "Could not be saved");
   }
 });
+
+test("the self-enrollment refusals have headlines of their own", () => {
+  assert.equal(captureFeedbackHeadline({ ok: false, reason: "camera_required" }), "Use the camera on this page");
+  assert.equal(captureFeedbackHeadline({ ok: false, reason: "enrollment_in_progress" }), "Already in progress");
+});

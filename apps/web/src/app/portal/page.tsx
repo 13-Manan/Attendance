@@ -8,6 +8,7 @@ import type {
   AttendanceTrendPoint,
   StudentAttendanceItem,
 } from "@/modules/attendance-analytics/types";
+import { shouldPromptOwnFaceEnrollment } from "@/modules/face-enrollment/self-enrollment";
 import { AttendanceGauge } from "@/components/portal/attendance-gauge";
 import {
   RateBar,
@@ -32,7 +33,10 @@ import { EmptyState, Panel } from "@/components/ui/panel";
  */
 export default async function StudentPortalHome() {
   const user = await requirePermissionOrRedirect("attendanceRecord.read.own");
-  const dashboard = await getStudentDashboard(user);
+  const [dashboard, promptFaceEnrollment] = await Promise.all([
+    getStudentDashboard(user),
+    shouldPromptOwnFaceEnrollment(user),
+  ]);
 
   if (!dashboard) {
     return (
@@ -84,6 +88,30 @@ export default async function StudentPortalHome() {
           </ul>
         ) : null}
       </header>
+
+      {/* Only where the student may enrol themselves and has no face samples
+          at all; the enrollment page itself explains every other state. */}
+      {promptFaceEnrollment ? (
+        <section
+          aria-label="Face enrollment"
+          className="flex flex-col gap-3 rounded-xl border border-neutral-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5"
+        >
+          <div className="flex flex-col gap-1">
+            <p className="text-sm font-medium text-neutral-900">
+              Your face has not been enrolled yet.
+            </p>
+            <p className="text-sm text-neutral-600">
+              Enroll your face using your device camera so attendance can recognize you.
+            </p>
+          </div>
+          <Link
+            href="/portal/enroll-face"
+            className="inline-flex min-h-11 shrink-0 items-center justify-center rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-neutral-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2 sm:min-h-10"
+          >
+            Enroll my face
+          </Link>
+        </section>
+      ) : null}
 
       {/* The headline: the same overall figure as before, as a gauge, beside
           the counts it is made of. */}

@@ -7,6 +7,7 @@ import {
   imageBase64Field,
   inspectImageBase64,
   isAcceptableImageBase64,
+  jpegDimensions,
 } from "./image-validation.ts";
 
 /**
@@ -202,4 +203,60 @@ test("the schema's message names the accepted formats rather than leaking the ch
   if (!result.success) {
     assert.match(result.error.issues[0]?.message ?? "", /JPEG, PNG or WebP/);
   }
+});
+
+// ---------------------------------------------------------------------------
+// jpegDimensions — the frame header, read without decoding
+// ---------------------------------------------------------------------------
+
+/**
+ * The start of a JPEG as a browser canvas writes one: SOI, a JFIF APP0, one
+ * quantisation table, then the frame header with the size, then EOI. `before`
+ * inserts segments ahead of the frame header.
+ */
+function jpegHeader(
+  width: number,
+  height: number,
+  options: { frameMarker?: number; before?: number[][] } = {},
+): Uint8Array {
+  const app0 = [0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00];
+  const dqt = [0xff, 0xdb, 0x00, 0x43, 0x00, ...new Array<number>(64).fill(1)];
+  const frame = [
+    0xff, options.frameMarker ?? 0xc0, 0x00, 0x11, 0x08,
+    height >> 8, height & 0xff, width >> 8, width & 0xff,
+    0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+  ];
+  return Uint8Array.from([0xff, 0xd8, ...app0, ...dqt, ...(options.before ?? []).flat(), ...frame, 0xff, 0xd9]);
+}
+
+test("jpegDimensions reads the width and height a canvas capture declares", () => {
+  assert.deepEqual(jpegDimensions(jpegHeader(1280, 720)), { width: 1280, height: 720 });
+  assert.deepEqual(jpegDimensions(jpegHeader(720, 1280)), { width: 720, height: 1280 });
+  assert.deepEqual(jpegDimensions(jpegHeader(4032, 3024)), { width: 4032, height: 3024 });
+});
+
+test("jpegDimensions reads progressive frames too, and skips tables that share the marker range", () => {
+  assert.deepEqual(jpegDimensions(jpegHeader(640, 480, { frameMarker: 0xc2 })), { width: 640, height: 480 });
+  // DHT is 0xC4: inside the SOF range, but a Huffman table, not a frame.
+  const dht = [0xff, 0xc4, 0x00, 0x05, 0x00, 0x00, 0x00];
+  assert.deepEqual(jpegDimensions(jpegHeader(800, 600, { before: [dht] })), { width: 800, height: 600 });
+  // Fill bytes before a marker are allowed by the format.
+  const fill = [0xff, 0xff];
+  assert.deepEqual(jpegDimensions(jpegHeader(320, 240, { before: [fill] })), { width: 320, height: 240 });
+});
+
+test("jpegDimensions answers null for anything that is not a well-formed JPEG header", () => {
+  assert.equal(jpegDimensions(new Uint8Array([0x89, 0x50, 0x4e, 0x47])), null, "a PNG");
+  assert.equal(jpegDimensions(new Uint8Array([])), null);
+  assert.equal(jpegDimensions(new Uint8Array([0xff, 0xd8])), null, "SOI and nothing else");
+  const whole = jpegHeader(1280, 720);
+  assert.equal(jpegDimensions(whole.slice(0, 30)), null, "cut off inside a segment");
+  // A scan that starts before any frame has said how big the image is.
+  const scanFirst = Uint8Array.from([0xff, 0xd8, 0xff, 0xda, 0x00, 0x02]);
+  assert.equal(jpegDimensions(scanFirst), null);
+  // Junk where a marker should be.
+  assert.equal(jpegDimensions(Uint8Array.from([0xff, 0xd8, 0x12, 0x34])), null);
+  assert.equal(jpegDimensions(jpegHeader(0, 720)), null, "a zero dimension");
+  // A segment length shorter than its own length field.
+  assert.equal(jpegDimensions(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x01])), null);
 });
