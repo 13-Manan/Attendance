@@ -31,22 +31,29 @@ Anything not in this table is another project's and is out of scope.
 
 The release that adds `RecoverableStudentPassword` (migration
 `20260930120000_recoverable_student_password`) needs one new Key Vault secret,
-`STUDENT-PASSWORD-ENCRYPTION-KEY`, **before** it is pushed. The deploy workflow
-attaches a Key Vault reference to it on the web app; it does not, and cannot,
-create it — its identity has no vault access. Without the secret, the web
-deploy step fails and web stays on its previous revision.
+`STUDENT-PASSWORD-ENCRYPTION-KEY`, and a Key Vault reference to it on the web
+app, `student-password-encryption-key`, **before** it is pushed. Both are
+one-time operator steps. The deploy workflow only checks the reference is there
+and points `STUDENT_PASSWORD_ENCRYPTION_KEY` at it; it cannot do either step
+itself — its identity has no vault access, and attaching a secret to a
+container app needs `Microsoft.App/managedEnvironments/join/action` on the
+environment, which it deliberately does not hold (deploy run 36686039204 failed
+with `LinkedAuthorizationFailed` trying). Without the reference, the web deploy
+step stops before creating a revision and web stays on its previous revision.
 
-With a **Key Vault Secrets Officer** assignment on the vault:
+As an operator with a **Key Vault Secrets Officer** assignment on the vault
+and rights to update the web app:
 
 ```sh
-# 1. Create it — 32 random bytes. --output none: the CLI would otherwise print it.
-az keyvault secret set --vault-name attendance-prod-keyvault \
-  --name STUDENT-PASSWORD-ENCRYPTION-KEY --value "$(openssl rand -base64 32)" \
-  --output none
+# 1. Create it — 32 random bytes, piped in so the value is never an argument
+#    or on screen. Skip if it exists: never replace its value (see below).
+openssl rand -base64 32 | tr -d '\n' | az keyvault secret set \
+  --vault-name attendance-prod-keyvault --name STUDENT-PASSWORD-ENCRYPTION-KEY \
+  --file /dev/stdin --encoding utf-8 --output none
 
 # 2. Confirm it exists — by name and state only, never by value.
-az keyvault secret show --vault-name attendance-prod-keyvault \
-  --name STUDENT-PASSWORD-ENCRYPTION-KEY --query "attributes.enabled" -o tsv
+az keyvault secret list --vault-name attendance-prod-keyvault \
+  --query "[?name=='STUDENT-PASSWORD-ENCRYPTION-KEY'].attributes.enabled" -o tsv
 
 # 3. Confirm the web app's identity can read it: its principal must hold
 #    Key Vault Secrets User on the vault (it already does for AUTH-SECRET).
@@ -54,6 +61,12 @@ principal=$(az containerapp show -n attendance-prod-web -g attendance-production
   --query "identity.principalId" -o tsv)
 az role assignment list --assignee "$principal" --all \
   --query "[?roleDefinitionName=='Key Vault Secrets User'].scope" -o tsv
+
+# 4. Attach the reference to the web app. Creates no revision; the running one
+#    is untouched until the next deploy points the variable at it.
+az containerapp secret set -n attendance-prod-web -g attendance-production-rg \
+  --secrets "student-password-encryption-key=keyvaultref:https://attendance-prod-keyvault.vault.azure.net/secrets/STUDENT-PASSWORD-ENCRYPTION-KEY,identityref:system" \
+  --output none
 ```
 
 Then push. After the deploy, the web app's environment differs from the

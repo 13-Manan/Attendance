@@ -218,8 +218,11 @@ one (docs/SECURITY.md). 32 random bytes, base64 — its own value, never a copy 
 `AUTH-SECRET`. Without it the web app refuses to create, reset or reveal a
 student password rather than store one it cannot protect. Never overwrite it
 with a new value: every stored student password would stop opening. A new key
-is a new key version (see `student-password-keyring.ts`). The deploy workflow
-attaches the reference to the web app; the secret itself is set once, here.
+is a new key version (see `student-password-keyring.ts`). The secret and the
+web app's reference to it are both set once by an operator
+(docs/RUNBOOK_DEPLOYMENT.md); the deploy workflow checks the reference exists
+and points `STUDENT_PASSWORD_ENCRYPTION_KEY` at it, and cannot attach it — its
+identity lacks `managedEnvironments/join/action`, on purpose.
 
 Set them after deployment, never through a template parameter:
 
