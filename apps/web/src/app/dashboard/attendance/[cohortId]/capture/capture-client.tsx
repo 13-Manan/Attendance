@@ -1,39 +1,63 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
-import { Button } from "@/components/ui/button";
-import {
-  analyzeCaptureImageAction,
-  cancelCaptureSessionAction,
-  startCaptureSession,
-  summarizeCaptureSessionAction,
-} from "@/modules/attendance-capture/actions";
+import { CameraIcon, CheckIcon, PlusIcon, RetakeIcon, Spinner, SwitchCameraIcon } from "@/components/attendance/icons";
 import type {
   CaptureImageAnalysis,
   CaptureSessionSummary,
   StartCaptureSessionResult,
 } from "@/modules/attendance-capture/types";
 import { MAX_CAPTURES_PER_SESSION } from "@/modules/attendance-capture/types";
-import { cameraStatusLabel, canCapture, canStart } from "@/modules/attendance-capture/camera";
+import { canCapture, canStart } from "@/modules/attendance-capture/camera";
 import { fixtureCameraSource } from "@/modules/attendance-capture/camera-source";
-import { useClassroomCamera } from "@/modules/attendance-capture/use-classroom-camera";
 import {
-  processSessionAttendanceAction,
-  startManualRollCallAction,
-} from "@/modules/attendance-review/actions";
+  PROCESSING_LABEL,
+  cameraHelp,
+  cameraStageOf,
+  describeCaptureFlowError,
+  doneStateOf,
+  formatElapsed,
+  nextSequenceNumber,
+  photoStatusOf,
+  platformOf,
+  readySummaryOf,
+  type CaptureFlowErrorCode,
+  type ProcessingPhase,
+} from "@/modules/attendance-capture/capture-flow";
+import {
+  cancelCaptureFlow,
+  checkCapturePhotoFlow,
+  markByHandFlow,
+  processCaptureFlow,
+  startCaptureFlow,
+  summarizeCaptureFlow,
+} from "@/modules/attendance-capture/flow-actions";
+import { useClassroomCamera } from "@/modules/attendance-capture/use-classroom-camera";
 import type { GenerateAttendanceCandidatesResult } from "@/modules/attendance-review/service";
 import type { RecognitionRunSummary } from "@/modules/recognition-engine/types";
 import type { AttendanceMode } from "@/modules/institutions/types";
+import { describeRecognitionAvailability } from "@/modules/recognition-engine/wording";
 import {
-  describeRecognitionAvailability,
-  recognitionCountLabels,
-} from "@/modules/recognition-engine/wording";
+  ActionButton,
+  CaptureShell,
+  ConfirmBar,
+  ShutterButton,
+  StatusChip,
+  Viewfinder,
+  toneClasses,
+  type ShellTone,
+} from "./capture-screens";
 
 /**
  * The classroom capture wizard.
  *
- *   briefing → camera → review → processing → summary
+ *   (start) → camera → photo → matching → result
+ *
+ * On a phone it takes the whole screen; on a wider one it sits in the page.
+ * Opened from the Today card or the class page with `autoStart`, it opens
+ * today's register and the camera at once; otherwise it shows one "Take
+ * attendance" button first.
  *
  * ## Where state lives, and why
  *
@@ -43,9 +67,15 @@ import {
  * outlives the tab. A refresh loses the photographs and the teacher retakes
  * them, which is the correct default for images of a room full of children.
  *
- * The counts on the summary screen are the *server's*, not this component's.
- * The browser knows how many faces it was told about; what gets displayed and
- * what gets written are both derived from what the server saw.
+ * The counts on the result screen are the *server's*, not this component's.
+ *
+ * ## What it does not decide
+ *
+ * Attendance. The face check on each photo, recognition and the register are
+ * the server's, through the same actions as before (`flow-actions.ts` only
+ * changes how their failures come back). "Done" is allowed exactly when
+ * "Process attendance" was. Recognised students are suggestions the teacher
+ * confirms on the review screen.
  *
  * ## Camera
  *
@@ -54,7 +84,7 @@ import {
  * a canvas.
  */
 
-type WizardStep = "briefing" | "camera" | "review" | "processing" | "summary";
+type WizardStep = "start" | "camera" | "photo" | "processing" | "result";
 
 interface CapturedShot {
   sequenceNumber: 1 | 2 | 3;
@@ -66,10 +96,10 @@ interface CapturedShot {
   height: number;
   /** The server's verdict on this frame, once it has one. */
   analysis?: CaptureImageAnalysis;
-  /** Set while the quality check is in flight. */
+  /** Set while the face check is in flight. */
   checking?: boolean;
-  /** Set when the quality check failed — the shot gets a retake affordance
-   * rather than being silently dropped. */
+  /** Set when the check failed — the shot gets a retake rather than being
+   * silently dropped. */
   failure?: { message: string; retryable: boolean };
 }
 
@@ -86,13 +116,24 @@ interface Props {
   useFixtureCamera?: boolean;
   /**
    * Whether to show which recognition provider and model build ran. Admins
-   * (`faceEmbedding.manage`) only: a teacher is told whether recognition is
+   * (`faceEmbedding.manage`) only: a teacher is told whether matching is
    * available and what that means for them, not which backend is loaded.
    */
   showDiagnostics?: boolean;
-  /** Arrived from a register's "Add another photo". Changes the briefing
-   * copy only; whether a run merges is decided by the session's own state. */
+  /** Arrived from a register's "Add another photo". Changes the wording only;
+   * whether a run merges is decided by the session's own state. */
   addingToRegister?: boolean;
+  /** The teacher already asked to start: open the register and the camera. */
+  autoStart?: boolean;
+  /** What is being taken, for the header: "Data Structures", "CSE Sem 3 - Section 1", "Thu, Oct 1". */
+  context: { title: string; subtitle: string | null; dateLabel: string };
+  /** Where the back arrow goes (Today, or the class page). */
+  back: { href: string; label: string };
+  /** Whether this account can open the review board. An attendance operator
+   * captures; the class's teacher reviews. */
+  canReview?: boolean;
+  /** Nobody is on roll: there is no register to take, so nothing is started. */
+  noStudents?: boolean;
 }
 
 const CAPTURE_TIPS = [
@@ -102,52 +143,8 @@ const CAPTURE_TIPS = [
   "Take a second photo from another angle if students are behind one another",
 ] as const;
 
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
-
-function nextSequenceNumber(shots: CapturedShot[]): 1 | 2 | 3 | null {
-  const used = new Set(shots.map((s) => s.sequenceNumber));
-  for (const n of [1, 2, 3] as const) if (!used.has(n)) return n;
-  return null;
-}
-
-function qualityBadgeClasses(label: CaptureImageAnalysis["qualityLabel"] | undefined): string {
-  switch (label) {
-    case "good":
-      return "bg-green-50 text-green-700 border-green-200";
-    case "acceptable":
-      return "bg-amber-50 text-amber-700 border-amber-200";
-    case "poor":
-      return "bg-orange-50 text-orange-700 border-orange-200";
-    case "no_faces":
-      return "bg-red-50 text-red-700 border-red-200";
-    default:
-      return "bg-neutral-50 text-neutral-500 border-neutral-200";
-  }
-}
-
-function qualityBadgeText(
-  label: CaptureImageAnalysis["qualityLabel"] | undefined,
-  checking: boolean,
-): string {
-  if (checking) return "Checking…";
-  switch (label) {
-    case "good":
-      return "Good";
-    case "acceptable":
-      return "Acceptable";
-    case "poor":
-      return "Poor";
-    case "no_faces":
-      return "No faces";
-    default:
-      return "Not checked";
-  }
-}
-
-// `navigator.onLine` adapters, defined outside the component so React's
-// referential snapshot equality holds across renders.
+// `navigator.onLine` and page visibility, defined outside the component so
+// React's referential snapshot equality holds across renders.
 function subscribeToOnlineStatus(cb: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   window.addEventListener("online", cb);
@@ -160,77 +157,16 @@ function subscribeToOnlineStatus(cb: () => void): () => void {
 function getOnlineSnapshot(): boolean {
   return typeof window === "undefined" ? true : window.navigator.onLine;
 }
-function getServerOnlineSnapshot(): boolean {
-  return true;
+function subscribeToVisibility(cb: () => void): () => void {
+  if (typeof document === "undefined") return () => {};
+  document.addEventListener("visibilitychange", cb);
+  return () => document.removeEventListener("visibilitychange", cb);
 }
-
-/**
- * Turns a thrown Server Action error into something a teacher standing in
- * front of a class can act on.
- *
- * The service layer throws tagged strings (`session_locked:FINALIZED`,
- * `empty_roster`) precisely so this mapping can exist. Without it the states
- * the spec calls "session expired", "unauthorized" and "no students in the
- * selected cohort" all render as the same raw identifier.
- */
-function describeProcessingError(error: unknown): { message: string; canRollCall: boolean } {
-  const raw = error instanceof Error ? error.message : "";
-
-  if (raw.startsWith("session_locked:FINALIZED")) {
-    return {
-      message:
-        "This register has already been finalized, so it cannot accept new captures. Open it from the class page to make a correction.",
-      canRollCall: false,
-    };
-  }
-  if (raw.startsWith("session_locked:CANCELLED") || raw === "session_not_found") {
-    return {
-      message:
-        "This attendance session has expired or was discarded. Go back to the class and start a new one.",
-      canRollCall: false,
-    };
-  }
-  if (raw === "empty_roster") {
-    return {
-      message:
-        "No students are enrolled in this class, so there is no register to build. Ask an administrator to enrol students, then try again.",
-      canRollCall: false,
-    };
-  }
-  if (raw === "not_cohort_faculty" || raw === "not_subject_faculty" || raw === "forbidden") {
-    return {
-      message:
-        "You are not authorized to take attendance for this class. Ask an administrator to link you as its faculty.",
-      canRollCall: false,
-    };
-  }
-  if (raw === "face_ai_timeout") {
-    return {
-      message:
-        "Face recognition took too long to respond. The captures were not lost — try again, or call the roll manually.",
-      canRollCall: true,
-    };
-  }
-  if (raw === "face_ai_model_changed") {
-    return {
-      message:
-        "The recognition model changed while these captures were being processed, so nothing was compared. Try again, or call the roll manually.",
-      canRollCall: true,
-    };
-  }
-  if (raw.startsWith("face_ai_invalid_embedding:")) {
-    return {
-      message:
-        "The recognition service returned an unusable result, so nothing was compared. Call the roll manually and report this to your administrator.",
-      canRollCall: true,
-    };
-  }
-  return {
-    message: raw
-      ? `Recognition could not be completed: ${raw}`
-      : "Recognition could not be completed.",
-    canRollCall: true,
-  };
+function getVisibleSnapshot(): boolean {
+  return typeof document === "undefined" ? true : document.visibilityState === "visible";
+}
+function alwaysTrue(): boolean {
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,32 +178,43 @@ export function CaptureWizard({
   useFixtureCamera = false,
   showDiagnostics = false,
   addingToRegister = false,
+  autoStart = false,
+  context,
+  back,
+  canReview = true,
+  noStudents = false,
 }: Props) {
   const router = useRouter();
-  const [step, setStep] = useState<WizardStep>("briefing");
+  const [step, setStep] = useState<WizardStep>("start");
   const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
+  const [startError, setStartError] = useState<CaptureFlowErrorCode | null>(
+    noStudents ? "no_students" : null,
+  );
   const [started, setStarted] = useState<StartCaptureSessionResult | null>(null);
 
   const [shots, setShots] = useState<CapturedShot[]>([]);
+  const [selected, setSelected] = useState<1 | 2 | 3 | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [flash, setFlash] = useState(false);
 
-  const [processingStage, setProcessingStage] = useState<string>("");
-  const [processingPercent, setProcessingPercent] = useState(0);
+  const [phase, setPhase] = useState<ProcessingPhase>("matching");
+  const [processingSince, setProcessingSince] = useState(0);
+  const [clock, setClock] = useState(0);
   const [summary, setSummary] = useState<CaptureSessionSummary | null>(null);
-  const [processingError, setProcessingError] = useState<string | null>(null);
   const [recognition, setRecognition] = useState<RecognitionRunSummary | null>(null);
-  const [recognitionError, setRecognitionError] = useState<string | null>(null);
-  const [canRollCall, setCanRollCall] = useState(false);
   const [generation, setGeneration] = useState<GenerateAttendanceCandidatesResult | null>(null);
-  const [rollCallBusy, setRollCallBusy] = useState(false);
-  const [rollCallError, setRollCallError] = useState<string | null>(null);
+  const [processError, setProcessError] = useState<CaptureFlowErrorCode | null>(null);
+  const [markByHandBusy, setMarkByHandBusy] = useState(false);
+  const [markByHandError, setMarkByHandError] = useState<CaptureFlowErrorCode | null>(null);
 
-  const isOnline = useSyncExternalStore(
-    subscribeToOnlineStatus,
-    getOnlineSnapshot,
-    getServerOnlineSnapshot,
-  );
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+
+  const isOnline = useSyncExternalStore(subscribeToOnlineStatus, getOnlineSnapshot, alwaysTrue);
+  const isVisible = useSyncExternalStore(subscribeToVisibility, getVisibleSnapshot, alwaysTrue);
 
   // The fixture source is constructed once, and only when explicitly asked
   // for. `useMemo` because a fresh source each render would restart the camera.
@@ -278,7 +225,7 @@ export function CaptureWizard({
   const camera = useClassroomCamera({ source: fixtureSource });
 
   // Leaving the camera step releases the hardware. The hook also handles
-  // unmount and tab-hidden; this covers "moved on to review".
+  // unmount and tab-hidden; this covers "moved on to the photo".
   const { stop: stopCamera } = camera;
   useEffect(() => {
     if (step !== "camera") stopCamera();
@@ -291,21 +238,64 @@ export function CaptureWizard({
    * schedules a render, so calling `camera.start()` on the next line runs while
    * `<video>` still does not exist — `videoRef.current` is null, the stream is
    * opened with nothing to draw into, and the state machine reaches `ready`
-   * with no preview attached. The shutter then looks enabled and fails with
-   * "No camera preview is attached", which is what a real capture did.
+   * with no preview attached.
    *
    * An effect runs after commit, so the element is mounted by the time this
    * fires. Gated on `idle` specifically rather than `canStart`: a failed start
    * must wait for the user to press "Try again" instead of being retried
-   * forever, and `ready`/`starting` must not be restarted.
+   * forever, and `ready`/`starting` must not be restarted. Gated on the page
+   * being visible too: the hook stops the camera when the tab is hidden, and
+   * restarting it there would only be stopped again.
    */
   const cameraState = camera.state.name;
-  const { start: startCamera, activeDeviceId } = camera;
+  const { start: startCamera, activeDeviceId, devices: cameraDevices, switchDevice, videoRef } = camera;
   useEffect(() => {
-    if (step === "camera" && cameraState === "idle") {
+    if (step === "camera" && cameraState === "idle" && isVisible) {
       void startCamera(activeDeviceId ?? undefined);
     }
-  }, [step, cameraState, startCamera, activeDeviceId]);
+  }, [step, cameraState, startCamera, activeDeviceId, isVisible]);
+
+  // A screen reader hears where it is after every step change.
+  useEffect(() => {
+    headingRef.current?.focus({ preventScroll: true });
+  }, [step]);
+
+  // While matching runs: an honest clock, and the screen kept awake so a
+  // phone does not lock in the teacher's hand.
+  useEffect(() => {
+    if (step !== "processing") return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    let lock: { release: () => Promise<void> } | null = null;
+    let done = false;
+    const wakeLock = (navigator as Navigator & {
+      wakeLock?: { request: (type: "screen") => Promise<{ release: () => Promise<void> }> };
+    }).wakeLock;
+    wakeLock
+      ?.request("screen")
+      .then((sentinel) => {
+        if (done) void sentinel.release().catch(() => {});
+        else lock = sentinel;
+      })
+      .catch(() => {
+        // Not supported, or refused: the screen may dim. Nothing to tell anyone.
+      });
+    return () => {
+      done = true;
+      window.clearInterval(timer);
+      void lock?.release().catch(() => {});
+    };
+  }, [step]);
+
+  // On a phone the flow covers the page; the page underneath must not scroll.
+  const fullScreen = step !== "start" || autoStart;
+  useEffect(() => {
+    if (!fullScreen || !window.matchMedia("(max-width: 767px)").matches) return;
+    const previous = document.documentElement.style.overflow;
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.documentElement.style.overflow = previous;
+    };
+  }, [fullScreen]);
 
   // -------------------------------------------------------------------------
   // Session
@@ -314,83 +304,80 @@ export function CaptureWizard({
     setStartError(null);
     setStarting(true);
     try {
-      const result = await startCaptureSession({ cohortId, cohortSubjectId });
-      setStarted(result);
+      const result = await startCaptureFlow({ cohortId, cohortSubjectId });
+      if (!result.ok) {
+        setStartError(result.code);
+        return;
+      }
+      setStarted(result.value);
+      // A class with nobody on roll has no register to build: say so now,
+      // rather than after the teacher has photographed an empty room.
+      if (result.value.enrolledStudentCount === 0) {
+        setStartError("no_students");
+        return;
+      }
       setStep("camera");
-    } catch (e) {
-      setStartError(
-        e instanceof Error
-          ? describeProcessingError(e).message
-          : "Could not start attendance.",
-      );
+    } catch {
+      setStartError("unknown");
     } finally {
       setStarting(false);
     }
   }, [cohortId, cohortSubjectId]);
 
+  // The teacher's tap on the Today card is the start. Once, even under React's
+  // development double-invoke: Start is idempotent on the server, but a second
+  // call would write a second audit row.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!autoStart || noStudents || autoStarted.current) return;
+    autoStarted.current = true;
+    void start();
+  }, [autoStart, noStudents, start]);
+
   // -------------------------------------------------------------------------
-  // Capture, quality check, retake
+  // Capture, face check, retake
   // -------------------------------------------------------------------------
 
   /**
-   * Sends one frame for its quality check.
-   *
-   * Runs as soon as the shutter is pressed rather than at the end, so a
-   * photograph with nobody in it is caught while the class is still sitting
+   * Sends one frame for its face check, as soon as the shutter is pressed, so
+   * a photograph with nobody in it is caught while the class is still sitting
    * there. Detection only on the server — no embedding is produced for a frame
    * the teacher may be about to discard.
    */
-  const checkShot = useCallback(
-    async (sessionId: string, shot: CapturedShot) => {
+  const checkShot = useCallback(async (sessionId: string, shot: CapturedShot) => {
+    const settle = (patch: Partial<CapturedShot>) =>
       setShots((current) =>
-        current.map((s) =>
-          s.sequenceNumber === shot.sequenceNumber
-            ? { ...s, checking: true, failure: undefined }
-            : s,
-        ),
+        current.map((s) => (s.sequenceNumber === shot.sequenceNumber ? { ...s, ...patch } : s)),
       );
-      try {
-        const result = await analyzeCaptureImageAction({
-          sessionId,
-          sequenceNumber: shot.sequenceNumber,
-          imageBase64: shot.imageBase64,
+    settle({ checking: true, failure: undefined });
+    try {
+      const result = await checkCapturePhotoFlow({
+        sessionId,
+        sequenceNumber: shot.sequenceNumber,
+        imageBase64: shot.imageBase64,
+      });
+      if (!result.ok) {
+        settle({
+          checking: false,
+          analysis: undefined,
+          failure: { message: describeCaptureFlowError(result.code, "process").message, retryable: true },
         });
-        setShots((current) =>
-          current.map((s) =>
-            s.sequenceNumber === shot.sequenceNumber
-              ? result.ok
-                ? { ...s, checking: false, analysis: result, failure: undefined }
-                : {
-                    ...s,
-                    checking: false,
-                    analysis: undefined,
-                    failure: { message: result.message, retryable: result.retryable },
-                  }
-              : s,
-          ),
-        );
-      } catch (e) {
-        setShots((current) =>
-          current.map((s) =>
-            s.sequenceNumber === shot.sequenceNumber
-              ? {
-                  ...s,
-                  checking: false,
-                  failure: {
-                    message:
-                      e instanceof Error
-                        ? `Could not check this photo: ${e.message}`
-                        : "Could not check this photo.",
-                    retryable: true,
-                  },
-                }
-              : s,
-          ),
-        );
+      } else if (result.value.ok) {
+        settle({ checking: false, analysis: result.value, failure: undefined });
+      } else {
+        settle({
+          checking: false,
+          analysis: undefined,
+          failure: { message: result.value.message, retryable: result.value.retryable },
+        });
       }
-    },
-    [],
-  );
+    } catch {
+      settle({
+        checking: false,
+        failure: { message: "Couldn't reach the server to check this photo. Check the connection and retake.", retryable: true },
+      });
+    }
+  }, []);
 
   const capture = useCallback(() => {
     if (!started) return;
@@ -412,8 +399,11 @@ export function CaptureWizard({
       height: frame.height,
       checking: true,
     };
-    setShots((current) => [...current, shot]);
-    setStep("review");
+    setShots((current) => [...current, shot].sort((a, b) => a.sequenceNumber - b.sequenceNumber));
+    setSelected(sequenceNumber);
+    setFlash(true);
+    window.setTimeout(() => setFlash(false), 150);
+    setStep("photo");
     void checkShot(started.session.id, shot);
   }, [camera, checkShot, shots, started]);
 
@@ -421,6 +411,7 @@ export function CaptureWizard({
     setShots((current) => current.filter((s) => s.sequenceNumber !== sequenceNumber));
   }, []);
 
+  /** A retake gives up the photo's slot; the next capture takes it back. */
   const retakeShot = useCallback(
     (sequenceNumber: 1 | 2 | 3) => {
       removeShot(sequenceNumber);
@@ -429,199 +420,304 @@ export function CaptureWizard({
     [removeShot],
   );
 
-  const captureAnother = useCallback(() => {
-    setStep("camera");
-  }, []);
+  const removeSelected = useCallback(() => {
+    if (selected === null) return;
+    const remaining = shots.filter((s) => s.sequenceNumber !== selected);
+    removeShot(selected);
+    if (remaining.length === 0) {
+      setSelected(null);
+      setStep("camera");
+    } else {
+      setSelected(remaining[remaining.length - 1].sequenceNumber);
+    }
+  }, [removeShot, selected, shots]);
 
   // -------------------------------------------------------------------------
-  // Processing
+  // Matching
   //
   // Recognition and register generation happen in ONE server call. If the
   // browser ran recognition and posted results back, a client could simply
   // claim everybody was matched — attendance would be asserted by the device
   // rather than measured. What the browser gets back is display-only.
   // -------------------------------------------------------------------------
-  const process = useCallback(async () => {
-    if (!started || shots.length === 0) return;
-    setStep("processing");
-    setProcessingError(null);
-    setRecognition(null);
-    setRecognitionError(null);
-    setRollCallError(null);
-    setCanRollCall(false);
-    setGeneration(null);
+  const done = doneStateOf(shots);
 
-    setProcessingStage("Sending the captures for recognition");
-    setProcessingPercent(20);
+  const process = useCallback(async () => {
+    if (!started || !doneStateOf(shots).enabled) return;
+    setStep("processing");
+    setPhase("matching");
+    setProcessingSince(Date.now());
+    setClock(Date.now());
+    setProcessError(null);
+    setRecognition(null);
+    setGeneration(null);
+    setMarkByHandError(null);
+
     try {
-      const result = await processSessionAttendanceAction({
+      const result = await processCaptureFlow({
         sessionId: started.session.id,
-        images: shots.map((s) => ({
-          sequenceNumber: s.sequenceNumber,
-          imageBase64: s.imageBase64,
-        })),
+        images: shots.map((s) => ({ sequenceNumber: s.sequenceNumber, imageBase64: s.imageBase64 })),
         // A session that was already in review when this wizard opened has a
         // register. These photos are added to it: a student found earlier is
         // not un-found, and a teacher's decision is not overwritten.
         merge: started.session.status === "REVIEW",
       });
-      setProcessingStage("Building the attendance register");
-      setProcessingPercent(75);
-      setRecognition(result.recognition);
-      setGeneration(result.generation);
-    } catch (e) {
-      // Not fatal: the captures succeeded, and the teacher must still be able
-      // to take attendance. The reason is surfaced, never swallowed.
-      const described = describeProcessingError(e);
-      setRecognitionError(described.message);
-      setCanRollCall(described.canRollCall);
+      if (result.ok) {
+        setRecognition(result.value.recognition);
+        setGeneration(result.value.generation);
+      } else {
+        setProcessError(result.code);
+      }
+    } catch {
+      // The request itself failed — the connection, usually.
+      setProcessError("unknown");
     }
 
-    setProcessingStage("Preparing the summary");
-    setProcessingPercent(90);
+    setPhase("preparing");
     try {
-      setSummary(await summarizeCaptureSessionAction({ sessionId: started.session.id }));
-    } catch (e) {
-      setProcessingError(
-        e instanceof Error
-          ? `Could not summarize the session: ${e.message}`
-          : "Could not summarize the session.",
-      );
+      const summarized = await summarizeCaptureFlow({ sessionId: started.session.id });
+      if (summarized.ok) setSummary(summarized.value);
+    } catch {
+      // The summary only decorates the result; the register is written.
     }
-    setProcessingPercent(100);
-    setStep("summary");
+    setStep("result");
   }, [shots, started]);
 
-  const openReview = useCallback(
-    (sessionId: string) => {
-      router.push(`/dashboard/attendance/${cohortId}/review/${sessionId}`);
-    },
-    [cohortId, router],
-  );
+  const reviewHref = started
+    ? `/dashboard/attendance/${cohortId}/review/${started.session.id}`
+    : null;
 
   /**
-   * The fallback when recognition could not run: the register is built from
-   * the enrolled roster with every student awaiting a decision. Nothing is
-   * presumed present or absent — the teacher calls the roll.
+   * Marking by hand: the register is built from the class list with every
+   * student awaiting the teacher's decision. Nothing is presumed present or
+   * absent — the existing manual roll call, offered wherever the camera or the
+   * matching cannot help.
    */
-  const startRollCall = useCallback(async () => {
-    if (!started) return;
-    setRollCallError(null);
-    setRollCallBusy(true);
+  const markByHand = useCallback(async () => {
+    if (!started || !reviewHref) return;
+    setMarkByHandError(null);
+    setMarkByHandBusy(true);
     try {
-      await startManualRollCallAction({ sessionId: started.session.id });
-      openReview(started.session.id);
-    } catch (e) {
-      setRollCallError(describeProcessingError(e).message);
+      const result = await markByHandFlow({ sessionId: started.session.id });
+      if (result.ok) {
+        camera.stop();
+        router.push(reviewHref);
+        return;
+      }
+      setMarkByHandError(result.code);
+    } catch {
+      setMarkByHandError("unknown");
     } finally {
-      setRollCallBusy(false);
+      setMarkByHandBusy(false);
     }
-  }, [openReview, started]);
+  }, [camera, reviewHref, router, started]);
 
   /** This wizard is adding photos to a register already under review. */
   const addingToExisting = started?.session.status === "REVIEW";
 
-  const discard = useCallback(async () => {
+  // Adding photos to a register under review: back means back to that
+  // register, not to the class it belongs to.
+  const backTarget =
+    addingToExisting && reviewHref ? { href: reviewHref, label: "the register" } : back;
+
+  const leave = useCallback(() => {
+    camera.stop();
+    router.push(backTarget.href);
+  }, [backTarget.href, camera, router]);
+
+  const onBack = useCallback(() => {
+    // Photos not yet sent would be lost; ask once. Nothing else needs asking:
+    // the register stays open, and the Today card offers to continue it.
+    if ((step === "camera" || step === "photo") && shots.length > 0 && !confirmLeave) {
+      setConfirmLeave(true);
+      return;
+    }
+    leave();
+  }, [confirmLeave, leave, shots.length, step]);
+
+  const cancelAttendance = useCallback(async () => {
     // Leaving an add-photo round must not cancel the register it was adding
     // to: that register holds suggestions and decisions. Only the new,
     // never-sent photos are dropped, and they were only ever in memory.
-    if (started && started.session.status === "REVIEW") {
+    if (started && started.session.status === "REVIEW" && reviewHref) {
       camera.stop();
-      router.push(`/dashboard/attendance/${cohortId}/review/${started.session.id}`);
+      router.push(reviewHref);
       return;
     }
+    setCancelling(true);
     if (started) {
       try {
-        await cancelCaptureSessionAction({ sessionId: started.session.id });
+        await cancelCaptureFlow({ sessionId: started.session.id });
       } catch {
         // Best effort. The session either moved to CANCELLED or was already
-        // terminal; either way the user is leaving.
+        // terminal; either way the teacher is leaving.
       }
     }
     camera.stop();
-    router.push(`/dashboard/attendance/${cohortId}`);
-  }, [camera, cohortId, router, started]);
+    router.push(back.href);
+  }, [back.href, camera, reviewHref, router, started]);
 
   // -------------------------------------------------------------------------
   // Derived
   // -------------------------------------------------------------------------
   const captureLimitReached = shots.length >= MAX_CAPTURES_PER_SESSION;
-  const busyChecking = shots.some((s) => s.checking);
-  const canProcess = shots.length > 0 && !busyChecking && !shots.some((s) => s.failure);
-  const contextLabel = useMemo(() => {
-    if (!started) return "";
-    const bits = [started.cohortName];
-    if (started.subjectName) bits.push(started.subjectName);
-    bits.push(`${started.enrolledStudentCount} enrolled`);
-    return bits.join(" · ");
-  }, [started]);
+  const selectedShot = shots.find((s) => s.sequenceNumber === selected) ?? shots[shots.length - 1] ?? null;
+  const subtitle = [context.subtitle, context.dateLabel].filter(Boolean).join(" · ");
+  const platform = typeof navigator === "undefined" ? "other" : platformOf(navigator.userAgent);
 
-  const banner = !isOnline ? (
-    <div
+  const offlineNotice = !isOnline ? (
+    <p
       role="alert"
-      className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+      className="mx-4 mt-2 rounded-lg bg-amber-100 px-3 py-2 text-sm text-amber-950 md:mx-5"
     >
-      You appear to be offline. Captures cannot be processed until the
-      connection returns — the photos you have already taken are kept.
-    </div>
+      You appear to be offline. Photos can&apos;t be checked or matched until the connection
+      returns — the ones you have taken are kept.
+    </p>
   ) : null;
 
+  const leaveBar = (tone: ShellTone) =>
+    confirmLeave ? (
+      <ConfirmBar
+        tone={tone}
+        message="Leave without finishing? These photos aren't saved — you can continue today's attendance later."
+        cancelLabel="Stay"
+        confirmLabel="Leave"
+        onCancel={() => setConfirmLeave(false)}
+        onConfirm={leave}
+      />
+    ) : null;
+
+  const cancelControl = (tone: ShellTone) =>
+    confirmCancel ? (
+      <ConfirmBar
+        tone={tone}
+        message={
+          addingToExisting
+            ? "Stop adding photos? The register you were reviewing stays exactly as it was."
+            : "Cancel today's attendance? The photos are deleted and this register is closed. You can start again."
+        }
+        cancelLabel="Keep going"
+        confirmLabel={addingToExisting ? "Stop" : "Yes, cancel"}
+        onCancel={() => setConfirmCancel(false)}
+        onConfirm={() => void cancelAttendance()}
+        busy={cancelling}
+      />
+    ) : (
+      <div className="flex justify-center">
+        <ActionButton tone={tone} kind="quiet" onClick={() => setConfirmCancel(true)}>
+          {addingToExisting ? "Stop adding photos" : "Cancel attendance"}
+        </ActionButton>
+      </div>
+    );
+
   // =========================================================================
-  // Briefing
+  // Start — only when the teacher did not already ask to start
   // =========================================================================
-  if (step === "briefing") {
-    const noStudents = started?.enrolledStudentCount === 0;
+  if (step === "start" && !autoStart) {
+    const error = startError ? describeCaptureFlowError(startError, "start") : null;
     return (
-      <div className="flex flex-col gap-6">
-        {banner}
-        <section className="rounded-md border border-neutral-200 p-6">
-          <h2 className="text-base font-semibold text-neutral-900">
-            {addingToRegister ? "Add photos to this register" : "Before you capture"}
+      <section className="flex flex-col gap-4 rounded-2xl border border-neutral-200 bg-white p-4 sm:p-6">
+        <div className="flex flex-col gap-1">
+          <h2 className="text-lg font-semibold text-neutral-900">
+            {addingToRegister ? "Add photos to this register" : "Ready to take attendance"}
           </h2>
-          {addingToRegister && (
-            <p className="mt-1 text-sm text-neutral-600">
-              New photos are added to the register you were reviewing. A student
-              already found stays found, and any decision you have made is kept.
-            </p>
-          )}
-          <p className="mt-1 text-sm text-neutral-600">
-            You can take up to {MAX_CAPTURES_PER_SESSION} photos. One is enough for a
-            small class; add a second or third from another angle when students are
-            obscured.
+          <p className="text-sm text-neutral-600">
+            {addingToRegister
+              ? "New photos are added to the register you were reviewing. A student already found stays found, and any decision you have made is kept."
+              : `Take one photo of the whole class — up to ${MAX_CAPTURES_PER_SESSION} if some students are hidden.`}
           </p>
-          <ul className="mt-3 flex flex-col gap-1.5 text-sm text-neutral-700">
+        </div>
+        <button
+          type="button"
+          onClick={() => void start()}
+          disabled={starting || noStudents}
+          className="flex min-h-14 w-full items-center justify-center gap-2.5 rounded-xl bg-neutral-900 px-5 text-base font-semibold text-white transition-colors hover:bg-neutral-700 disabled:bg-neutral-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2 sm:w-auto sm:self-start"
+        >
+          {starting ? <Spinner className="size-5" /> : <CameraIcon className="size-5" />}
+          {starting ? "Opening camera…" : addingToRegister ? "Open camera" : "Take attendance"}
+        </button>
+        {error ? (
+          <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">
+            {error.message}
+          </p>
+        ) : null}
+        {attendanceMode === "SUBJECT_WISE" && !cohortSubjectId ? (
+          <p className="text-sm text-red-700">No subject selected — go back to the class page and pick one first.</p>
+        ) : null}
+        <details className="group rounded-lg border border-neutral-200 px-3 py-2">
+          <summary className="flex min-h-11 cursor-pointer items-center text-sm font-medium text-neutral-700">
+            Tips for a good photo
+          </summary>
+          <ul className="mt-1 flex flex-col gap-1.5 pb-1 text-sm text-neutral-700">
             {CAPTURE_TIPS.map((tip) => (
               <li key={tip} className="flex gap-2">
-                <span
-                  className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-400"
-                  aria-hidden
-                />
+                <span className="mt-2 size-1.5 shrink-0 rounded-full bg-neutral-400" aria-hidden />
                 <span>{tip}</span>
               </li>
             ))}
           </ul>
-          <p className="mt-4 text-xs text-neutral-500">
-            Classroom photos are processed and discarded — none is stored on our
-            servers. Only the attendance result is kept.
-          </p>
-        </section>
+        </details>
+        <p className="text-xs text-neutral-500">
+          Classroom photos are checked and discarded — none is stored on our servers. Only the
+          attendance result is kept.
+        </p>
+      </section>
+    );
+  }
 
-        <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={start} disabled={starting || noStudents}>
-            {starting ? "Starting…" : "Start attendance"}
-          </Button>
-          {attendanceMode === "SUBJECT_WISE" && !cohortSubjectId && (
-            <span className="text-xs text-red-600">
-              No subject selected — go back to the class page and pick one first.
-            </span>
-          )}
-        </div>
-        {startError && (
-          <p role="alert" className="text-sm text-red-600">
-            {startError}
-          </p>
-        )}
-      </div>
+  // =========================================================================
+  // Opening — the register and the camera, straight from the Today card
+  // =========================================================================
+  if (step === "start") {
+    const error = startError ? describeCaptureFlowError(startError, "start") : null;
+    return (
+      <CaptureShell
+        tone="dark"
+        title={context.title}
+        subtitle={subtitle}
+        onBack={leave}
+        backLabel={backTarget.label}
+        headingRef={headingRef}
+        heading={error ? "Couldn't start attendance" : "Getting ready"}
+        showHeading={false}
+        notices={offlineNotice}
+        footer={
+          error ? (
+            <div className="flex flex-col gap-2">
+              {error.canRetry ? (
+                <ActionButton tone="dark" size="lg" onClick={() => void start()} disabled={starting}>
+                  Try again
+                </ActionButton>
+              ) : null}
+              <ActionButton tone="dark" kind="secondary" onClick={leave}>
+                Back to {backTarget.label}
+              </ActionButton>
+            </div>
+          ) : null
+        }
+      >
+        <Viewfinder>
+          <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center text-white">
+            {error ? (
+              <>
+                <p className="text-lg font-semibold" aria-hidden="true">
+                  Couldn&apos;t start attendance
+                </p>
+                <p role="alert" className="text-sm text-white/85">
+                  {error.message}
+                </p>
+              </>
+            ) : (
+              <>
+                <Spinner className="size-8" />
+                <p className="text-base font-medium" role="status">
+                  Getting ready…
+                </p>
+              </>
+            )}
+          </div>
+        </Viewfinder>
+      </CaptureShell>
     );
   }
 
@@ -630,536 +726,461 @@ export function CaptureWizard({
   // =========================================================================
   if (step === "camera") {
     const state = camera.state;
+    const stage = cameraStageOf(state);
     const showVideo = state.name === "ready" || state.name === "capturing";
-    const failure = state.name === "failed" ? state.failure : null;
+    const help =
+      state.name === "failed"
+        ? cameraHelp(state.failure.kind, platform)
+        : state.name === "unsupported"
+          ? cameraHelp("unsupported", platform)
+          : null;
+    const nextNumber = nextSequenceNumber(shots) ?? MAX_CAPTURES_PER_SESSION;
+    const t = toneClasses("dark");
+    const markByHandCopy = markByHandError ? describeCaptureFlowError(markByHandError, "markByHand") : null;
+    const lastShot = shots[shots.length - 1] ?? null;
 
     return (
-      <div className="flex flex-col gap-4">
-        {banner}
-        <div className="flex flex-col gap-1">
-          <p className="text-xs uppercase tracking-wide text-neutral-500">
-            {started?.resumed ? "Resumed session" : "New session"}
-          </p>
-          <p className="text-sm text-neutral-700">{contextLabel}</p>
-        </div>
-
-        <div className="relative w-full overflow-hidden rounded-md border border-neutral-200 bg-neutral-950">
-          {/* The element stays mounted across every state: `open()` resolves
-              into this ref, and a ref pointing at an element React has just
-              unmounted is how a camera ends up running with nothing to draw
-              it. */}
+      <CaptureShell
+        tone="dark"
+        title={context.title}
+        subtitle={subtitle}
+        onBack={onBack}
+        backLabel={backTarget.label}
+        headingRef={headingRef}
+        heading={addingToExisting ? "Add a photo" : "Take a photo of the class"}
+        notices={offlineNotice}
+        footer={
+          help ? (
+            <>
+              {help.canRetry && canStart(state) ? (
+                <ActionButton tone="dark" size="lg" onClick={() => void camera.start(activeDeviceId ?? undefined)}>
+                  Try again
+                </ActionButton>
+              ) : null}
+              {help.offerMarkByHand && canReview && !addingToExisting ? (
+                <ActionButton tone="dark" kind="secondary" onClick={() => void markByHand()} disabled={markByHandBusy}>
+                  {markByHandBusy ? <Spinner className="size-4" /> : null}
+                  Mark attendance by hand
+                </ActionButton>
+              ) : null}
+              {markByHandCopy ? (
+                <p role="alert" className={`text-sm ${t.body}`}>
+                  {markByHandCopy.message}
+                </p>
+              ) : null}
+              {leaveBar("dark")}
+              {cancelControl("dark")}
+            </>
+          ) : (
+            <>
+              {captureError ? (
+                <p role="alert" className="text-center text-sm text-amber-300 md:text-amber-700">
+                  {captureError}
+                </p>
+              ) : null}
+              {leaveBar("dark")}
+              <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-4">
+                <div className="flex justify-start">
+                  {lastShot ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelected(lastShot.sequenceNumber);
+                        setStep("photo");
+                      }}
+                      aria-label={`See your ${shots.length === 1 ? "photo" : `${shots.length} photos`}`}
+                      className="relative size-14 overflow-hidden rounded-lg ring-2 ring-white/60 focus-visible:outline-none focus-visible:ring-4 md:ring-neutral-300"
+                    >
+                      {/* A data URL held in memory for the length of this flow.
+                          next/image optimises assets served from a URL and has
+                          nothing to do here. */}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={lastShot.dataUrl} alt="" className="size-full object-cover" />
+                      {shots.length > 1 ? (
+                        <span className="absolute right-0.5 bottom-0.5 rounded bg-neutral-900/80 px-1 text-xs font-semibold text-white">
+                          {shots.length}
+                        </span>
+                      ) : null}
+                    </button>
+                  ) : null}
+                </div>
+                <ShutterButton
+                  label={`Take photo ${nextNumber} of ${MAX_CAPTURES_PER_SESSION}`}
+                  disabled={!canCapture(state) || captureLimitReached}
+                  onClick={capture}
+                />
+                <div className="flex justify-end">
+                  {shots.length > 0 ? (
+                    <ActionButton
+                      tone="dark"
+                      onClick={() => (done.enabled ? void process() : setStep("photo"))}
+                    >
+                      Done
+                    </ActionButton>
+                  ) : null}
+                </div>
+              </div>
+              <p className={`text-center text-xs ${t.muted}`}>
+                {captureLimitReached
+                  ? "That's the most photos for one register."
+                  : `Photo ${nextNumber} of ${MAX_CAPTURES_PER_SESSION} · Fit every row of the class in the frame`}
+              </p>
+            </>
+          )
+        }
+      >
+        <Viewfinder>
+          {/* The element stays mounted across every camera state: `open()`
+              resolves into this ref, and a ref pointing at an element React has
+              just unmounted is how a camera ends up running with nothing to
+              draw it. `object-contain` so the preview shows the whole frame
+              that will be sent — not a crop of it. */}
           <video
-            ref={camera.videoRef}
+            ref={videoRef}
             playsInline
             muted
-            className={`aspect-video w-full object-cover ${showVideo ? "block" : "invisible"}`}
-            aria-label="Classroom camera preview"
+            className={`size-full object-contain ${showVideo ? "block" : "invisible"}`}
+            aria-label="Camera preview"
           />
-          {!showVideo && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
-              <p className="text-sm text-neutral-200">{cameraStatusLabel(state)}</p>
-              {state.name === "starting" && (
-                <p className="text-xs text-neutral-400">
-                  Your browser may ask for permission to use the camera.
-                </p>
-              )}
-              {state.name === "unsupported" && (
-                <p className="text-xs text-neutral-400">
-                  Open this page in Chrome, Edge or Safari over HTTPS, or use a phone
-                  or tablet.
-                </p>
+          {!showVideo ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 overflow-y-auto px-6 text-center text-white">
+              {stage === "requesting" ? (
+                <>
+                  <CameraIcon className="size-10" />
+                  <p className="text-lg font-semibold">Allow camera access</p>
+                  <p className="max-w-xs text-sm text-white/80">
+                    Your {platform === "other" ? "browser" : "phone"} will ask to use the camera. Choose
+                    Allow.
+                  </p>
+                </>
+              ) : help ? (
+                <>
+                  <p className="text-lg font-semibold">{help.title}</p>
+                  <ol className="flex max-w-xs list-decimal flex-col gap-1.5 pl-5 text-left text-sm text-white/85">
+                    {help.steps.map((stepText) => (
+                      <li key={stepText}>{stepText}</li>
+                    ))}
+                  </ol>
+                </>
+              ) : (
+                <>
+                  <Spinner className="size-8" />
+                  <p className="text-sm text-white/80">Starting the camera…</p>
+                </>
               )}
             </div>
-          )}
-        </div>
-
-        {failure && (
-          <div
-            role="alert"
-            className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
-          >
-            {failure.message}
-          </div>
-        )}
-        {captureError && (
-          <p role="alert" className="text-sm text-red-600">
-            {captureError}
-          </p>
-        )}
-
-        <div className="flex flex-wrap items-center gap-2">
-          {canCapture(state) ? (
-            <Button onClick={capture} disabled={captureLimitReached}>
-              {captureLimitReached
-                ? "Capture limit reached"
-                : `Capture photo ${shots.length + 1} of ${MAX_CAPTURES_PER_SESSION}`}
-            </Button>
-          ) : (
-            <Button
-              onClick={() => void camera.start()}
-              disabled={!canStart(state) || state.name === "starting"}
+          ) : null}
+          {showVideo ? (
+            <span className="absolute top-3 left-3 rounded-full bg-neutral-900/70 px-3 py-1 text-xs font-medium text-white">
+              Photo {nextNumber} of {MAX_CAPTURES_PER_SESSION}
+            </span>
+          ) : null}
+          {showVideo && cameraDevices.length > 1 ? (
+            <button
+              type="button"
+              onClick={() => {
+                const index = cameraDevices.findIndex((d) => d.deviceId === activeDeviceId);
+                const next = cameraDevices[(index + 1) % cameraDevices.length];
+                void switchDevice(next.deviceId);
+              }}
+              aria-label="Switch camera"
+              className="absolute top-2 right-2 inline-flex size-11 items-center justify-center rounded-full bg-neutral-900/70 text-white hover:bg-neutral-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
             >
-              {state.name === "starting"
-                ? "Opening camera…"
-                : state.name === "failed"
-                  ? "Try again"
-                  : "Open camera"}
-            </Button>
-          )}
-          {shots.length > 0 && (
-            <Button variant="secondary" onClick={() => setStep("review")}>
-              Review {shots.length} photo{shots.length === 1 ? "" : "s"}
-            </Button>
-          )}
-          <Button variant="secondary" onClick={discard}>
-            {addingToExisting ? "Cancel — keep the register" : "Discard session"}
-          </Button>
-        </div>
-
-        {/* Device switching. Only offered once a stream has run: before
-            permission is granted the browser reports no usable labels. */}
-        {camera.devices.length > 1 && state.name === "ready" && (
-          <div className="flex flex-wrap items-center gap-2">
-            <label htmlFor="camera-device" className="text-xs text-neutral-500">
-              Camera
-            </label>
-            <select
-              id="camera-device"
-              value={camera.activeDeviceId ?? ""}
-              onChange={(e) => void camera.switchDevice(e.target.value)}
-              className="rounded-md border border-neutral-300 px-2 py-1.5 text-xs text-neutral-800"
-            >
-              {camera.devices.map((d) => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {d.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        <p className="text-xs text-neutral-500">
-          Reposition between shots so students hidden in one photo appear in another.
-          One solid capture is usually enough for a small class.
-        </p>
-      </div>
+              <SwitchCameraIcon className="size-6" />
+            </button>
+          ) : null}
+          {flash ? <div className="pointer-events-none absolute inset-0 bg-white/80 motion-reduce:hidden" aria-hidden /> : null}
+        </Viewfinder>
+      </CaptureShell>
     );
   }
 
   // =========================================================================
-  // Review captures
+  // Photo — the captured frame, its face check, and what next
   // =========================================================================
-  if (step === "review") {
+  if (step === "photo" && selectedShot) {
+    const status = photoStatusOf(selectedShot);
+    const t = toneClasses("dark");
     return (
-      <div className="flex flex-col gap-4">
-        {banner}
-        <div className="flex items-baseline justify-between">
-          <h2 className="text-base font-semibold text-neutral-900">Review captures</h2>
-          <span className="text-xs text-neutral-500">
-            {shots.length} of up to {MAX_CAPTURES_PER_SESSION} captures
-          </span>
-        </div>
-
-        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          {shots.map((s) => (
-            <li
-              key={s.sequenceNumber}
-              className="flex flex-col gap-2 rounded-md border border-neutral-200 p-2"
-            >
-              {/* A data URL held in memory for the length of this step.
-                  next/image optimises assets served from a URL and has nothing
-                  to do here; it would also mean handing a photograph of a
-                  classroom to an image pipeline. */}
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={s.dataUrl}
-                alt={`Capture ${s.sequenceNumber}`}
-                className="aspect-video w-full rounded-sm bg-neutral-100 object-cover"
-              />
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-neutral-500">
-                  Photo {s.sequenceNumber}
-                </span>
-                <span
-                  className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${qualityBadgeClasses(s.analysis?.qualityLabel)}`}
-                >
-                  {qualityBadgeText(s.analysis?.qualityLabel, s.checking === true)}
-                </span>
-              </div>
-              {s.analysis && (
-                <p className="text-xs text-neutral-600">
-                  {s.analysis.faceCount} face{s.analysis.faceCount === 1 ? "" : "s"} detected
-                  {s.analysis.averageDetectionConfidence !== null &&
-                    ` · avg confidence ${(s.analysis.averageDetectionConfidence * 100).toFixed(0)}%`}
-                </p>
+      <CaptureShell
+        tone="dark"
+        title={context.title}
+        subtitle={subtitle}
+        onBack={onBack}
+        backLabel={backTarget.label}
+        headingRef={headingRef}
+        heading={`Photo ${selectedShot.sequenceNumber}: ${status.label}`}
+        notices={offlineNotice}
+        footer={
+          <>
+            {status.detail ? <p className={`text-sm ${t.body}`}>{status.detail}</p> : null}
+            {leaveBar("dark")}
+            <div className="grid grid-cols-2 gap-3">
+              <ActionButton tone="dark" kind="secondary" onClick={() => retakeShot(selectedShot.sequenceNumber)}>
+                <RetakeIcon className="size-4" />
+                Retake
+              </ActionButton>
+              {!captureLimitReached ? (
+                <ActionButton tone="dark" kind="secondary" onClick={() => setStep("camera")}>
+                  <PlusIcon className="size-4" />
+                  Add another photo
+                </ActionButton>
+              ) : (
+                <ActionButton tone="dark" kind="secondary" onClick={removeSelected}>
+                  Remove photo
+                </ActionButton>
               )}
-              {s.analysis?.qualityHint && (
-                <p className="text-xs text-neutral-500">{s.analysis.qualityHint}</p>
+            </div>
+            <ActionButton tone="dark" size="lg" onClick={() => void process()} disabled={!done.enabled}>
+              {done.enabled ? (
+                <>
+                  <CheckIcon className="size-5" />
+                  Done
+                </>
+              ) : (
+                <>
+                  {shots.some((s) => s.checking) ? <Spinner className="size-5" /> : null}
+                  {done.reason}
+                </>
               )}
-              {s.failure && (
-                <p className="text-xs text-red-600" role="alert">
-                  {s.failure.message}
-                </p>
-              )}
-              <p className="text-[10px] text-neutral-400">
-                {s.width}×{s.height}
-              </p>
-              <div className="flex gap-2">
-                <Button
-                  variant="secondary"
-                  onClick={() => retakeShot(s.sequenceNumber)}
-                  className="!py-1 !text-xs"
+            </ActionButton>
+            {cancelControl("dark")}
+          </>
+        }
+      >
+        <Viewfinder>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={selectedShot.dataUrl}
+            alt={`Photo ${selectedShot.sequenceNumber} of the class`}
+            className="size-full object-contain"
+          />
+          <StatusChip status={status} className="absolute top-3 left-3" />
+          {flash ? <div className="pointer-events-none absolute inset-0 bg-white/80 motion-reduce:hidden" aria-hidden /> : null}
+        </Viewfinder>
+        {shots.length > 1 ? (
+          <div className="flex items-center justify-center gap-3 px-4 pt-3 md:justify-start md:px-5">
+            {shots.map((shot) => {
+              const shotStatus = photoStatusOf(shot);
+              const isSelected = shot.sequenceNumber === selectedShot.sequenceNumber;
+              return (
+                <button
+                  key={shot.sequenceNumber}
+                  type="button"
+                  onClick={() => setSelected(shot.sequenceNumber)}
+                  aria-label={`Photo ${shot.sequenceNumber}: ${shotStatus.label}`}
+                  aria-pressed={isSelected}
+                  className={`relative size-14 overflow-hidden rounded-lg focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-white md:focus-visible:ring-neutral-900 ${
+                    isSelected ? "ring-2 ring-white md:ring-neutral-900" : "opacity-70"
+                  }`}
                 >
-                  Retake
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => removeShot(s.sequenceNumber)}
-                  className="!py-1 !text-xs"
-                >
-                  Remove
-                </Button>
-              </div>
-            </li>
-          ))}
-        </ul>
-
-        {shots.length === 0 && (
-          <p className="rounded-md border border-dashed border-neutral-300 px-4 py-6 text-center text-sm text-neutral-500">
-            No captures yet. Open the camera and take at least one photo of the class.
-          </p>
-        )}
-
-        {processingError && (
-          <p role="alert" className="text-sm text-red-600">
-            {processingError}
-          </p>
-        )}
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={process} disabled={!canProcess}>
-            Process attendance
-          </Button>
-          {!captureLimitReached && (
-            <Button variant="secondary" onClick={captureAnother}>
-              {shots.length === 0 ? "Open camera" : "Capture another photo"}
-            </Button>
-          )}
-          <Button variant="secondary" onClick={discard}>
-            {addingToExisting ? "Cancel — keep the register" : "Discard session"}
-          </Button>
-        </div>
-        {!canProcess && shots.length > 0 && (
-          <p className="text-xs text-neutral-500">
-            {busyChecking
-              ? "Checking the captures — this takes a moment."
-              : "Retake or remove any photo that failed its check before continuing."}
-          </p>
-        )}
-      </div>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={shot.dataUrl} alt="" className="size-full object-cover" />
+                  <span
+                    className={`absolute right-1 bottom-1 size-3 rounded-full ring-2 ring-neutral-950 ${
+                      shotStatus.tone === "good"
+                        ? "bg-emerald-500"
+                        : shotStatus.tone === "checking"
+                          ? "bg-neutral-300"
+                          : shotStatus.tone === "warning"
+                            ? "bg-amber-400"
+                            : "bg-red-500"
+                    }`}
+                    aria-hidden
+                  />
+                </button>
+              );
+            })}
+            {!captureLimitReached ? (
+              <ActionButton tone="dark" kind="quiet" onClick={removeSelected}>
+                Remove this photo
+              </ActionButton>
+            ) : null}
+          </div>
+        ) : null}
+      </CaptureShell>
     );
   }
 
+  // Unreachable: Retake, Remove and Done all return to the camera when no
+  // photo is left. Rendering nothing beats rendering the wrong step.
+  if (step === "photo") return null;
+
   // =========================================================================
-  // Processing
+  // Matching
   // =========================================================================
   if (step === "processing") {
     return (
-      <div className="flex flex-col gap-4">
-        {banner}
-        <h2 className="text-base font-semibold text-neutral-900">Processing captures</h2>
-        <div
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={processingPercent}
-          aria-label="Recognition progress"
-          className="h-2 w-full overflow-hidden rounded-full bg-neutral-100"
-        >
-          <div
-            className="h-full bg-neutral-900 transition-[width] duration-500 ease-out"
-            style={{ width: `${processingPercent}%` }}
-          />
+      <CaptureShell
+        tone="light"
+        title={context.title}
+        subtitle={subtitle}
+        onBack={leave}
+        backLabel={backTarget.label}
+        backDisabled
+        headingRef={headingRef}
+        heading="Matching students"
+        showHeading={false}
+        notices={offlineNotice}
+      >
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-12 text-center">
+          <Spinner className="size-12 text-neutral-900" />
+          <p className="text-xl font-semibold text-neutral-900" role="status" aria-live="polite">
+            {PROCESSING_LABEL[phase]}
+          </p>
+          <p className="text-sm tabular-nums text-neutral-500">{formatElapsed(clock - processingSince)}</p>
+          <p className="max-w-xs text-sm text-neutral-600">
+            Keep this screen open. {shots.length === 1 ? "Your photo is" : `All ${shots.length} photos are`}{" "}
+            checked together, so a student in two photos is counted once.
+          </p>
         </div>
-        <p className="text-sm text-neutral-700" aria-live="polite">
-          {processingStage}…
-        </p>
-        <p className="text-xs text-neutral-400">
-          Do not close this tab. All {shots.length} capture
-          {shots.length === 1 ? "" : "s"} are analysed together so a student seen in
-          two photos is counted once.
-        </p>
-      </div>
+      </CaptureShell>
     );
   }
 
   // =========================================================================
-  // Summary
-  //
-  // Counts are derived from the server's run: `perStudent` is already one
-  // deduplicated row per student, and `unmatchedStudentIds` is the rest of the
-  // class.
+  // Result
   // =========================================================================
-  const perStudent = recognition?.perStudent ?? [];
-  const presentCount = perStudent.filter((s) => s.advisoryResult === "PRESENT").length;
-  const reviewCount = perStudent.filter((s) => s.advisoryResult === "NEEDS_REVIEW").length;
-  const ambiguousCount = perStudent.filter((s) => s.wasAmbiguous).length;
-  const noFacesAtAll = recognition !== null && recognition.detectedFacesTotal === 0;
-  const facesButNoMatches =
-    recognition !== null && recognition.detectedFacesTotal > 0 && perStudent.length === 0;
-  // The recognition run reads the service's own model report, so it is the
-  // better source; the capture analyses are the fallback when it did not run.
   const modelState = recognition ?? summary;
-  const availability = modelState
-    ? describeRecognitionAvailability(modelState, { showDiagnostics })
-    : null;
-  const counts = recognition
-    ? recognitionCountLabels({
-        present: presentCount,
-        review: reviewCount,
-        notDetected: recognition.unmatchedStudentIds.length,
-        unknownFaces: recognition.unknownFacesTotal,
-      })
-    : null;
+  const availability = modelState ? describeRecognitionAvailability(modelState, { showDiagnostics }) : null;
+  const perStudent = recognition?.perStudent ?? [];
+  const ready = readySummaryOf({
+    total: generation?.counts.total ?? summary?.enrolledStudentCount ?? started?.enrolledStudentCount ?? 0,
+    recognition: recognition
+      ? {
+          recognised: perStudent.filter((s) => s.advisoryResult === "PRESENT").length,
+          lookAlikes: perStudent.filter((s) => s.wasAmbiguous).length,
+          detectedFaces: recognition.detectedFacesTotal,
+          unknownFaces: recognition.unknownFacesTotal,
+          comparableStudents: recognition.candidatePoolSize,
+          needReenrolment: recognition.skippedIncompatibleCandidates,
+          recommendRetake: recognition.recommendRetake,
+        }
+      : null,
+    availability: availability?.availability ?? null,
+  });
+  const failed = processError !== null && generation === null;
+  const failure = processError ? describeCaptureFlowError(processError, "process") : null;
+  const markByHandCopy = markByHandError ? describeCaptureFlowError(markByHandError, "markByHand") : null;
 
   return (
-    <div className="flex flex-col gap-4">
-      {banner}
-      <h2 className="text-base font-semibold text-neutral-900">
-        {generation ? "Session ready for review" : "Captures processed"}
-      </h2>
-
-      {availability && (
-        <div
-          role={availability.availability === "ready" ? "status" : "alert"}
-          className={
-            availability.availability === "ready"
-              ? "rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-700"
-              : "rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
-          }
-        >
-          <strong>{availability.headline}.</strong> {availability.detail}
-          {availability.diagnostics && (
-            <span className="mt-1 block font-mono text-[11px] text-neutral-500">
-              {availability.diagnostics}
-            </span>
-          )}
-        </div>
-      )}
-
-      {recognitionError && (
-        <div
-          role="alert"
-          className="flex flex-col gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800"
-        >
-          <p>{recognitionError}</p>
-          {canRollCall && (
-            <>
-              <p>
-                No attendance has been recorded, and nobody has been marked absent as
-                a result. A roll call opens the class list with every student awaiting
-                your decision.
+    <CaptureShell
+      tone="light"
+      title={context.title}
+      subtitle={subtitle}
+      onBack={leave}
+      backLabel={backTarget.label}
+      headingRef={headingRef}
+      heading={failed ? "Couldn't match students" : "Attendance ready"}
+      showHeading={false}
+      notices={offlineNotice}
+      footer={
+        failed ? (
+          <>
+            {failure?.canRetry ? (
+              <ActionButton tone="light" size="lg" onClick={() => void process()} disabled={markByHandBusy}>
+                Try again
+              </ActionButton>
+            ) : null}
+            {failure?.canMarkByHand && canReview ? (
+              <ActionButton tone="light" kind="secondary" onClick={() => void markByHand()} disabled={markByHandBusy}>
+                {markByHandBusy ? <Spinner className="size-4" /> : null}
+                Mark attendance by hand
+              </ActionButton>
+            ) : null}
+            {markByHandCopy ? (
+              <p role="alert" className="text-sm text-red-800">
+                {markByHandCopy.message}
               </p>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button onClick={startRollCall} disabled={rollCallBusy} className="!py-1 !text-xs">
-                  {rollCallBusy ? "Opening roll call…" : "Continue to manual roll call"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={process}
-                  disabled={rollCallBusy}
-                  className="!py-1 !text-xs"
-                >
-                  Try recognition again
-                </Button>
-              </div>
-            </>
-          )}
-          {rollCallError && <p role="alert">{rollCallError}</p>}
-        </div>
-      )}
-
-      {processingError && (
-        <p role="alert" className="text-sm text-red-600">
-          {processingError}
-        </p>
-      )}
-
-      {summary && (
-        <dl className="grid grid-cols-3 gap-4 rounded-md border border-neutral-200 p-4 text-sm">
-          <div>
-            <dt className="text-xs text-neutral-500">Photos captured</dt>
-            <dd className="text-lg font-semibold text-neutral-900">{summary.captureCount}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-neutral-500">Faces detected</dt>
-            <dd className="text-lg font-semibold text-neutral-900">
-              {recognition?.detectedFacesTotal ?? summary.totalFacesDetected}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-neutral-500">Enrolled students</dt>
-            <dd className="text-lg font-semibold text-neutral-900">
-              {summary.enrolledStudentCount}
-            </dd>
-          </div>
-        </dl>
-      )}
-
-      {noFacesAtAll && (
-        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          <strong>No faces were detected in any capture.</strong> Nobody has been
-          marked absent because of it — every student is waiting for your decision.
-          Retake with more light, or move closer to the class.
-        </div>
-      )}
-
-      {facesButNoMatches && (
-        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          <strong>
-            {recognition?.detectedFacesTotal} face
-            {recognition?.detectedFacesTotal === 1 ? " was" : "s were"} detected, but
-            none matched an enrolled student.
-          </strong>{" "}
-          {recognition?.candidatePoolSize === 0
-            ? "No student in this class has a face enrollment for the recognition model now running. Samples taken under an earlier model are kept but never compared — those students must be re-enrolled."
-            : availability?.availability === "unavailable"
-              ? "Real face identification is not available on this system, so no capture can match a student. This is a system setting, not a problem with the enrollments or the photos."
-              : "None of the enrolled students scored high enough to suggest — they may be out of frame, facing away, or poorly lit."}{" "}
-          Every student is waiting for your decision rather than being marked absent.
-        </div>
-      )}
-
-      {recognition && (
-        <section className="flex flex-col gap-3 rounded-md border border-neutral-200 p-4">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h3 className="text-sm font-semibold text-neutral-900">Recognition advisory</h3>
-            <span className="text-xs text-neutral-500">
-              {recognition.scoredFacesTotal} of {recognition.detectedFacesTotal} detected
-              faces scored against {recognition.candidatePoolSize} enrolled students in
-              this class
+            ) : null}
+            <ActionButton tone="light" kind="quiet" onClick={leave}>
+              Back to {backTarget.label}
+            </ActionButton>
+          </>
+        ) : (
+          <>
+            {canReview && reviewHref ? (
+              <ActionButton tone="light" size="lg" onClick={() => router.push(reviewHref)}>
+                Review attendance
+              </ActionButton>
+            ) : (
+              <p className="rounded-lg bg-neutral-50 px-3 py-2 text-sm text-neutral-700">
+                Sent for review. The class&apos;s teacher confirms the register.
+              </p>
+            )}
+            <ActionButton tone="light" kind="quiet" onClick={leave}>
+              Back to {backTarget.label}
+            </ActionButton>
+          </>
+        )
+      }
+    >
+      <div className="flex flex-col gap-4 overflow-y-auto px-4 py-6 md:px-5">
+        {failed ? (
+          <div className="flex flex-col items-center gap-3 text-center">
+            <span className="inline-flex size-14 items-center justify-center rounded-full bg-red-50 text-red-700">
+              <CameraIcon className="size-7" />
             </span>
+            <p className="text-xl font-semibold text-neutral-900" aria-hidden="true">
+              Couldn&apos;t match students
+            </p>
+            <p role="alert" className="max-w-sm text-sm text-neutral-700">
+              {failure?.message}
+            </p>
+            <p className="max-w-sm text-xs text-neutral-500">
+              Nobody has been marked present or absent because of this.
+            </p>
           </div>
-
-          {counts && (
-            <ul className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
-              <li className="rounded-md bg-emerald-50 px-3 py-2 font-medium text-emerald-800">
-                {counts.present}
-              </li>
-              <li className="rounded-md bg-amber-50 px-3 py-2 font-medium text-amber-800">
-                {counts.review}
-              </li>
-              <li className="rounded-md bg-neutral-100 px-3 py-2 font-medium text-neutral-700">
-                {counts.notDetected}
-              </li>
-              <li className="rounded-md bg-neutral-100 px-3 py-2 font-medium text-neutral-700">
-                {counts.unknownFaces}
-              </li>
-            </ul>
-          )}
-
-          {recognition.unknownFacesTotal > 0 && (
-            <p className="text-xs text-neutral-600">
-              {recognition.unknownFacesTotal === 1
-                ? "One face did not match any enrolled student in this class. It has not been assigned to anyone."
-                : `${recognition.unknownFacesTotal} faces did not match any enrolled student in this class. None has been assigned to anyone.`}
-            </p>
-          )}
-
-          {recognition.recommendRetake && (
-            <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900">
-              <strong>Some faces were too small to identify reliably.</strong> Those
-              students are waiting for your decision. A closer photo of the back rows
-              usually fixes this — you can add one from the register.
-            </p>
-          )}
-
-          {ambiguousCount > 0 && (
-            <p className="text-xs text-amber-800">
-              {ambiguousCount} {ambiguousCount === 1 ? "student was" : "students were"}{" "}
-              routed to review rather than marked present — either too close to another
-              enrolled student to separate confidently, or claimed by two faces in the
-              same photo.
-            </p>
-          )}
-
-          {recognition.skippedIncompatibleCandidates > 0 && (
-            <p className="text-xs text-neutral-600">
-              {recognition.skippedIncompatibleCandidates} enrolled{" "}
-              {recognition.skippedIncompatibleCandidates === 1 ? "student" : "students"}{" "}
-              could not be compared because their stored face data was captured with a
-              different model version. That is not evidence of absence — they must be
-              re-enrolled or marked by roll call.
-            </p>
-          )}
-
-          <p className="rounded-md bg-neutral-50 px-3 py-2 text-xs text-neutral-700">
-            <strong>Advisory only — attendance is not final.</strong> These results are
-            a starting point for the register; nothing counts until you confirm it. An
-            uncertain match is never silently promoted to present.
-          </p>
-        </section>
-      )}
-
-      {generation && (
-        <section className="flex flex-col gap-2 rounded-md border border-neutral-200 p-4">
-          <h3 className="text-sm font-semibold text-neutral-900">Attendance register</h3>
-          <p className="text-xs text-neutral-600">
-            {generation.counts.total} enrolled{" "}
-            {generation.counts.total === 1 ? "student has" : "students have"} a row in
-            this session&apos;s register
-            {generation.rosterScope === "cohortSubject"
-              ? " (this subject's enrolled students)"
-              : " (the whole class)"}
-            . Every one of them is accounted for — nobody was dropped for having no
-            usable face data.
-          </p>
-          <dl className="grid grid-cols-3 gap-4 text-sm">
-            <div>
-              <dt className="text-xs text-neutral-500">Present</dt>
-              <dd className="text-lg font-semibold text-emerald-700">
-                {generation.counts.present}
-              </dd>
+        ) : (
+          <>
+            <div className="flex flex-col items-center gap-2 text-center">
+              <span className="inline-flex size-14 items-center justify-center rounded-full bg-emerald-50 text-emerald-700">
+                <CheckIcon className="size-8" />
+              </span>
+              <p className="text-xl font-semibold text-neutral-900" aria-hidden="true">
+                Attendance ready
+              </p>
+              <p className="text-sm text-neutral-500">{subtitle ? `${context.title} · ${subtitle}` : context.title}</p>
             </div>
-            <div>
-              <dt className="text-xs text-neutral-500">Absent</dt>
-              <dd className="text-lg font-semibold text-neutral-700">
-                {generation.counts.absent}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs text-neutral-500">Needs review</dt>
-              <dd className="text-lg font-semibold text-amber-700">
-                {generation.counts.needsReview + generation.counts.notEvaluated}
-              </dd>
-            </div>
-          </dl>
-        </section>
-      )}
-
-      <p className="text-sm text-neutral-600">
-        The captures have been analysed and discarded. Nothing was stored, so a
-        retake later would have to be taken live.
-      </p>
-
-      <div className="flex flex-wrap items-center gap-2">
-        {generation ? (
-          <Button onClick={() => started && openReview(started.session.id)}>
-            Review and confirm attendance
-          </Button>
-        ) : null}
-        <Button
-          variant="secondary"
-          onClick={() => router.push(`/dashboard/attendance/${cohortId}`)}
-        >
-          Back to class
-        </Button>
-        {!generation && (
-          <Button variant="secondary" onClick={discard}>
-            {addingToExisting ? "Cancel — keep the register" : "Discard session"}
-          </Button>
+            <dl className="grid grid-cols-3 gap-2 text-center">
+              <div className="flex flex-col-reverse rounded-xl bg-emerald-50 px-2 py-3">
+                <dt className="text-xs text-emerald-900">Recognised</dt>
+                <dd className="text-2xl font-semibold tabular-nums text-emerald-800">{ready.recognised}</dd>
+              </div>
+              <div className="flex flex-col-reverse rounded-xl bg-amber-50 px-2 py-3">
+                <dt className="text-xs text-amber-900">To check</dt>
+                <dd className="text-2xl font-semibold tabular-nums text-amber-800">{ready.toCheck}</dd>
+              </div>
+              <div className="flex flex-col-reverse rounded-xl bg-neutral-100 px-2 py-3">
+                <dt className="text-xs text-neutral-700">Students</dt>
+                <dd className="text-2xl font-semibold tabular-nums text-neutral-900">{ready.total}</dd>
+              </div>
+            </dl>
+            {ready.notices.length > 0 ? (
+              <ul className="flex flex-col gap-2">
+                {ready.notices.map((notice) => (
+                  <li
+                    key={notice.text}
+                    className={`rounded-lg px-3 py-2 text-sm ${
+                      notice.tone === "warning" ? "bg-amber-50 text-amber-950" : "bg-neutral-50 text-neutral-700"
+                    }`}
+                  >
+                    {notice.text}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <p className="text-center text-sm text-neutral-600">
+              {canReview
+                ? "Recognised students are suggestions. Nothing is final until you confirm it on the next screen."
+                : "Recognised students are suggestions until the register is confirmed."}
+            </p>
+            {availability?.diagnostics ? (
+              <p className="text-center font-mono text-[11px] text-neutral-400">{availability.diagnostics}</p>
+            ) : null}
+          </>
         )}
       </div>
-    </div>
+    </CaptureShell>
   );
 }

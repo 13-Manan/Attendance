@@ -7,6 +7,7 @@ import { getCohortById } from "@/modules/cohorts/repository";
 import { getInstitutionById } from "@/modules/institutions/repository";
 import { resolveAttendanceMode } from "@/modules/institutions/service";
 import { listCohortSubjectsForCapture } from "@/modules/attendance-capture/service";
+import { captureHref } from "@/modules/attendance-today/policy";
 import { listRecentSessionsForCohort } from "@/modules/attendance-review/repository";
 import { PageTrail } from "@/components/nav/page-trail";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
@@ -141,7 +142,7 @@ export default async function AttendanceCohortLandingPage({ params }: PageProps)
             Ready to capture today&apos;s attendance for this class.
           </p>
           <div>
-            <Link href={`/dashboard/attendance/${cohort.id}/capture`}>
+            <Link href={captureHref({ cohortId: cohort.id, cohortSubjectId: null }, "class")}>
               <Button type="button">+ Start attendance</Button>
             </Link>
           </div>
@@ -193,7 +194,7 @@ export default async function AttendanceCohortLandingPage({ params }: PageProps)
                   <span className="font-mono text-xs text-neutral-500">{s.subjectCode}</span>
                 </div>
                 <Link
-                  href={`/dashboard/attendance/${cohort.id}/capture?subject=${encodeURIComponent(s.id)}`}
+                  href={captureHref({ cohortId: cohort.id, cohortSubjectId: s.id }, "class")}
                   className="shrink-0"
                 >
                   <Button type="button" className="w-full sm:w-auto">

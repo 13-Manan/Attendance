@@ -65,6 +65,25 @@ export interface OpenCameraRequest {
   videoSink: VideoSink | null;
 }
 
+/**
+ * The video request for a classroom capture.
+ *
+ * The resolution target goes with every request, including a camera reopened
+ * by id. The first photo opens by facing mode; the second and third, a retake,
+ * and a camera switch reopen the camera the browser chose, by id. Asking for
+ * the id alone let the browser fall back to its default — often 640×480 on a
+ * phone — so later photos of the same room were taken at a fraction of the
+ * first one's resolution, and smaller faces are harder to match.
+ */
+export function classroomVideoConstraints(
+  request: Pick<OpenCameraRequest, "deviceId" | "facingMode">,
+): MediaTrackConstraints {
+  const resolution = { width: { ideal: MAX_CLASSROOM_CAPTURE_EDGE }, height: { ideal: 1080 } };
+  return request.deviceId
+    ? { deviceId: { exact: request.deviceId }, ...resolution }
+    : { facingMode: { ideal: request.facingMode }, ...resolution };
+}
+
 export interface OpenCameraResult {
   deviceId: string | null;
   deviceLabel: string | null;
@@ -149,13 +168,7 @@ export function browserCameraSource(): CameraSource {
 
     async open(request) {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: request.deviceId
-          ? { deviceId: { exact: request.deviceId } }
-          : {
-              facingMode: { ideal: request.facingMode },
-              width: { ideal: MAX_CLASSROOM_CAPTURE_EDGE },
-              height: { ideal: 1080 },
-            },
+        video: classroomVideoConstraints(request),
         audio: false,
       });
 

@@ -615,7 +615,12 @@ See also §4.4 for state tokens.
 
 ## 13. Camera / AI UI Visual Principles
 
-**Not implemented in this phase.** Principles only.
+**Partly implemented (2026-10-01, teacher attendance Phase 1):** the camera
+permission panel, the live viewfinder with its 1/3 counter, the capture flash
+(reduced-motion aware), each photo's face-check chip, the "Matching students…"
+wait and the result summary — in `app/dashboard/attendance/[cohortId]/capture`.
+Face boxes and per-face Matched/Uncertain/Unmatched overlays are still
+principles only.
 
 | State | Visual treatment |
 |---|---|

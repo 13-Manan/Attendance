@@ -11,14 +11,20 @@ import { buildQuickActions } from "./quick-actions";
 export function QuickActionsPanel({
   user,
   institutionKind,
+  exclude = [],
 }: {
   user: SessionUser;
   institutionKind: "SCHOOL" | "COLLEGE" | null;
+  /** Actions the page already offers more prominently, by href. */
+  exclude?: string[];
 }) {
   const actions = buildQuickActions(
     (permission) => hasPermission(user, permission),
     institutionKind,
-  );
+  ).filter((action) => !exclude.includes(action.href));
+
+  // Everything this role can do is already on the page: no empty panel.
+  if (actions.length === 0 && exclude.length > 0) return null;
 
   return (
     <Panel title="Quick actions">

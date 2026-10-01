@@ -7,7 +7,8 @@ import { createAttendanceSessionForRequest } from "../sessions/service.ts";
 import { findSessionForDay } from "../offline-sync/repository.ts";
 
 /**
- * "Discard session" followed by "Start attendance", against a real Postgres.
+ * "Cancel attendance" (once "Discard session") followed by "Start attendance",
+ * against a real Postgres.
  *
  * The rule under test lives in the WHERE clause of the "today's session"
  * lookups, which every unit test replaces with a stub — so the stubbed suites

@@ -49,7 +49,7 @@ export default async function AttendanceReviewPage({ params, searchParams }: Pag
   const addPhotoHref =
     board.session.processingStatus === "REVIEW" &&
     hasPermission(user, "attendanceSession.capture")
-      ? `/dashboard/attendance/${cohortId}/capture?add=1${
+      ? `/dashboard/attendance/${cohortId}/capture?add=1&start=1${
           board.session.cohortSubjectId
             ? `&subject=${encodeURIComponent(board.session.cohortSubjectId)}`
             : ""

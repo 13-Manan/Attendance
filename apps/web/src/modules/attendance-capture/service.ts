@@ -773,7 +773,7 @@ export interface CancelCaptureSessionDeps {
 }
 
 /**
- * Faculty-initiated cancel — used by the wizard's "Discard session" button.
+ * Faculty-initiated cancel — used by the wizard's "Cancel attendance" (once "Discard session").
  * Never destroys the AttendanceSession row (audit trail requires it survive)
  * — moves it to CANCELLED so the daily-uniqueness invariant does not lock
  * the cohort out of a fresh capture on the same day.

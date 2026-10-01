@@ -6,9 +6,11 @@ import { hasPermission, isPlatformUser } from "@/modules/authorization/service";
 import { ForbiddenError } from "@/modules/authorization/types";
 import { getCollegeHome } from "@/modules/college-setup/service";
 import { CollegeSetupError } from "@/modules/college-setup/types";
+import { getTeacherToday } from "@/modules/attendance-today/service";
 import { getFaceServiceStatus, getInstitutionCounts } from "@/modules/institutions/overview";
 import { getInstitutionType } from "@/modules/institutions/repository";
 import { SessionRow } from "@/components/attendance/session-list";
+import { TodayAttendance } from "@/components/attendance/today-attendance";
 import { DepartmentOverviewPanel } from "@/components/dashboard/department-overview-panel";
 import { QuickActionsPanel } from "@/components/dashboard/quick-actions-panel";
 import { SystemStatusPanel } from "@/components/dashboard/system-status-panel";
@@ -30,7 +32,16 @@ import { EmptyState, Panel } from "@/components/ui/panel";
  *
  * Everything on the page is scoped by `resolveFacultyScope`, so a college
  * lecturer sees their own subjects and classes and nothing else.
+ *
+ * A teacher's page leads with Today: the date, the register to take and one
+ * button to take it (`getTeacherToday`, derived from their own class and
+ * subject links). Everything else they had is still here, below it. An
+ * administrator's page is unchanged, with the same card on top only when they
+ * teach a class themselves.
  */
+/** A panel's corner link: small type, but a hit area a thumb can find. */
+const PANEL_LINK = "inline-flex min-h-11 min-w-11 items-center text-xs text-neutral-600 hover:underline";
+
 export default async function DashboardHomePage() {
   const user = await requireUser();
 
@@ -83,7 +94,7 @@ export default async function DashboardHomePage() {
   // Independent reads, issued together. The two additions cannot take the
   // page down: counts are skipped entirely without the permission, and
   // getFaceServiceStatus resolves to "unavailable" rather than throwing.
-  const [dashboard, counts, faceService, institutionKind, collegeHome] = await Promise.all([
+  const [dashboard, counts, faceService, institutionKind, collegeHome, teacherToday] = await Promise.all([
     getFacultyDashboard(user),
     isInstitutionAdmin ? getInstitutionCounts(user) : Promise.resolve(null),
     isInstitutionAdmin ? getFaceServiceStatus() : Promise.resolve(null),
@@ -97,11 +108,223 @@ export default async function DashboardHomePage() {
           throw error;
         })
       : Promise.resolve(null),
+    // The Today card is a shortcut, never a gate: if it cannot be built the
+    // page is exactly the page it was before.
+    getTeacherToday(user).catch(() => null),
   ]);
 
   const isAdmin = dashboard.scope === "institution";
   const isCollege = dashboard.attendanceMode === "SUBJECT_WISE";
   const pendingStudents = dashboard.pendingReview.reduce((n, s) => n + s.counts.needsReview, 0);
+
+  // The panels both layouts share.
+  const pendingReviewPanel =
+    dashboard.pendingReview.length > 0 ? (
+      <Panel
+        title="Needs review"
+        description="These registers are not visible to students until you confirm them."
+        action={
+          <Link
+            href="/dashboard/attendance/sessions?status=REVIEW"
+            className={PANEL_LINK}
+          >
+            View all
+          </Link>
+        }
+      >
+        <ul className="flex flex-col divide-y divide-neutral-100">
+          {dashboard.pendingReview.map((session) => (
+            <SessionRow key={session.sessionId} session={session} returnTo="/dashboard" />
+          ))}
+        </ul>
+      </Panel>
+    ) : null;
+  const todaysSessionsPanel = (
+    <Panel
+      title="Today's sessions"
+      action={
+        hasPermission(user, "attendanceSession.create") ? (
+          <Link href="/dashboard/attendance" className={PANEL_LINK}>
+            Take attendance
+          </Link>
+        ) : null
+      }
+    >
+      {dashboard.today.length === 0 ? (
+        <EmptyState>
+          No attendance sessions today yet.
+          {hasPermission(user, "attendanceSession.create")
+            ? " Start one from Attendance."
+            : ""}
+        </EmptyState>
+      ) : (
+        <ul className="flex flex-col divide-y divide-neutral-100">
+          {dashboard.today.map((session) => (
+            <SessionRow
+              key={session.sessionId}
+              session={session}
+              showDate={false}
+              returnTo="/dashboard"
+            />
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+  const classesPanel = (
+    <Panel
+      title={isAdmin ? "Classes" : "My classes"}
+      description={
+        dashboard.isClassTeacher
+          ? "You are the class teacher for the classes marked below."
+          : undefined
+      }
+    >
+      {dashboard.cohorts.length === 0 ? (
+        <EmptyState>
+          You are not linked to any class yet. Ask an administrator to add you
+          as faculty for a cohort.
+        </EmptyState>
+      ) : (
+        <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {dashboard.cohorts.map((cohort) => (
+            <li key={cohort.cohortId}>
+              <Link
+                href={`/dashboard/attendance/${cohort.cohortId}/history`}
+                className="flex h-full flex-col gap-1 rounded-md border border-neutral-200 p-3 hover:bg-neutral-50"
+              >
+                <span className="flex items-baseline justify-between gap-2">
+                  <span className="truncate text-sm font-medium text-neutral-900">
+                    {cohort.name}
+                  </span>
+                  {cohort.facultyRole === "PRIMARY" ? (
+                    <span className="shrink-0 rounded-full bg-neutral-900 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white">
+                      Class teacher
+                    </span>
+                  ) : null}
+                </span>
+                <span className="text-xs text-neutral-500">
+                  {cohort.termLabel ? `${cohort.termLabel} · ` : ""}
+                  {cohort.studentCount} student{cohort.studentCount === 1 ? "" : "s"}
+                </span>
+                <span className="text-xs text-neutral-400">
+                  {cohort.lastSessionDate
+                    ? `Last confirmed ${formatSessionDate(cohort.lastSessionDate)}`
+                    : "No confirmed attendance yet"}
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+  const subjectsPanel =
+    isCollege ? (
+      <Panel
+        title={isAdmin ? "Subjects" : "My subjects"}
+        description={
+          isAdmin ? undefined : "Only subjects assigned to you are listed here."
+        }
+      >
+        {dashboard.subjects.length === 0 ? (
+          <EmptyState>No subjects are assigned to you.</EmptyState>
+        ) : (
+          <ul className="flex flex-col divide-y divide-neutral-100">
+            {dashboard.subjects.map((subject) => (
+              <li key={subject.cohortSubjectId}>
+                <Link
+                  href={`/dashboard/attendance/${subject.cohortId}/history`}
+                  className="flex min-h-11 items-center justify-between gap-3 py-2.5 hover:bg-neutral-50"
+                >
+                  <span className="min-w-0 truncate text-sm text-neutral-900">
+                    {subject.subjectName}
+                    <span className="ml-2 text-xs text-neutral-500">{subject.subjectCode}</span>
+                  </span>
+                  <span className="shrink-0 text-xs text-neutral-500">{subject.cohortName}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+    ) : null;
+  const recentPanel = (
+    <Panel
+      title="Recent attendance"
+      action={
+        <Link
+          href="/dashboard/attendance/sessions"
+          className={PANEL_LINK}
+        >
+          All sessions
+        </Link>
+      }
+    >
+      {dashboard.recent.length === 0 ? (
+        <EmptyState>No confirmed attendance yet.</EmptyState>
+      ) : (
+        <ul className="flex flex-col divide-y divide-neutral-100">
+          {dashboard.recent.map((session) => (
+            <SessionRow key={session.sessionId} session={session} returnTo="/dashboard" />
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+
+  // A teacher (anyone who is not an administrator) leads with Today. A head of
+  // department who teaches nothing keeps the department view below instead
+  // of an empty card.
+  const teacherHome =
+    teacherToday !== null && !isInstitutionAdmin && (teacherToday.kind !== "none" || !collegeHome);
+
+  if (teacherHome) {
+    return (
+      <div className="flex w-full max-w-5xl flex-col gap-6">
+        {/* `grid-cols-1` is `minmax(0, 1fr)`: without it a phone's single
+            column grows to its longest line instead of the screen. */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
+          <TodayAttendance today={teacherToday} greeting={`Welcome, ${user.name}`} />
+          <div className="flex flex-col gap-5">
+            {pendingReviewPanel}
+            {dashboard.today.length > 0 ? todaysSessionsPanel : null}
+            {recentPanel}
+          </div>
+        </div>
+        {collegeHome ? <DepartmentOverviewPanel home={collegeHome} /> : null}
+        {/* Context for a wide screen; on a phone the card above is the page. */}
+        <div className="hidden lg:block">
+          <StatGrid>
+            <StatCard label="Today's sessions" value={String(dashboard.today.length)} />
+            <StatCard
+              label="Pending review"
+              value={String(dashboard.pendingReview.length)}
+              hint={
+                pendingStudents > 0
+                  ? `${pendingStudents} student${pendingStudents === 1 ? "" : "s"} unresolved`
+                  : "Nothing waiting"
+              }
+              tone={dashboard.pendingReview.length > 0 ? "warning" : "neutral"}
+            />
+            <StatCard label="My classes" value={String(dashboard.cohorts.length)} />
+            <StatCard
+              label="My subjects"
+              value={String(dashboard.subjects.length)}
+              hint={isCollege ? undefined : "Daily attendance"}
+            />
+          </StatGrid>
+        </div>
+        {classesPanel}
+        {subjectsPanel}
+        <QuickActionsPanel
+          user={user}
+          institutionKind={institutionKind}
+          exclude={["/dashboard/attendance"]}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
@@ -130,6 +353,10 @@ export default async function DashboardHomePage() {
           </Link>
         ) : null}
       </header>
+
+      {teacherToday && teacherToday.kind !== "none" ? (
+        <TodayAttendance today={teacherToday} heading="h2" />
+      ) : null}
 
       {collegeHome ? <DepartmentOverviewPanel home={collegeHome} /> : null}
 
@@ -165,7 +392,7 @@ export default async function DashboardHomePage() {
           action={
             <Link
               href="/dashboard/students"
-              className="text-xs text-neutral-600 hover:underline"
+              className={PANEL_LINK}
             >
               Manage students
             </Link>
@@ -187,156 +414,15 @@ export default async function DashboardHomePage() {
         </Panel>
       ) : null}
 
-      {dashboard.pendingReview.length > 0 ? (
-        <Panel
-          title="Needs review"
-          description="These registers are not visible to students until you confirm them."
-          action={
-            <Link
-              href="/dashboard/attendance/sessions?status=REVIEW"
-              className="text-xs text-neutral-600 hover:underline"
-            >
-              View all
-            </Link>
-          }
-        >
-          <ul className="flex flex-col divide-y divide-neutral-100">
-            {dashboard.pendingReview.map((session) => (
-              <SessionRow key={session.sessionId} session={session} returnTo="/dashboard" />
-            ))}
-          </ul>
-        </Panel>
-      ) : null}
+      {pendingReviewPanel}
 
-      <Panel
-        title="Today's sessions"
-        action={
-          hasPermission(user, "attendanceSession.create") ? (
-            <Link href="/dashboard/attendance" className="text-xs text-neutral-600 hover:underline">
-              Take attendance
-            </Link>
-          ) : null
-        }
-      >
-        {dashboard.today.length === 0 ? (
-          <EmptyState>
-            No attendance sessions today yet.
-            {hasPermission(user, "attendanceSession.create")
-              ? " Start one from Attendance."
-              : ""}
-          </EmptyState>
-        ) : (
-          <ul className="flex flex-col divide-y divide-neutral-100">
-            {dashboard.today.map((session) => (
-              <SessionRow
-                key={session.sessionId}
-                session={session}
-                showDate={false}
-                returnTo="/dashboard"
-              />
-            ))}
-          </ul>
-        )}
-      </Panel>
+      {todaysSessionsPanel}
 
-      <Panel
-        title={isAdmin ? "Classes" : "My classes"}
-        description={
-          dashboard.isClassTeacher
-            ? "You are the class teacher for the classes marked below."
-            : undefined
-        }
-      >
-        {dashboard.cohorts.length === 0 ? (
-          <EmptyState>
-            You are not linked to any class yet. Ask an administrator to add you
-            as faculty for a cohort.
-          </EmptyState>
-        ) : (
-          <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {dashboard.cohorts.map((cohort) => (
-              <li key={cohort.cohortId}>
-                <Link
-                  href={`/dashboard/attendance/${cohort.cohortId}/history`}
-                  className="flex h-full flex-col gap-1 rounded-md border border-neutral-200 p-3 hover:bg-neutral-50"
-                >
-                  <span className="flex items-baseline justify-between gap-2">
-                    <span className="truncate text-sm font-medium text-neutral-900">
-                      {cohort.name}
-                    </span>
-                    {cohort.facultyRole === "PRIMARY" ? (
-                      <span className="shrink-0 rounded-full bg-neutral-900 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white">
-                        Class teacher
-                      </span>
-                    ) : null}
-                  </span>
-                  <span className="text-xs text-neutral-500">
-                    {cohort.termLabel ? `${cohort.termLabel} · ` : ""}
-                    {cohort.studentCount} student{cohort.studentCount === 1 ? "" : "s"}
-                  </span>
-                  <span className="text-xs text-neutral-400">
-                    {cohort.lastSessionDate
-                      ? `Last confirmed ${formatSessionDate(cohort.lastSessionDate)}`
-                      : "No confirmed attendance yet"}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Panel>
+      {classesPanel}
 
-      {isCollege ? (
-        <Panel
-          title={isAdmin ? "Subjects" : "My subjects"}
-          description={
-            isAdmin ? undefined : "Only subjects assigned to you are listed here."
-          }
-        >
-          {dashboard.subjects.length === 0 ? (
-            <EmptyState>No subjects are assigned to you.</EmptyState>
-          ) : (
-            <ul className="flex flex-col divide-y divide-neutral-100">
-              {dashboard.subjects.map((subject) => (
-                <li key={subject.cohortSubjectId}>
-                  <Link
-                    href={`/dashboard/attendance/${subject.cohortId}/history`}
-                    className="flex items-center justify-between gap-3 py-2.5 hover:bg-neutral-50"
-                  >
-                    <span className="min-w-0 truncate text-sm text-neutral-900">
-                      {subject.subjectName}
-                      <span className="ml-2 text-xs text-neutral-500">{subject.subjectCode}</span>
-                    </span>
-                    <span className="shrink-0 text-xs text-neutral-500">{subject.cohortName}</span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Panel>
-      ) : null}
+      {subjectsPanel}
 
-      <Panel
-        title="Recent attendance"
-        action={
-          <Link
-            href="/dashboard/attendance/sessions"
-            className="text-xs text-neutral-600 hover:underline"
-          >
-            All sessions
-          </Link>
-        }
-      >
-        {dashboard.recent.length === 0 ? (
-          <EmptyState>No confirmed attendance yet.</EmptyState>
-        ) : (
-          <ul className="flex flex-col divide-y divide-neutral-100">
-            {dashboard.recent.map((session) => (
-              <SessionRow key={session.sessionId} session={session} returnTo="/dashboard" />
-            ))}
-          </ul>
-        )}
-      </Panel>
+      {recentPanel}
 
       {faceService ? (
         // Last, because it is reference rather than a task — and admin-only,
