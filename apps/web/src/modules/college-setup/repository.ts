@@ -612,6 +612,31 @@ export async function hasPlacementIn(
   return row !== null;
 }
 
+/** `hasPlacementIn` for several students at once: the ones that pass. One read. */
+export async function studentsPlacedIn(
+  db: Db,
+  institutionId: string,
+  studentIds: readonly string[],
+  unitIds: readonly string[],
+  options: { openSessionsOnly?: boolean } = {},
+): Promise<Set<string>> {
+  if (studentIds.length === 0 || unitIds.length === 0) return new Set();
+  const rows = await db.enrollment.findMany({
+    where: {
+      studentId: { in: [...studentIds] },
+      status: "ACTIVE",
+      cohort: {
+        institutionId,
+        academicUnitId: { in: [...unitIds] },
+        ...(options.openSessionsOnly ? { academicSession: { isActive: true } } : {}),
+      },
+    },
+    distinct: ["studentId"],
+    select: { studentId: true },
+  });
+  return new Set(rows.map((row) => row.studentId));
+}
+
 /** (student, section) pairs for these students currently in any of these sections. One read. */
 export async function placementsOf(
   db: Db,

@@ -323,6 +323,7 @@ test("a section's students are the directory, narrowed to it, counted over it", 
       seen.push(args);
       return page;
     },
+    runningFaceModel: async () => null,
   };
   await listSectionStudentsForRequest(
     PRINCIPAL,

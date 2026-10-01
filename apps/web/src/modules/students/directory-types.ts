@@ -122,6 +122,8 @@ export interface StudentPage {
   totalAll: number;
   /** On roll in the institution, ignoring the filters. */
   activeAll: number;
+  /** On roll and not yet fully verified (students/verification.ts), ignoring the filters. */
+  incompleteAll?: number;
   /** The page actually shown, which may be clamped down from the one asked for. */
   page: number;
   pageCount: number;

@@ -6,6 +6,7 @@ import * as setup from "@/modules/school-setup/repository";
 import { pickYear, sectionLabel } from "@/modules/school-setup/policy";
 import { listOnRollPlacements, type OnRollPlacement } from "./class-navigation-repository";
 import { searchStudents } from "./directory-repository";
+import type { FaceModelFilter } from "./verification";
 import { STUDENT_PAGE_SIZE, type StudentFilters } from "./directory-filters";
 import { StudentError, type StudentPage } from "./directory-types";
 import type {
@@ -61,6 +62,7 @@ export interface ClassNavigationDeps {
   getGroup?: (institutionId: string, groupId: string) => Promise<setup.GroupRow | null>;
   listOnRollPlacements?: (institutionId: string, cohortIds: readonly string[]) => Promise<OnRollPlacement[]>;
   searchStudents?: typeof searchStudents;
+  runningFaceModel?: () => Promise<FaceModelFilter>;
 }
 
 function deps(overrides: ClassNavigationDeps) {
@@ -84,6 +86,8 @@ function deps(overrides: ClassNavigationDeps) {
       ((institutionId: string, groupId: string) => setup.getGroup(prisma, institutionId, groupId)),
     listOnRollPlacements: overrides.listOnRollPlacements ?? listOnRollPlacements,
     searchStudents: overrides.searchStudents ?? searchStudents,
+    runningFaceModel:
+      overrides.runningFaceModel ?? (async () => (await import("./verification-service")).runningFaceModel()),
   };
 }
 
@@ -336,10 +340,12 @@ export async function listSectionStudentsForRequest(
   overrides: ClassNavigationDeps = {},
 ): Promise<StudentPage> {
   const institutionId = requireNavigation(actor);
-  return deps(overrides).searchStudents(
+  const d = deps(overrides);
+  return d.searchStudents(
     institutionId,
     { ...filters, cohortId: sectionId },
     STUDENT_PAGE_SIZE,
     { cohortId: sectionId },
+    { faceModel: await d.runningFaceModel() },
   );
 }

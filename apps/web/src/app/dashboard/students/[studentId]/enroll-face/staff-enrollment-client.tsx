@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { enrollFaceForStudent, replaceFaceEnrollment } from "@/modules/face-enrollment/actions";
 import { FaceCapture } from "@/modules/face-enrollment/face-capture";
+import { pairKey } from "@/modules/twin-confirmation/policy";
 import type { FaceEnrollmentStatusSummary } from "@/modules/face-enrollment/policy";
 import type { FaceCaptureSource, FaceEnrollmentResult } from "@/modules/face-enrollment/types";
 
@@ -52,6 +53,9 @@ export function StaffEnrollmentClient({
       onReplace={replace}
       initialStatus={initialStatus}
       subject="student"
+      twinReviewHref={(otherStudentId) =>
+        `/dashboard/students/twin-confirmations/${pairKey(studentId, otherStudentId)}`
+      }
     />
   );
 }

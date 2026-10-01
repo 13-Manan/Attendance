@@ -170,6 +170,9 @@ function harness(options: {
   scanThrows?: boolean;
   ownScanThrows?: boolean;
   enrollThrows?: boolean;
+  /** Standing staff decisions, keyed by the pair's two ids sorted and joined with `~`. */
+  decisions?: Record<string, "confirmed" | "rejected">;
+  decisionThrows?: boolean;
 } = {}): Harness {
   const students = options.students ?? [student()];
   const h: Harness = {
@@ -229,6 +232,14 @@ function harness(options: {
       h.audits.push(input);
     },
     releaseGalleryFaces: async () => ({ removed: 0, pending: 0 }),
+    pairDecision: async (_institutionId, a, b) => {
+      if (options.decisionThrows) throw new Error("audit log unavailable");
+      const key = a < b ? `${a}~${b}` : `${b}~${a}`;
+      const decision = options.decisions?.[key];
+      return decision
+        ? { decision, decidedByUserId: "reviewer-1", decidedAt: new Date("2026-09-30T10:00:00Z"), recordId: `decision-${key}` }
+        : null;
+    },
   };
 
   return h;
@@ -613,7 +624,8 @@ test("a student is never told whose face theirs collided with", async () => {
   assert.doesNotMatch(result.message, /Rohan/);
   assert.doesNotMatch(result.message, /S-002/);
   assert.doesNotMatch(result.message, /student-2/);
-  assert.match(result.message, /office/i, "and is told who can help");
+  assert.match(result.message, /HOD or the Director/, "and is told who can help");
+  assert.equal(result.ok === false && result.twinReview, "pending", "a state, not a name");
 });
 
 test("a lookalike is enrolled and noted, not refused", async () => {
@@ -733,18 +745,21 @@ test("a duplicate refusal tells staff whom a 'different people' confirmation wou
     studentId: "student-2",
     label: "Rohan Gupta (S-002)",
   });
+  assert.equal(result.ok === false && result.twinReview, "pending");
   assert.match(result.message, /twins/);
+  assert.match(result.message, /Twin \/ Lookalike confirmations/, "says where the pair is confirmed");
 });
 
-test("staff can confirm identical twins are different people, and the confirmation is audited", async () => {
+test("a pair staff have confirmed different people lets the sample through, and the enrollment names the confirmation", async () => {
   const h = harness({
     students: TWINS,
     neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+    decisions: { "student-1~student-2": "confirmed" },
   });
 
   const result = await enrollFaceForStudentRequest(
     staffAdmin(),
-    { studentId: "student-1", ...CAMERA, confirmDistinctFromStudentId: "student-2" },
+    { studentId: "student-1", ...CAMERA },
     h.deps,
   );
 
@@ -754,16 +769,20 @@ test("staff can confirm identical twins are different people, and the confirmati
   assert.match(result.message, /different person from Rohan Gupta \(S-002\)/);
   assert.match(result.message, /all five guided photographs of both/);
   const confirmed = h.audits.find((a) => a.action === "face_enrollment.distinct_person_confirmed");
-  assert.ok(confirmed, "the override has its own audit row");
+  assert.ok(confirmed, "an enrollment across a collision has its own audit row");
   const payload = confirmed.afterJson as Record<string, unknown>;
   assert.equal(payload.studentId, "student-1");
   assert.equal(payload.distinctFromStudentId, "student-2");
   assert.equal(payload.similarity, 0.93);
+  assert.equal(payload.confirmationRecordId, "decision-student-1~student-2", "which decision it relied on");
+  assert.equal(payload.confirmedByUserId, "reviewer-1", "and who made it");
   assert.equal(confirmed.actorUserId, staffAdmin().userId);
   assert.equal(auditText(h).includes(String(UNIT_VECTOR[0])), false, "no vector in the log");
 });
 
-test("a confirmation naming a different student waives nothing", async () => {
+test("the request can no longer confirm anything: the old 'different people' field is ignored", async () => {
+  // It used to waive the collision on the spot. Only a standing decision by
+  // somebody with authority over both students can now.
   const h = harness({
     students: TWINS,
     neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
@@ -771,7 +790,44 @@ test("a confirmation naming a different student waives nothing", async () => {
 
   const result = await enrollFaceForStudentRequest(
     staffAdmin(),
-    { studentId: "student-1", ...CAMERA, confirmDistinctFromStudentId: "student-9" },
+    { studentId: "student-1", ...CAMERA, confirmDistinctFromStudentId: "student-2" } as never,
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "duplicate_identity");
+  assert.equal(h.inserted.length, 0);
+  assert.equal(h.audits.some((a) => a.action === "face_enrollment.distinct_person_confirmed"), false);
+});
+
+test("a pair staff reviewed and did not confirm stays refused, and says so", async () => {
+  const h = harness({
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+    decisions: { "student-1~student-2": "rejected" },
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "duplicate_identity");
+  assert.equal(result.ok === false && result.twinReview, "not_confirmed");
+  assert.match(result.message, /not confirmed as different people/);
+  assert.equal(h.inserted.length, 0);
+});
+
+test("a confirmation for a different pair waives nothing", async () => {
+  const h = harness({
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+    decisions: { "student-1~student-9": "confirmed", "student-2~student-9": "confirmed" },
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
     h.deps,
   );
 
@@ -779,9 +835,9 @@ test("a confirmation naming a different student waives nothing", async () => {
   assert.equal(h.inserted.length, 0);
 });
 
-test("a confirmation names one student: a second strong collision is still refused", async () => {
-  // Triplets, or a twin and a genuine duplicate record: confirming one
-  // collision must not wave through the other.
+test("a confirmation names one pair: a second strong collision is still refused", async () => {
+  // Triplets, or a twin and a genuine duplicate record: confirming one pair
+  // must not wave through the other.
   const h = harness({
     students: [
       ...TWINS,
@@ -791,16 +847,51 @@ test("a confirmation names one student: a second strong collision is still refus
       { embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 },
       { embeddingId: "emb-y", studentId: "student-3", rawSimilarity: 0.9 },
     ],
+    decisions: { "student-1~student-2": "confirmed" },
   });
 
   const result = await enrollFaceForStudentRequest(
     staffAdmin(),
-    { studentId: "student-1", ...CAMERA, confirmDistinctFromStudentId: "student-2" },
+    { studentId: "student-1", ...CAMERA },
     h.deps,
   );
 
   assert.equal(result.ok === false && result.reason, "duplicate_identity");
   assert.equal(result.ok === false && result.collidedWith?.studentId, "student-3");
+  assert.equal(h.inserted.length, 0);
+});
+
+test("a confirmation is about the pair: it applies whichever of the two is being enrolled", async () => {
+  const h = harness({
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-1", studentId: "student-1", rawSimilarity: 0.93 }],
+    decisions: { "student-1~student-2": "confirmed" },
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-2", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok, true);
+});
+
+test("a decision that cannot be read leaves the sample refused", async () => {
+  const h = harness({
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+    decisions: { "student-1~student-2": "confirmed" },
+    decisionThrows: true,
+  });
+
+  const result = await enrollFaceForStudentRequest(
+    staffAdmin(),
+    { studentId: "student-1", ...CAMERA },
+    h.deps,
+  );
+
+  assert.equal(result.ok === false && result.reason, "duplicate_identity");
   assert.equal(h.inserted.length, 0);
 });
 
@@ -819,6 +910,45 @@ test("a student cannot confirm they are not a twin of somebody else", async () =
   assert.equal(result.ok === false && result.reason, "duplicate_identity");
   assert.equal(result.ok === false && result.collidedWith, undefined);
   assert.equal(h.inserted.length, 0);
+});
+
+test("once staff have confirmed the pair, the student can enroll themselves — named nowhere", async () => {
+  const h = harness({
+    institution: institution({ type: "COLLEGE" }),
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+    decisions: { "student-1~student-2": "confirmed" },
+  });
+
+  const result = await enrollOwnFaceRequest(studentUser(), CAMERA, h.deps);
+
+  assert.equal(result.ok, true);
+  assert.equal(h.inserted[0].channel, "SELF");
+  assert.doesNotMatch(result.message, /Rohan|S-002|student-2|different person/);
+  const confirmed = h.audits.find((a) => a.action === "face_enrollment.distinct_person_confirmed");
+  assert.equal(confirmed?.actorUserId, studentUser().userId, "the student enrolled");
+  assert.equal((confirmed?.afterJson as Record<string, unknown>).confirmedByUserId, "reviewer-1", "staff confirmed");
+});
+
+test("a school student whose pair is waiting is told to ask their class teacher or principal", async () => {
+  const h = harness({
+    institution: institution({ type: "SCHOOL", settings: { faceEnrollmentPolicy: { selfEnrollmentEnabled: true } } }),
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+  });
+  const pending = await enrollOwnFaceRequest(studentUser(), CAMERA, h.deps);
+  assert.match(pending.message, /twin or a lookalike, please contact your Class Teacher or Principal/);
+
+  const rejected = harness({
+    institution: institution({ type: "SCHOOL", settings: { faceEnrollmentPolicy: { selfEnrollmentEnabled: true } } }),
+    students: TWINS,
+    neighbours: [{ embeddingId: "emb-x", studentId: "student-2", rawSimilarity: 0.93 }],
+    decisions: { "student-1~student-2": "rejected" },
+  });
+  const refused = await enrollOwnFaceRequest(studentUser(), CAMERA, rejected.deps);
+  assert.equal(refused.ok === false && refused.twinReview, "not_confirmed");
+  assert.match(refused.message, /could not be enrolled because it appears to match another enrolled student\. Please contact your school's administrator/);
+  assert.doesNotMatch(refused.message, /Rohan|S-002/);
 });
 
 test("a collision is audited with both student ids and no vector", async () => {

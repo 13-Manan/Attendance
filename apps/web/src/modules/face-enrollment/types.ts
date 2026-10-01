@@ -13,6 +13,13 @@ export type FaceCaptureSource = "CAMERA" | "UPLOAD";
 /** Who performed the enrollment. Mirrors `FaceEnrollmentChannel`. */
 export type FaceEnrollmentChannel = "STAFF" | "SELF";
 
+/**
+ * Where a `duplicate_identity` refusal stands with staff: nobody has reviewed
+ * the pair yet, or it was reviewed and not confirmed as two different people.
+ * (A confirmed pair is never refused — see modules/twin-confirmation.)
+ */
+export type TwinReviewState = "pending" | "not_confirmed";
+
 /** Mirrors `FaceSampleRetirementReason`. */
 export type FaceSampleRetirementReason =
   | "REPLACED"
@@ -99,11 +106,16 @@ export type FaceEnrollmentResult =
       retryable: boolean;
       /**
        * Staff path, `duplicate_identity` only: the student this face collided
-       * with. Present so the UI can offer the one resolution a retake cannot —
-       * "these are different people" (identical twins) — bound to exactly this
-       * student. Never set on the self-enrollment path.
+       * with, so the UI can open the pair's twin / lookalike review — the one
+       * resolution a retake cannot provide. Never set on the self-enrollment
+       * path.
        */
       collidedWith?: { studentId: string; label: string | null };
+      /**
+       * `duplicate_identity` only, both paths: whether staff have reviewed the
+       * pair. Names nobody, so it is safe to send to a student.
+       */
+      twinReview?: TwinReviewState;
     };
 
 /**
@@ -260,9 +272,23 @@ function isQualityRefusal(
  * `otherStudentLabel` is therefore only ever passed on the staff path, and is
  * omitted rather than blanked when the caller could not resolve a name.
  */
+/** Who confirms a twin or lookalike, said the way the student knows them. */
+function twinReviewersFor(institutionType: "SCHOOL" | "COLLEGE" | undefined): string {
+  if (institutionType === "SCHOOL") return "your Class Teacher or Principal";
+  if (institutionType === "COLLEGE") return "your HOD or the Director";
+  return "your Class Teacher, Principal, HOD or Director";
+}
+
 export function describeRefusal(
   reason: FaceEnrollmentRefusal,
-  context: { channel: FaceEnrollmentChannel; otherStudentLabel?: string | null },
+  context: {
+    channel: FaceEnrollmentChannel;
+    otherStudentLabel?: string | null;
+    /** `duplicate_identity`: whether staff have reviewed the pair. */
+    twinReview?: TwinReviewState | null;
+    /** For a student, who to ask. */
+    institutionType?: "SCHOOL" | "COLLEGE";
+  },
 ): string {
   if (isQualityRefusal(reason)) {
     return context.channel === "SELF" ? SELF_QUALITY_REASON[reason] : HUMAN_REASON[reason];
@@ -290,12 +316,19 @@ export function describeRefusal(
         ? "That is the same photograph as a sample already stored for this student. Capture a different one — a second copy adds nothing the search does not already have."
         : "That is the same photograph you have already saved. Take a new one, or leave it as it is.";
 
-    case "duplicate_identity":
-      return staff
-        ? other
-          ? `This face already belongs to ${other}. If they are the same person, merge the student records instead of enrolling this sample. If you have checked that they are different people — identical twins, for example — you can confirm that and enrol it: attendance will then send any capture it cannot tell apart to review.`
-          : "This face is already enrolled against a different student at this institution. If they are the same person, merge the student records instead. If they are different people — identical twins, for example — you can confirm that and enrol this sample."
-        : "That photograph could not be saved. Please speak to your institution's office — they can sort this out.";
+    case "duplicate_identity": {
+      if (!staff) {
+        // Never names the other student: a biometric inference about a
+        // classmate is not something a student receives.
+        return context.twinReview === "not_confirmed"
+          ? `Your face could not be enrolled because it appears to match another enrolled student. Please contact your ${context.institutionType === "COLLEGE" ? "college" : context.institutionType === "SCHOOL" ? "school" : "institution"}'s administrator.`
+          : `Your face appears to match another student, so it could not be saved. If you are a twin or a lookalike, please contact ${twinReviewersFor(context.institutionType)} for confirmation, then try again.`;
+      }
+      const subject = other ? `This face already belongs to ${other}.` : "This face is already enrolled against a different student at this institution.";
+      return context.twinReview === "not_confirmed"
+        ? `${subject} The pair was reviewed and not confirmed as different people, so this sample cannot be enrolled. If that decision was wrong, change it in Twin / Lookalike confirmations.`
+        : `${subject} If they are the same person, merge the student records instead of enrolling this sample. If they are different people — identical twins, for example — the pair must first be confirmed in Twin / Lookalike confirmations; then enrol this sample again.`;
+    }
 
     case "ambiguous_identity":
       return staff

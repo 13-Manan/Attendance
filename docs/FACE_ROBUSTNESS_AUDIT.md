@@ -244,8 +244,13 @@ photographs of one person do — and left the student with no template.
 the audit row records it. Duplicates (≥ presentMin), already-enrolled samples
 and own-sample mismatches are refused as before. Staff — never a student —
 can confirm that two students in the duplicate band are different people
-(identical twins); the confirmation names one student, waives that collision
-only, and is audited as `face_enrollment.distinct_person_confirmed`.
+(identical twins). Since 2026-10-01 that is a decision made in Twin /
+Lookalike confirmations by somebody with authority over both students (a
+school's class teacher or principal, a college's HOD or director), recorded
+as `face_twin_confirmation.confirmed` against the pair; it waives that pair's
+collision only, on both the staff and the student path, and every sample
+enrolled under it is audited as `face_enrollment.distinct_person_confirmed`.
+Nothing a request carries waives a collision any more.
 
 ### 4.14 Identical twins and lookalikes
 

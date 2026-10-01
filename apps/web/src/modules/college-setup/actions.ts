@@ -956,7 +956,6 @@ const departmentEnrollmentSchema = z.object({
   studentId: z.string().min(1),
   imageBase64: imageBase64Field(),
   captureSource: z.enum(["CAMERA", "UPLOAD"]),
-  confirmDistinctFromStudentId: z.string().min(1).optional(),
 });
 
 export async function enrollDepartmentStudentFaceAction(

@@ -40,6 +40,8 @@ export const DASHBOARD_ROUTES: readonly RouteEntry[] = [
   { pattern: "/dashboard/students/[studentId]", namedTrail: true },
   { pattern: "/dashboard/students/[studentId]/edit", namedTrail: true },
   { pattern: "/dashboard/students/[studentId]/enroll-face", namedTrail: true },
+  { pattern: "/dashboard/students/twin-confirmations", label: "Twin / Lookalike confirmations", namedTrail: true },
+  { pattern: "/dashboard/students/twin-confirmations/[pair]", namedTrail: true },
   { pattern: "/dashboard/students/classes", label: "Classes" },
   { pattern: "/dashboard/students/classes/[classId]", namedTrail: true },
   // Redirects to the class; there for the URL's sake only.
@@ -91,6 +93,8 @@ export const DASHBOARD_ROUTES: readonly RouteEntry[] = [
   { pattern: "/dashboard/college/departments/[departmentId]/students/add", namedTrail: true },
   { pattern: "/dashboard/college/departments/[departmentId]/students/[studentId]", namedTrail: true },
   { pattern: "/dashboard/college/departments/[departmentId]/students/[studentId]/enroll-face", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]/students/twin-confirmations", namedTrail: true },
+  { pattern: "/dashboard/college/departments/[departmentId]/students/twin-confirmations/[pair]", namedTrail: true },
   { pattern: "/dashboard/college/departments/[departmentId]/semesters" },
   {
     pattern: "/dashboard/college/departments/[departmentId]/semesters/[semesterId]",

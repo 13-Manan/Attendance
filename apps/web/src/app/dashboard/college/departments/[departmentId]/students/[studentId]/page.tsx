@@ -5,6 +5,10 @@ import { hasPermission } from "@/modules/authorization/service";
 import { sectionFullName } from "@/modules/college-setup/policy";
 import { getDepartmentStudent } from "@/modules/college-setup/service";
 import { STUDENT_STATUS_LABEL } from "@/modules/students/directory-types";
+import { runningFaceModel, verificationOf } from "@/modules/students/verification-service";
+import { VerificationChecklist } from "@/components/students/verification";
+import { getInstitutionById } from "@/modules/institutions/repository";
+import { resolveSelfEnrollmentEnabled } from "@/modules/face-enrollment/policy";
 import { parseReturnPath } from "@/lib/return-path";
 import { PageTrail } from "@/components/nav/page-trail";
 import { Badge } from "@/components/ui/badge";
@@ -89,6 +93,17 @@ export default async function DepartmentStudentPage({ params, searchParams }: Pa
     const choice = sectionChoices.find((candidate) => candidate.sectionId === sectionId);
     return choice ? sectionFullName(choice.course.name, choice.label) : null;
   };
+  // Is this student fully set up? Computed from their records; nothing is
+  // stored. The student was resolved through the department's scope above.
+  const [verification, institution] = await Promise.all([
+    verificationOf(user.institutionId ?? "", student.studentId, await runningFaceModel()),
+    getInstitutionById(user.institutionId ?? ""),
+  ]);
+  const selfEnrollment = institution ? resolveSelfEnrollmentEnabled(institution) : false;
+  const faceBlocked =
+    verification?.face === "blocked_pending_review" || verification?.face === "blocked_not_confirmed";
+  const twinHref = departmentPeopleHref(department.id, "students", "twin-confirmations");
+
   const created = first(query.created) === "1";
   const added = named(first(query.added));
   const moved = named(first(query.moved));
@@ -136,6 +151,34 @@ export default async function DepartmentStudentPage({ params, searchParams }: Pa
           Taken out of {removed}. Their student record, face enrolment, login, attendance history and other courses are
           kept.
         </Notice>
+      ) : null}
+
+      {verification ? (
+        <Panel title="Verification" description="Whether this student is fully set up: an account, their details and their face.">
+          <VerificationChecklist
+            verification={verification}
+            actions={
+              verification.overall === "incomplete" && verification.face !== "enrolled" ? (
+                faceBlocked ? (
+                  <Link href={twinHref} className={LINK_PRIMARY}>
+                    Review twin/lookalike confirmation
+                  </Link>
+                ) : face.canEnroll ? (
+                  <>
+                    <Link href={`${here}/enroll-face`} className={LINK_PRIMARY}>
+                      Enroll face
+                    </Link>
+                    {login.state === "enabled" && selfEnrollment ? (
+                      <span className="text-xs text-neutral-500">
+                        The student can also enroll their own face from the Student Portal.
+                      </span>
+                    ) : null}
+                  </>
+                ) : null
+              ) : null
+            }
+          />
+        </Panel>
       ) : null}
 
       <Panel title="Student information">

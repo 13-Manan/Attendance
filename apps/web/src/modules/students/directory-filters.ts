@@ -1,4 +1,11 @@
 import { STUDENT_STATUSES, type StudentStatus } from "./directory-types";
+import {
+  parseVerificationFilter,
+  verificationClauses,
+  type FaceModelFilter,
+  type VerificationClause,
+  type VerificationFilter,
+} from "./verification";
 
 /**
  * Search, sorting and pagination for the student directory.
@@ -49,6 +56,8 @@ export interface StudentFilters {
   cohortId: string;
   /** A campus id, `NO_CAMPUS`, or empty for any. */
   campusId: string;
+  /** Verification state (see verification.ts), or empty for any. */
+  verification: VerificationFilter;
   sort: StudentSortKey;
   page: number;
 }
@@ -58,6 +67,7 @@ export const EMPTY_STUDENT_FILTERS: StudentFilters = {
   status: "",
   cohortId: "",
   campusId: "",
+  verification: "",
   sort: DEFAULT_STUDENT_SORT,
   page: 1,
 };
@@ -99,6 +109,7 @@ export function parseStudentFilters(
       : "",
     cohortId: first(params.cohortId).trim(),
     campusId: first(params.campusId).trim(),
+    verification: parseVerificationFilter(first(params.verification).trim()),
     sort: STUDENT_SORTS.some((option) => option.key === sort)
       ? (sort as StudentSortKey)
       : DEFAULT_STUDENT_SORT,
@@ -109,7 +120,11 @@ export function parseStudentFilters(
 /** True when the list is narrowed by anything other than sorting and paging. */
 export function hasActiveStudentFilters(filters: StudentFilters): boolean {
   return (
-    filters.q !== "" || filters.status !== "" || filters.cohortId !== "" || filters.campusId !== ""
+    filters.q !== "" ||
+    filters.status !== "" ||
+    filters.cohortId !== "" ||
+    filters.campusId !== "" ||
+    filters.verification !== ""
   );
 }
 
@@ -168,7 +183,8 @@ export interface StudentWhere {
   enrollments?:
     | { some: { cohortId: string; status: "ACTIVE" } }
     | { none: { status: "ACTIVE" } };
-  AND?: Array<{ OR: TextMatch[] }>;
+  /** Search terms first, one clause per term; then the verification filter's conditions. */
+  AND?: Array<{ OR: Array<TextMatch | VerificationClause> }>;
 }
 
 /**
@@ -179,7 +195,12 @@ export interface StudentWhere {
  * students — the worst it can do is match nothing, because that cohort's
  * enrollments belong to rows this `where` has already excluded.
  */
-export function buildStudentWhere(institutionId: string, filters: StudentFilters): StudentWhere {
+export function buildStudentWhere(
+  institutionId: string,
+  filters: StudentFilters,
+  /** The running model, for the verification filter: only its samples count. */
+  faceModel: FaceModelFilter = null,
+): StudentWhere {
   const where: StudentWhere = { institutionId };
 
   if (filters.status !== "") where.status = filters.status;
@@ -195,14 +216,15 @@ export function buildStudentWhere(institutionId: string, filters: StudentFilters
     where.enrollments = { some: { cohortId: filters.cohortId, status: "ACTIVE" } };
   }
 
-  const tokens = studentSearchTokens(filters.q);
-  if (tokens.length > 0) {
-    where.AND = tokens.map((token) => ({
+  const clauses: Array<{ OR: Array<TextMatch | VerificationClause> }> = studentSearchTokens(filters.q).map(
+    (token) => ({
       OR: STUDENT_SEARCH_FIELDS.map((field) => ({
         [field]: { contains: token, mode: "insensitive" as const },
       })) as TextMatch[],
-    }));
-  }
+    }),
+  );
+  for (const clause of verificationClauses(filters.verification, faceModel)) clauses.push({ OR: [clause] });
+  if (clauses.length > 0) where.AND = clauses;
 
   return where;
 }
@@ -294,6 +316,7 @@ export function studentFilterQuery(
   if (merged.status !== "") params.set("status", merged.status);
   if (merged.cohortId !== "") params.set("cohortId", merged.cohortId);
   if (merged.campusId !== "") params.set("campusId", merged.campusId);
+  if (merged.verification !== "") params.set("verification", merged.verification);
   if (merged.sort !== DEFAULT_STUDENT_SORT) params.set("sort", merged.sort);
   if (merged.page > 1) params.set("page", String(merged.page));
 

@@ -126,6 +126,7 @@ function spyDeps(overrides: StudentDirectoryDeps = {}) {
   const unenrolled: Placement[] = [];
 
   const deps: StudentDirectoryDeps = {
+    runningFaceModel: async () => null,
     search: async (institutionId) => {
       scopes.push(institutionId);
       return {

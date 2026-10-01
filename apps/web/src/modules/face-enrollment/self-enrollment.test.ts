@@ -183,6 +183,7 @@ function harness(options: {
       h.audits.push(input);
     },
     releaseGalleryFaces: async () => ({ removed: 0, pending: 0 }),
+    ownTwinReview: async () => null,
     withEnrollmentLock: memoryLock(h.held),
     captureKey: () => KEY,
     now: () => h.clock.now,
@@ -534,7 +535,13 @@ test("23. no vector, sample id, score or model provenance reaches the student", 
   const result = await captureAndSend(h);
   const overview = await getOwnFaceEnrollmentOverview(me(), h.deps);
   assert.deepEqual(Object.keys(result).sort(), ["message", "ok", "replaced", "status"]);
-  assert.deepEqual(Object.keys(overview).sort(), ["enrolledOn", "selfEnrollmentEnabled", "status"]);
+  assert.deepEqual(Object.keys(overview).sort(), [
+    "enrolledOn",
+    "institutionType",
+    "selfEnrollmentEnabled",
+    "status",
+    "twinReview",
+  ]);
   for (const value of [result, overview]) {
     const text = JSON.stringify(value);
     assert.equal(/embedding|\[-?0\.\d+,|emb-1|modelName|modelVersion|self-test/.test(text), false, text);

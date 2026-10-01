@@ -12,6 +12,9 @@ import {
 import { studentClassesHref } from "@/modules/students/class-navigation-paths";
 import type { StudentClassesView } from "@/modules/students/class-navigation-types";
 import { hasActiveStudentFilters, parseStudentFilters } from "@/modules/students/directory-filters";
+import { canReviewTwinConfirmations, pendingTwinConfirmationCount } from "@/modules/twin-confirmation/service";
+import { runningFaceModel, verificationFor } from "@/modules/students/verification-service";
+import { studentFilterQuery } from "@/modules/students/directory-filters";
 import { Button } from "@/components/ui/button";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { ClassGrid } from "./classes/class-navigation";
@@ -71,6 +74,17 @@ export default async function StudentsPage({ searchParams }: PageProps) {
       .catch((): "unavailable" => "unavailable"),
   ]);
 
+  // Each row's checklist — the same rules the Verification filter applied.
+  const verification = await verificationFor(
+    user.institutionId,
+    page.rows.map((row) => row.id),
+    await runningFaceModel(),
+  );
+
+  // Only somebody who can decide a twin / lookalike pair is shown the way in.
+  const twinReviewer = await canReviewTwinConfirmations(user);
+  const twinPending = twinReviewer ? await pendingTwinConfirmationCount(user) : 0;
+
   const filtered = hasActiveStudentFilters(filters);
   const canCreate = hasPermission(user, "student.create");
   const canEnrollFace = hasPermission(user, "faceEmbedding.manage");
@@ -92,6 +106,19 @@ export default async function StudentsPage({ searchParams }: PageProps) {
           taken off roll, which keeps every register they appear in and stops them being listed
           for new ones.
         </p>
+        {twinReviewer ? (
+          <Link
+            href={`${BASE}/twin-confirmations`}
+            className="mt-1 inline-flex w-fit items-center gap-2 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-sm font-medium text-neutral-900 hover:bg-neutral-50"
+          >
+            Twin / Lookalike confirmations
+            {twinPending > 0 ? (
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900">
+                {twinPending} pending
+              </span>
+            ) : null}
+          </Link>
+        ) : null}
       </header>
 
       {params.archived === "1" ? (
@@ -140,9 +167,19 @@ export default async function StudentsPage({ searchParams }: PageProps) {
               {page.totalAll === 0
                 ? "No students yet."
                 : filtered
-                  ? `${page.total.toLocaleString()} of ${page.totalAll.toLocaleString()} match`
-                  : `${page.totalAll.toLocaleString()} ${page.totalAll === 1 ? "student" : "students"}, ${page.activeAll.toLocaleString()} on roll`}
+                  ? filters.verification !== "" && !filters.q && !filters.status && !filters.cohortId && !filters.campusId
+                    ? `Showing ${page.total.toLocaleString()} ${filters.verification === "face_pending" ? "students with face enrollment pending" : `${filters.verification} ${page.total === 1 ? "student" : "students"}`}`
+                    : `${page.total.toLocaleString()} of ${page.totalAll.toLocaleString()} match`
+                  : `${page.totalAll.toLocaleString()} ${page.totalAll === 1 ? "student" : "students"}, ${page.activeAll.toLocaleString()} on roll${page.incompleteAll !== undefined ? `, ${page.incompleteAll.toLocaleString()} incomplete` : ""}`}
             </p>
+            {!filtered && (page.incompleteAll ?? 0) > 0 ? (
+              <Link
+                href={`${BASE}${studentFilterQuery(filters, { verification: "incomplete", page: 1 })}`}
+                className="text-xs font-medium text-amber-900 underline underline-offset-2 hover:text-amber-950"
+              >
+                Needs attention
+              </Link>
+            ) : null}
           </div>
         </form>
       </Panel>
@@ -176,7 +213,7 @@ export default async function StudentsPage({ searchParams }: PageProps) {
           </EmptyState>
         ) : (
           <>
-            <StudentDirectoryTable rows={page.rows} canEnrollFace={canEnrollFace} />
+            <StudentDirectoryTable rows={page.rows} canEnrollFace={canEnrollFace} verification={verification} />
             <StudentDirectoryPager
               page={page}
               filters={filters}

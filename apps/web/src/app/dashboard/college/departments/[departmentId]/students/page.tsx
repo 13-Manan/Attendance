@@ -3,6 +3,9 @@ import { notFound } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { hasPermission } from "@/modules/authorization/service";
 import { getDepartmentStudents } from "@/modules/college-setup/service";
+import { pendingTwinConfirmationCount } from "@/modules/twin-confirmation/service";
+import { VERIFICATION_FILTERS, parseVerificationFilter } from "@/modules/students/verification";
+import { VerificationBadge } from "@/components/students/verification";
 import { STUDENT_LOGIN_LABEL, type DepartmentStudentFilters, type StudentLoginState } from "@/modules/college-setup/types";
 import { PageTrail } from "@/components/nav/page-trail";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
@@ -58,6 +61,7 @@ export default async function DepartmentStudentsPage({ params, searchParams }: P
     sectionId: first(query.section) ?? "",
     face: oneOf(first(query.face), ["enrolled", "not_enrolled"] as const),
     login: oneOf(first(query.login), ["none", "enabled", "disabled"] as const),
+    verification: parseVerificationFilter(first(query.verification)),
   };
 
   const result = await readOrDeny(() => getDepartmentStudents(user, departmentId, filters));
@@ -75,7 +79,11 @@ export default async function DepartmentStudentsPage({ params, searchParams }: P
   const here = departmentPeopleHref(department.id, "students");
   const listHref = withSession(here, session, sessions);
   const addHref = departmentPeopleHref(department.id, "students", "add");
-  const filtered = Boolean(filters.q || filters.courseId || filters.sectionId || filters.face || filters.login);
+  const filtered = Boolean(
+    filters.q || filters.courseId || filters.sectionId || filters.face || filters.login || filters.verification,
+  );
+  const twinPending = await pendingTwinConfirmationCount(user, { departmentId: department.id });
+  const twinHref = departmentPeopleHref(department.id, "students", "twin-confirmations");
   const removedStudent = first(query.removedStudent);
   const removedFrom = first(query.from);
   const trail = departmentTrail({
@@ -98,6 +106,14 @@ export default async function DepartmentStudentsPage({ params, searchParams }: P
         </header>
         <div className="flex flex-wrap items-end gap-2">
           {session ? <SessionSwitcher action={here} sessions={sessions} selectedId={session.id} /> : null}
+          <Link href={twinHref} className={LINK_SECONDARY}>
+            Twin / Lookalike confirmations
+            {twinPending > 0 ? (
+              <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900">
+                {twinPending} pending
+              </span>
+            ) : null}
+          </Link>
           {session?.isActive ? (
             <Link href={addHref} className={LINK_PRIMARY}>
               + Add student
@@ -115,7 +131,9 @@ export default async function DepartmentStudentsPage({ params, searchParams }: P
 
       <form method="get" action={here} role="search" className="flex flex-wrap items-end gap-2">
         {session && !session.isCurrent ? <input type="hidden" name="session" value={session.id} /> : null}
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5 sm:max-w-xs">
+        {/* A floor on the search box, so a row of filters wraps rather than
+            squeezing it until its label breaks onto four lines. */}
+        <div className="flex min-w-[12rem] flex-1 flex-col gap-1.5 sm:max-w-xs">
           <label htmlFor="student-search" className="text-xs font-medium text-neutral-500">
             Name, student ID or admission number
           </label>
@@ -162,6 +180,19 @@ export default async function DepartmentStudentsPage({ params, searchParams }: P
           </Select>
         </div>
         <div className="flex flex-col gap-1.5">
+          <label htmlFor="student-verification" className="text-xs font-medium text-neutral-500">
+            Verification
+          </label>
+          <Select id="student-verification" name="verification" defaultValue={filters.verification}>
+            <option value="">All</option>
+            {VERIFICATION_FILTERS.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div className="flex flex-col gap-1.5">
           <label htmlFor="student-login" className="text-xs font-medium text-neutral-500">
             Sign-in
           </label>
@@ -181,6 +212,22 @@ export default async function DepartmentStudentsPage({ params, searchParams }: P
           </Link>
         ) : null}
       </form>
+
+      {view.totalStudents ? (
+        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs tabular-nums text-neutral-500">
+          {filters.verification && !filters.q && !filters.courseId && !filters.sectionId && !filters.face && !filters.login
+            ? `Showing ${students.length} ${filters.verification === "face_pending" ? `${students.length === 1 ? "student" : "students"} with face enrollment pending` : `${filters.verification} ${students.length === 1 ? "student" : "students"}`}`
+            : `${view.totalStudents} ${view.totalStudents === 1 ? "student" : "students"}, ${view.incompleteStudents ?? 0} incomplete`}
+          {!filtered && (view.incompleteStudents ?? 0) > 0 ? (
+            <Link
+              href={`${listHref}${listHref.includes("?") ? "&" : "?"}verification=incomplete`}
+              className="font-medium text-amber-900 underline underline-offset-2 hover:text-amber-950"
+            >
+              Needs attention
+            </Link>
+          ) : null}
+        </p>
+      ) : null}
 
       <Panel title={`Students (${students.length}${truncated ? "+" : ""})`}>
         {students.length === 0 ? (
@@ -234,6 +281,9 @@ export default async function DepartmentStudentsPage({ params, searchParams }: P
                         <Badge tone="warning">No face enrolled</Badge>
                       )}
                       <Badge tone={LOGIN_TONE[student.login]}>{STUDENT_LOGIN_LABEL[student.login]}</Badge>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
+                      Verification: <VerificationBadge verification={student.verification} />
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">

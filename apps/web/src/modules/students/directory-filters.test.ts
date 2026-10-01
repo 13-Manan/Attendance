@@ -241,3 +241,31 @@ test("the default sort is not written into the URL", () => {
   assert.equal(studentFilterQuery(filters({ sort: DEFAULT_STUDENT_SORT })), "");
   assert.equal(studentFilterQuery(filters({ sort: "code_desc" })), "?sort=code_desc");
 });
+
+// ---------------------------------------------------------------------------
+// Verification
+// ---------------------------------------------------------------------------
+
+test("the verification filter is read from the query string, and only known values are", () => {
+  assert.equal(parseStudentFilters({ verification: "incomplete" }).verification, "incomplete");
+  assert.equal(parseStudentFilters({ verification: "face_pending" }).verification, "face_pending");
+  assert.equal(parseStudentFilters({ verification: "approved" }).verification, "");
+  assert.equal(hasActiveStudentFilters(filters({ verification: "complete" })), true);
+  assert.equal(studentFilterQuery(filters({ verification: "incomplete" })), "?verification=incomplete");
+});
+
+test("the verification filter narrows in SQL, after the search terms, and never drops the institution", () => {
+  const where = buildStudentWhere(
+    "inst-A",
+    filters({ q: "priya", verification: "face_pending" }),
+    { modelName: "dlib", modelVersion: "1+pp1" },
+  );
+  assert.equal(where.institutionId, "inst-A");
+  assert.equal(where.AND?.length, 3, "one search term, then on roll, then no usable face");
+  assert.deepEqual(where.AND?.[1], { OR: [{ status: "ACTIVE" }] });
+  assert.deepEqual(where.AND?.[2], {
+    OR: [{ faceEmbeddings: { none: { isActive: true, modelName: "dlib", modelVersion: "1+pp1" } } }],
+  });
+  // No verification filter: the where is exactly what it always was.
+  assert.equal(buildStudentWhere("inst-A", filters({ q: "priya" })).AND?.length, 1);
+});

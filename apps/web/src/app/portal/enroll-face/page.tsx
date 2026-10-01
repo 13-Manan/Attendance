@@ -95,17 +95,34 @@ function formatEnrolledOn(value: Date): string {
   return value.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
+/** Who a student asks to confirm a twin or lookalike, at their kind of institution. */
+function twinReviewers(type: OwnFaceEnrollmentOverview["institutionType"]): string {
+  return type === "COLLEGE" ? "your HOD or the Director" : "your Class Teacher or Principal";
+}
+
 /**
  * Where the student stands, in a sentence, before the camera. As of this
  * render: the capture below keeps its own count as photographs are saved, and
  * refreshes this.
  */
 function EnrollmentStatus({ enrollment }: { enrollment: OwnFaceEnrollmentOverview }) {
-  const { status, selfEnrollmentEnabled, enrolledOn } = enrollment;
+  const { status, selfEnrollmentEnabled, enrolledOn, twinReview, institutionType } = enrollment;
 
   let title: string;
   let details: string[];
-  if (status.status === "ENROLLED") {
+  if (status.status !== "ENROLLED" && twinReview === "pending") {
+    // Never who the other student is: a state, and who can resolve it.
+    title = "Your face could not be enrolled yet.";
+    details = [
+      "Your face appears to match another student.",
+      `If you are a twin or a lookalike, please contact ${twinReviewers(institutionType)} for confirmation. Once they have confirmed it, try again here.`,
+    ];
+  } else if (status.status !== "ENROLLED" && twinReview === "not_confirmed") {
+    title = "Your face could not be enrolled.";
+    details = [
+      `It appears to match another enrolled student. Please contact your ${institutionType === "COLLEGE" ? "college" : "school"}'s administrator.`,
+    ];
+  } else if (status.status === "ENROLLED") {
     title = "Your face is enrolled.";
     details = [
       enrolledOn ? `Enrolled on ${formatEnrolledOn(enrolledOn)}` : null,
@@ -127,14 +144,20 @@ function EnrollmentStatus({ enrollment }: { enrollment: OwnFaceEnrollmentOvervie
   } else {
     title = "Your face has not been enrolled yet.";
     details = selfEnrollmentEnabled
-      ? ["Enroll your face using your device camera so attendance can recognize you."]
+      ? [
+          twinReview === "confirmed"
+            ? "Staff have confirmed you are a different person from the student your face matched. You can enroll now."
+            : "Enroll your face using your device camera so attendance can recognize you.",
+        ]
       : [];
   }
 
   const tone =
     status.status === "ENROLLED"
       ? "border-green-200 bg-green-50 text-green-900"
-      : "border-neutral-200 bg-neutral-50 text-neutral-900";
+      : twinReview === "pending" || twinReview === "not_confirmed"
+        ? "border-amber-200 bg-amber-50 text-amber-950"
+        : "border-neutral-200 bg-neutral-50 text-neutral-900";
 
   return (
     <section

@@ -1,3 +1,4 @@
+import { runningFaceModel, verificationFor } from "@/modules/students/verification-service";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { hasPermission } from "@/modules/authorization/service";
@@ -70,6 +71,13 @@ export default async function StudentSectionPage({ params, searchParams }: PageP
     getStudentFormOptionsForRequest(user),
     addedStudent(user, first(query.added), section.id),
   ]);
+
+  // Each row's checklist, by the rules the Verification filter applied.
+  const verification = await verificationFor(
+    user.institutionId ?? "",
+    page.rows.map((row) => row.id),
+    await runningFaceModel(),
+  );
 
   const here = studentSectionHref(classId, section.id);
   // Where a student opened from this list comes back to: this section, as
@@ -162,7 +170,7 @@ export default async function StudentSectionPage({ params, searchParams }: PageP
               <p className="text-xs tabular-nums text-neutral-500">
                 {filtered
                   ? `${page.total.toLocaleString()} of ${page.totalAll.toLocaleString()} match`
-                  : `${page.totalAll.toLocaleString()} ${page.totalAll === 1 ? "student" : "students"}, ${page.activeAll.toLocaleString()} on roll`}
+                  : `${page.totalAll.toLocaleString()} ${page.totalAll === 1 ? "student" : "students"}, ${page.activeAll.toLocaleString()} on roll${page.incompleteAll !== undefined ? `, ${page.incompleteAll.toLocaleString()} incomplete` : ""}`}
               </p>
             ) : null}
           </div>
@@ -196,6 +204,7 @@ export default async function StudentSectionPage({ params, searchParams }: PageP
               rows={page.rows}
               canEnrollFace={canEnrollFace}
               returnTo={listPath}
+              verification={verification}
             />
             <StudentDirectoryPager
               page={page}

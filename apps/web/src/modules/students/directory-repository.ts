@@ -8,6 +8,7 @@ import {
   STUDENT_PAGE_SIZE,
   type StudentFilters,
 } from "./directory-filters";
+import { verificationClauses, type FaceModelFilter } from "./verification";
 import type {
   CampusChoice,
   CohortChoice,
@@ -153,18 +154,28 @@ export async function searchStudents(
   filters: StudentFilters,
   pageSize: number = STUDENT_PAGE_SIZE,
   scope: { cohortId?: string } = {},
+  options: { faceModel?: FaceModelFilter } = {},
 ): Promise<StudentPage> {
-  const where = buildStudentWhere(institutionId, filters);
+  const faceModel = options.faceModel ?? null;
+  const where = buildStudentWhere(institutionId, filters, faceModel);
   const tallyWhere = scope.cohortId
     ? { institutionId, enrollments: { some: { cohortId: scope.cohortId, status: "ACTIVE" as const } } }
     : { institutionId };
 
-  const [total, tally] = await Promise.all([
+  const [total, tally, incompleteAll] = await Promise.all([
     prisma.student.count({ where }),
     prisma.student.groupBy({
       by: ["status"],
       where: tallyWhere,
       _count: { _all: true },
+    }),
+    // The same scope as the tally, narrowed by the same rule the Incomplete
+    // filter applies, so "2 incomplete" and the filtered list agree.
+    prisma.student.count({
+      where: {
+        ...tallyWhere,
+        AND: verificationClauses("incomplete", faceModel).map((clause) => ({ OR: [clause] })),
+      },
     }),
   ]);
 
@@ -185,6 +196,7 @@ export async function searchStudents(
     total,
     totalAll,
     activeAll,
+    incompleteAll,
     page,
     pageCount: studentPageCount(total, pageSize),
     pageSize,

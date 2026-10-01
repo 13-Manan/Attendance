@@ -6,6 +6,7 @@ import {
   replaceDepartmentStudentFaceAction,
 } from "@/modules/college-setup/actions";
 import { FaceCapture } from "@/modules/face-enrollment/face-capture";
+import { pairKey } from "@/modules/twin-confirmation/policy";
 import type { FaceEnrollmentStatusSummary } from "@/modules/face-enrollment/policy";
 import type { FaceCaptureSource, FaceEnrollmentResult } from "@/modules/face-enrollment/types";
 
@@ -32,7 +33,6 @@ export function DepartmentEnrollmentClient({
   const submit = async (image: {
     imageBase64: string;
     captureSource: FaceCaptureSource;
-    confirmDistinctFromStudentId?: string;
   }): Promise<FaceEnrollmentResult> => {
     const result = await enrollDepartmentStudentFaceAction({ departmentId, studentId, ...image });
     router.refresh();
@@ -42,12 +42,21 @@ export function DepartmentEnrollmentClient({
   const replace = async (image: {
     imageBase64: string;
     captureSource: FaceCaptureSource;
-    confirmDistinctFromStudentId?: string;
   }): Promise<FaceEnrollmentResult> => {
     const result = await replaceDepartmentStudentFaceAction({ departmentId, studentId, ...image });
     router.refresh();
     return result;
   };
 
-  return <FaceCapture onSubmit={submit} onReplace={replace} initialStatus={initialStatus} subject="student" />;
+  return (
+    <FaceCapture
+      onSubmit={submit}
+      onReplace={replace}
+      initialStatus={initialStatus}
+      subject="student"
+      twinReviewHref={(otherStudentId) =>
+        `/dashboard/college/departments/${departmentId}/students/twin-confirmations/${pairKey(studentId, otherStudentId)}`
+      }
+    />
+  );
 }

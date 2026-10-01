@@ -110,14 +110,26 @@ export type AuditAction =
   // not an event, and logging every retake would bury the two that matter.
   | "face_enrollment.replaced"
   | "face_enrollment.refused"
-  // A member of staff looked at a `duplicate_identity` refusal and confirmed
-  // that the two students are different people — identical twins, in the
-  // case this exists for. The sample was then enrolled. Its own action rather
-  // than a flag on `created`, because it is the one enrollment where a person
-  // overrode the system's judgement about identity, and an auditor looking
-  // for exactly those should find them by name. Carries both student ids and
-  // the similarity; never a face or a vector.
+  // A sample was enrolled across a `duplicate_identity` collision because
+  // authorised staff had confirmed the two students are different people —
+  // identical twins, in the case this exists for (see the two
+  // `face_twin_confirmation` actions below, which hold the decision itself).
+  // Its own action rather than a flag on `created`, because it is the one
+  // enrollment where a person overrode the system's judgement about identity,
+  // and an auditor looking for exactly those should find them by name. Carries
+  // both student ids, the similarity and the confirmation it relied on; never
+  // a face or a vector.
   | "face_enrollment.distinct_person_confirmed"
+  // A member of staff with authority over both students reviewed a
+  // `duplicate_identity` conflict and decided it: `confirmed` — these are
+  // different people, so enrollment may proceed for this one pair — or
+  // `rejected` — not confirmed, so it stays blocked. The rows are keyed on the
+  // pair (entityType `FaceIdentityPair`, entityId `<id>~<id>`, sorted), and
+  // the latest one for a pair is its standing decision: changing a decision is
+  // another row, never an edit. Ids, the decision and the reviewer's scope;
+  // never a face, a vector or a score.
+  | "face_twin_confirmation.confirmed"
+  | "face_twin_confirmation.rejected"
   // A student with live face templates was archived, or brought back. The
   // `student.archived`/`student.restored` row records the status change;
   // these record what it did to recognition, by name, so "when did this

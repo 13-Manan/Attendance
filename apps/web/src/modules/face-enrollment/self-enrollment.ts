@@ -6,6 +6,8 @@ import { hasPermission, requirePermission, requireSameInstitution } from "@/modu
 import { ForbiddenError } from "@/modules/authorization/types";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import * as galleryRepo from "@/modules/face-gallery/repository";
+import { latestPairDecision } from "@/modules/twin-confirmation/repository";
+import { twinBlockStates } from "@/modules/twin-confirmation/service";
 import type { Institution } from "@/modules/institutions/types";
 import type { Student } from "@/modules/students/types";
 import { GUIDED_STEP_ORDER, currentGuidedStep } from "./guided-steps";
@@ -66,6 +68,12 @@ import {
 // Dependencies
 // ---------------------------------------------------------------------------
 
+/**
+ * Where the student's own twin / lookalike review stands: waiting for staff,
+ * not confirmed, or confirmed. Never who the other student is.
+ */
+export type OwnTwinReview = "pending" | "not_confirmed" | "confirmed";
+
 /** One stored sample, as much as the student's own page needs: no id, no vector. */
 export interface OwnActiveSample extends TemplateModel {
   createdAt: Date;
@@ -85,6 +93,8 @@ export type EnrollmentLock = <T>(
 
 export interface SelfEnrollmentDeps extends FaceEnrollmentDeps {
   listActiveSamples?: (studentId: string) => Promise<OwnActiveSample[]>;
+  /** The student's own standing in a twin / lookalike review, if they have one. */
+  ownTwinReview?: (institutionId: string, studentId: string) => Promise<OwnTwinReview | null>;
   withEnrollmentLock?: EnrollmentLock;
   captureKey?: () => Buffer;
   now?: () => number;
@@ -129,6 +139,8 @@ function throughTransaction(tx: Prisma.TransactionClient): FaceEnrollmentDeps {
     insertFaceEmbedding: (input) => repo.insertFaceEmbedding(input, tx),
     insertGallerySample: (input) => galleryRepo.insertGallerySample(input, tx),
     recordAuditLog: (input) => recordAuditLog(input, tx),
+    pairDecision: (institutionId, studentId, otherStudentId) =>
+      latestPairDecision(institutionId, studentId, otherStudentId, tx),
   };
 }
 
@@ -155,6 +167,8 @@ function defaults() {
       const { faceModelInfo } = await import("@/lib/face-ai-client");
       return faceModelInfo();
     },
+    ownTwinReview: async (institutionId: string, studentId: string) =>
+      (await twinBlockStates(institutionId, [studentId])).get(studentId) ?? null,
     withEnrollmentLock: withStudentEnrollmentLock,
     captureKey: () => deriveSelfCaptureKey(process.env.AUTH_SECRET),
     now: () => Date.now(),
@@ -427,7 +441,17 @@ export async function enrollOwnFaceFromCameraRequest(
   logEvent(d, result.reason === "service_error" || result.reason === "invalid_embedding" ? "failed" : "rejected", {
     ...subject.facts,
     reason: result.reason,
+    ...(result.twinReview ? { detail: `twin_review_${result.twinReview}` } : {}),
   });
+  if (result.reason === "duplicate_identity" && result.twinReview === "pending") {
+    // Their own name and student ID — never the other student's — so the
+    // member of staff they ask can find the review.
+    const own = subject.student;
+    return {
+      ...result,
+      message: `${result.message} Give them your name and student ID: ${`${own.firstName} ${own.lastName}`.trim()} (${own.studentCode}).`,
+    };
+  }
   return result;
 }
 
@@ -440,6 +464,10 @@ export interface OwnFaceEnrollmentOverview {
   selfEnrollmentEnabled: boolean;
   /** When the earliest photo still used for recognition was saved; null when none is. */
   enrolledOn: Date | null;
+  /** The student's own twin / lookalike review, when an enrollment was refused for one. */
+  twinReview: OwnTwinReview | null;
+  /** Who a student is told to ask: a school's staff, or a college's. */
+  institutionType: "SCHOOL" | "COLLEGE";
 }
 
 /**
@@ -456,9 +484,11 @@ export async function getOwnFaceEnrollmentOverview(
   const d = deps(overrides);
   const { student, institution } = await resolveOwnSubject(actor, d);
 
-  const [samples, runningModel] = await Promise.all([
+  const [samples, runningModel, twinReview] = await Promise.all([
     d.listActiveSamples(student.id),
     d.faceModelInfo().catch(() => null),
+    // Decorates the page; a failure must not take it down.
+    d.ownTwinReview(institution.id, student.id).catch(() => null),
   ]);
   const running: TemplateModel | null = runningModel
     ? { modelName: runningModel.modelName, modelVersion: runningModel.modelVersion }
@@ -475,6 +505,8 @@ export async function getOwnFaceEnrollmentOverview(
     status: summariseEnrollmentStatus(samples, running),
     selfEnrollmentEnabled: resolveSelfEnrollmentEnabled(institution),
     enrolledOn,
+    twinReview,
+    institutionType: institution.type,
   };
 }
 

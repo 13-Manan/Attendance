@@ -15,6 +15,8 @@ import {
   type StudentStatus,
 } from "@/modules/students/directory-types";
 import { studentDisplayName } from "@/modules/students/types";
+import { VERIFICATION_FILTERS, type StudentVerification } from "@/modules/students/verification";
+import { VerificationBadge } from "@/components/students/verification";
 import { withReturnPath } from "@/lib/return-path";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -127,6 +129,17 @@ export function StudentFilterFields({
         </label>
       ) : null}
       <label className={labelClass}>
+        Verification
+        <Select name="verification" defaultValue={filters.verification}>
+          <option value="">All</option>
+          {VERIFICATION_FILTERS.map((option) => (
+            <option key={option.key} value={option.key}>
+              {option.label}
+            </option>
+          ))}
+        </Select>
+      </label>
+      <label className={labelClass}>
         Sort by
         <Select name="sort" defaultValue={filters.sort}>
           {STUDENT_SORTS.map((option) => (
@@ -166,13 +179,16 @@ export function StudentDirectoryTable({
   rows,
   canEnrollFace,
   returnTo,
+  verification,
 }: {
   rows: StudentListRow[];
   canEnrollFace: boolean;
   returnTo?: string;
+  /** Each row's verification (modules/students/verification.ts), by student id. */
+  verification?: ReadonlyMap<string, StudentVerification>;
 }) {
   return (
-    <TableScroll minWidth="min-w-[52rem]">
+    <TableScroll minWidth="min-w-[60rem]">
       <table className="w-full border-collapse text-left">
         <thead className="bg-neutral-50">
           <tr className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
@@ -180,6 +196,7 @@ export function StudentDirectoryTable({
             <th className="py-2.5 pr-4 font-medium">Class</th>
             <th className="py-2.5 pr-4 font-medium">Admission</th>
             <th className="py-2.5 pr-4 font-medium">Status</th>
+            <th className="py-2.5 pr-4 font-medium">Verification</th>
             <th className="py-2.5 pr-3 font-medium">Actions</th>
           </tr>
         </thead>
@@ -215,6 +232,9 @@ export function StudentDirectoryTable({
                 <Badge tone={STATUS_TONE[student.status]}>
                   {STUDENT_STATUS_LABEL[student.status]}
                 </Badge>
+              </td>
+              <td className="py-3 pr-4">
+                <VerificationBadge verification={verification?.get(student.id)} />
               </td>
               <td className="py-3 pr-3">
                 <div className="flex flex-col items-start gap-2">

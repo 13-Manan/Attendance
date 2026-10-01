@@ -94,6 +94,17 @@ Three keys, all pre-existing, none invented for this work:
   per-student advisory lock, held for the whole enrollment, refuses a second
   concurrent submission (`enrollment_in_progress`) instead of storing it.
   Staff enrollment, uploads included, does not pass through this path.
+- **Twin / lookalike confirmations** — when a face lands in the duplicate
+  band of another enrolled student, enrollment is refused on every path
+  until somebody with authority over **both** students confirms they are
+  different people: anyone holding `faceEmbedding.manage` (principal,
+  director, administrators) institution-wide; a school's class teacher
+  (`student.update` and the primary-teacher link) for pairs inside their own
+  classes; a college HOD for pairs inside their department's current
+  sections. No permission was added for it. A student, a teacher who is not
+  the class teacher, department faculty and operators are refused by the
+  server, and a student is never told who they matched. The decision waives
+  that one pair's collision and nothing else (`modules/twin-confirmation`).
 - `faceEmbedding.manage` — staff enrollment, deactivation, deletion and the
   retention sweep.
 - `institution.read` / `institution.update` — reading and changing the
@@ -404,6 +415,13 @@ Stated here rather than left for someone to find.
   rejected before it consumes an allowance. That tradeoff is documented in
   `modules/integrations/api-route.ts`; an edge rate limit is the deployment's
   responsibility.
+- **Twin / lookalike decisions live in the audit log.** Pending conflicts are
+  the `face_enrollment.refused` rows the enrollment check already writes, and
+  each decision is an audit row keyed on the pair; the latest one stands. No
+  table was added, by requirement. Nothing in the application edits or
+  deletes audit rows, and a decision that cannot be read leaves the pair
+  blocked — but anything that ever purged the audit log would also forget
+  every confirmation, and the twins would have to be confirmed again.
 - **Self-enrollment cannot prove a frame came from a physical camera.** The
   browser belongs to the student: a virtual camera, or a script that opens a
   camera session and posts a JPEG of the right size, passes the camera-only

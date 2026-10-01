@@ -43,14 +43,14 @@ import type { FaceCaptureOutcome, FaceEnrollmentResult } from "./types";
 
 const captureSourceField = z.enum(["CAMERA", "UPLOAD"]);
 
+// No "these are different people" field: a twin or lookalike collision is
+// waived only by a standing decision in Twin / Lookalike confirmations
+// (modules/twin-confirmation), never by something a request carries. A client
+// still sending the old field has it stripped here.
 const enrollForStudentSchema = z.object({
   studentId: z.string().min(1),
   imageBase64: imageBase64Field(),
   captureSource: captureSourceField,
-  // Staff confirmation that a `duplicate_identity` collision is two different
-  // people (identical twins). Bound to the one student it names; see
-  // EnrollFaceForStudentInput. Deliberately absent from `enrollOwnSchema`.
-  confirmDistinctFromStudentId: z.string().min(1).optional(),
 });
 
 export async function enrollFaceForStudent(

@@ -203,16 +203,11 @@ async function enrol(
   studentId: string,
   face: number,
   sample: number,
-  opts: { model?: ModelInfoResponse; confirmDistinctFromStudentId?: string } = {},
+  opts: { model?: ModelInfoResponse } = {},
 ) {
   return enrollFaceForStudentRequest(
     w.actor,
-    {
-      studentId,
-      imageBase64: "AAAA",
-      captureSource: "CAMERA",
-      confirmDistinctFromStudentId: opts.confirmDistinctFromStudentId,
-    },
+    { studentId, imageBase64: "AAAA", captureSource: "CAMERA" },
     faceAi(opts.model ?? MODEL, faceSample(face, sample)),
   );
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/use-confirm";
@@ -74,9 +75,6 @@ export interface FaceCaptureProps {
   onSubmit: (image: {
     imageBase64: string;
     captureSource: FaceCaptureSource;
-    /** Staff confirmation that a duplicate is a different person; see
-     * EnrollFaceForStudentInput. Ignored on the self-enrollment path. */
-    confirmDistinctFromStudentId?: string;
   }) => Promise<FaceCaptureOutcome>;
   /**
    * Retires every stored sample and stores this one instead. Staff only —
@@ -86,7 +84,6 @@ export interface FaceCaptureProps {
   onReplace?: (image: {
     imageBase64: string;
     captureSource: FaceCaptureSource;
-    confirmDistinctFromStudentId?: string;
   }) => Promise<FaceCaptureOutcome>;
   /** The subject's enrollment status as of the last server render. */
   initialStatus: FaceEnrollmentStatusSummary;
@@ -109,6 +106,13 @@ export interface FaceCaptureProps {
    * stops the camera and shows the message instead.
    */
   onCameraStarted?: () => Promise<{ ok: true } | { ok: false; message: string }>;
+  /**
+   * Staff only: where the twin / lookalike review of this student and the one
+   * a refused face matched is opened. A duplicate is never overridden from
+   * this screen — the pair is confirmed there, by somebody with authority over
+   * both students, and then the sample is enrolled again.
+   */
+  twinReviewHref?: (otherStudentId: string) => string;
 }
 
 const ACCEPTED_FILE_TYPES = "image/jpeg,image/png,image/webp";
@@ -124,6 +128,7 @@ export function FaceCapture({
   unavailableReason = null,
   cameraOnly = false,
   onCameraStarted,
+  twinReviewHref,
 }: FaceCaptureProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -136,13 +141,6 @@ export function FaceCapture({
   const [stage, setStage] = useState<Stage>({ name: "choosing" });
   const [status, setStatus] = useState(initialStatus);
   const [result, setResult] = useState<FaceCaptureOutcome | null>(null);
-  // Set after a staff `duplicate_identity` refusal: whom a "different people"
-  // confirmation would name, and which action to repeat with it.
-  const [distinct, setDistinct] = useState<{
-    studentId: string;
-    label: string | null;
-    mode: "add" | "replace";
-  } | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [replaceMode, setReplaceMode] = useState(false);
@@ -379,13 +377,12 @@ export function FaceCapture({
   // -- submission -----------------------------------------------------------
 
   const send = useCallback(
-    async (mode: "add" | "replace", confirmDistinctFromStudentId?: string) => {
+    async (mode: "add" | "replace") => {
       if (stage.name !== "review" || submittingRef.current) return;
       submittingRef.current = true;
       const payload = {
         imageBase64: stage.imageBase64,
         captureSource: stage.source,
-        ...(confirmDistinctFromStudentId ? { confirmDistinctFromStudentId } : {}),
       };
       const previewUrl = stage.previewUrl;
 
@@ -406,11 +403,6 @@ export function FaceCapture({
         setResult(outcome);
         setStatus(outcome.status);
         setConfirmingReplace(false);
-        const collided =
-          !outcome.ok && outcome.reason === "duplicate_identity" && subject === "student"
-            ? outcome.collidedWith
-            : undefined;
-        setDistinct(collided ? { ...collided, mode } : null);
 
         if (outcome.ok) {
           // The image has served its purpose. Dropping it here means a page
@@ -418,10 +410,6 @@ export function FaceCapture({
           // a photograph of a child.
           setReplaceMode(false);
           setStage({ name: "choosing" });
-        } else if (collided) {
-          // A retake cannot resolve this one, but a confirmation can — and it
-          // needs this photograph. Kept only until it is sent or discarded.
-          setStage(held);
         } else if (outcome.reason === "camera_required") {
           // Self-enrollment: the camera session this still belongs to is over,
           // or it never had one. Sending it again cannot work; a new capture
@@ -449,7 +437,7 @@ export function FaceCapture({
         submittingRef.current = false;
       }
     },
-    [cameraOnly, onReplace, onSubmit, setConfirmingReplace, stage, subject],
+    [cameraOnly, onReplace, onSubmit, setConfirmingReplace, stage],
   );
 
   const discard = useCallback(() => {
@@ -457,7 +445,6 @@ export function FaceCapture({
     // rather than just hide the preview.
     releaseCamera();
     setResult(null);
-    setDistinct(null);
     setCameraError(null);
     setFileError(null);
     setStage({ name: "choosing" });
@@ -586,22 +573,19 @@ export function FaceCapture({
             {result.message}
           </Message>
         ) : null}
-        {distinct && stage.name === "review" ? (
+        {result && !result.ok && result.reason === "duplicate_identity" && result.collidedWith && twinReviewHref ? (
           <div className="flex flex-col items-start gap-2 rounded-md border border-neutral-200 px-3 py-2">
             <p className="max-w-md text-xs text-neutral-600">
-              Only if you have checked in person that this student and{" "}
-              {distinct.label ?? "the other student"} are different people — identical twins, for
-              example. Both will be enrolled, and a classroom photograph that cannot tell them apart
-              goes to review instead of being guessed. The confirmation is recorded.
+              {result.twinReview === "not_confirmed"
+                ? "This pair has been reviewed. A decision can be changed there by somebody with authority over both students."
+                : `If this student and ${result.collidedWith.label ?? "the other student"} are different people — identical twins, for example — the pair is confirmed in Twin / Lookalike confirmations by their class teacher, principal, head of department or director. Then enrol this sample again.`}
             </p>
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={() => void send(distinct.mode, distinct.studentId)}>
-                They are different people — enrol this sample
-              </Button>
-              <Button type="button" variant="secondary" onClick={discard}>
-                Cancel
-              </Button>
-            </div>
+            <Link
+              href={twinReviewHref(result.collidedWith.studentId)}
+              className="inline-flex min-h-11 items-center justify-center rounded-md border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-neutral-50 sm:min-h-10"
+            >
+              {result.twinReview === "not_confirmed" ? "Open confirmation" : "Review twin/lookalike confirmation"}
+            </Link>
           </div>
         ) : null}
         {result?.ok && status.remainingSlots > 0 ? (

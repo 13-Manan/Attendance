@@ -36,6 +36,7 @@ import {
   type CreateStudentInput,
 } from "./service";
 import type { StudentFilters } from "./directory-filters";
+import type { FaceModelFilter } from "./verification";
 import {
   STUDENT_STATUS_LABEL,
   StudentError,
@@ -88,6 +89,7 @@ import { studentDisplayName, type Student } from "./types";
 
 export interface StudentDirectoryDeps {
   search?: typeof repo.searchStudents;
+  runningFaceModel?: () => Promise<FaceModelFilter>;
   get?: typeof repo.getStudentForInstitution;
   findByCode?: typeof repo.findStudentByCode;
   listCohorts?: typeof repo.listCohortChoices;
@@ -105,6 +107,7 @@ export interface StudentDirectoryDeps {
 function deps(overrides: StudentDirectoryDeps) {
   return {
     search: overrides.search ?? repo.searchStudents,
+    runningFaceModel: overrides.runningFaceModel ?? (async () => (await import("./verification-service")).runningFaceModel()),
     get: overrides.get ?? repo.getStudentForInstitution,
     findByCode: overrides.findByCode ?? repo.findStudentByCode,
     listCohorts: overrides.listCohorts ?? repo.listCohortChoices,
@@ -140,7 +143,11 @@ export async function listStudentsForRequest(
   overrides: StudentDirectoryDeps = {},
 ): Promise<StudentPage> {
   const institutionId = requireInstitution(actor, "student.read");
-  return deps(overrides).search(institutionId, filters);
+  const d = deps(overrides);
+  // The verification filter and the "incomplete" count both count a face
+  // only when the running model made it, as the badges on the rows do.
+  const faceModel = await d.runningFaceModel();
+  return d.search(institutionId, filters, undefined, undefined, { faceModel });
 }
 
 export async function getStudentForRequest(

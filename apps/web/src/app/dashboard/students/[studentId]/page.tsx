@@ -21,6 +21,11 @@ import { PageTrail } from "@/components/nav/page-trail";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { StudentLogin } from "./student-login";
+import { VerificationChecklist } from "@/components/students/verification";
+import { runningFaceModel, verificationOf } from "@/modules/students/verification-service";
+import { canReviewTwinConfirmations } from "@/modules/twin-confirmation/service";
+import { getInstitutionById } from "@/modules/institutions/repository";
+import { resolveSelfEnrollmentEnabled } from "@/modules/face-enrollment/policy";
 import { getStudentLogin } from "@/modules/students/login-provisioning";
 import {
   AssignStudentClassControl,
@@ -126,6 +131,20 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
   // the way back along. Anything else leads back to Students.
   const origin = await resolveStudentOrigin(user, query[RETURN_PARAM]);
 
+  // Is this student fully set up? Computed from the records below; nothing is
+  // stored. See modules/students/verification.ts.
+  // The student was read through `student.read`, scoped to the session's
+  // institution — the same institution these reads use.
+  const institutionId = user.institutionId ?? "";
+  const [verification, institution] = await Promise.all([
+    verificationOf(institutionId, student.id, await runningFaceModel()),
+    getInstitutionById(institutionId),
+  ]);
+  const selfEnrollment = institution ? resolveSelfEnrollmentEnabled(institution) : false;
+  const faceBlocked =
+    verification?.face === "blocked_pending_review" || verification?.face === "blocked_not_confirmed";
+  const canReviewTwins = faceBlocked ? await canReviewTwinConfirmations(user) : false;
+
   const currentIds = new Set(student.classes.map((link) => link.enrollmentId));
   const pastClasses = student.allClasses.filter((link) => !currentIds.has(link.enrollmentId));
 
@@ -168,6 +187,41 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
         <p role="status" className="rounded-md bg-green-50 px-3 py-2 text-sm text-green-800">
           Changes saved.
         </p>
+      ) : null}
+
+      {verification ? (
+        <Panel title="Verification" description="Whether this student is fully set up: an account, their details and their face.">
+          <VerificationChecklist
+            verification={verification}
+            actions={
+              verification.overall === "incomplete" && verification.face !== "enrolled" ? (
+                <>
+                  {faceBlocked && canReviewTwins ? (
+                    <Link
+                      href={`${BASE}/twin-confirmations`}
+                      className="inline-flex items-center justify-center rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
+                    >
+                      Review twin/lookalike confirmation
+                    </Link>
+                  ) : null}
+                  {canManageFace && !faceBlocked ? (
+                    <Link
+                      href={withReturnPath(`${BASE}/${student.id}/enroll-face`, origin?.href)}
+                      className="inline-flex items-center justify-center rounded-md border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-neutral-50"
+                    >
+                      Enroll face
+                    </Link>
+                  ) : null}
+                  {selfEnrollment && login && !faceBlocked ? (
+                    <span className="text-xs text-neutral-500">
+                      The student can also enroll their own face from the Student Portal.
+                    </span>
+                  ) : null}
+                </>
+              ) : null
+            }
+          />
+        </Panel>
       ) : null}
 
       <Panel title="Details">

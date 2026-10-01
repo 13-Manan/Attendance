@@ -1,4 +1,6 @@
 import { Prisma } from "@prisma/client";
+import { runningFaceModel, verificationFor } from "@/modules/students/verification-service";
+import type { FaceModelFilter, StudentVerification, VerificationFilter } from "@/modules/students/verification";
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/modules/audit/service";
 import { isPlaceholderLoginEmail, pickByStudentCode } from "@/modules/auth-tenancy/student-login-policy";
@@ -916,6 +918,7 @@ export async function getDepartmentStudents(
   actor: SessionUser,
   departmentId: string,
   filters: DepartmentStudentFilters = {},
+  overrides: { runningFaceModel?: () => Promise<FaceModelFilter> } = {},
 ): Promise<DepartmentStudents | null> {
   const loaded = await load(actor, filters.sessionId);
   const department = departmentRow(loaded, departmentId);
@@ -960,6 +963,16 @@ export async function getDepartmentStudents(
     student.login = loginStateOf(userId, userId ? logins.get(userId) : undefined);
   }
 
+  // Verification for every department student, so the Verification filter
+  // and the "incomplete" count are worked out over the same set as the list.
+  const verification = await verificationFor(
+    loaded.scope.institutionId,
+    all.map((student) => student.studentId),
+    await (overrides.runningFaceModel ?? runningFaceModel)(),
+  );
+  for (const student of all) student.verification = verification.get(student.studentId);
+  const incompleteStudents = all.filter((student) => student.verification?.overall === "incomplete").length;
+
   const words = nameKey(filters.q ?? "").split(" ").filter(Boolean);
   const matched = all
     .filter((student) => {
@@ -973,6 +986,7 @@ export async function getDepartmentStudents(
     .filter((student) => !filters.sectionId || student.sections.some((section) => section.sectionId === filters.sectionId))
     .filter((student) => !filters.face || student.faceEnrolled === (filters.face === "enrolled"))
     .filter((student) => !filters.login || student.login === filters.login)
+    .filter((student) => matchesVerification(student.verification, filters.verification ?? ""))
     .sort((a, b) => a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName));
   const listed = matched.slice(0, STUDENT_LIST_LIMIT);
 
@@ -984,7 +998,17 @@ export async function getDepartmentStudents(
     sections: choices,
     students: listed,
     truncated: matched.length > listed.length,
+    totalStudents: all.length,
+    incompleteStudents,
   };
+}
+
+/** The Verification filter, applied to a computed state — the rules `verificationClauses` uses in SQL. */
+function matchesVerification(verification: StudentVerification | undefined, filter: VerificationFilter): boolean {
+  if (filter === "") return true;
+  if (!verification || verification.overall === "off_roll") return false;
+  if (filter === "face_pending") return verification.face !== "enrolled";
+  return verification.overall === filter;
 }
 
 /**
@@ -3219,6 +3243,34 @@ async function requireDepartmentStudent(
   return { scope, department, student };
 }
 
+/**
+ * Which of these students are the department's — in one of its sections, in a
+ * session that is not archived: the test `requireDepartmentStudent` applies to
+ * one student, for several. The scope is resolved first, so a head asking
+ * about another department, or a non-head, is refused before anything is read.
+ */
+export async function departmentStudentsAmong(
+  actor: SessionUser,
+  departmentId: string,
+  studentIds: readonly string[],
+  adminPermissions: readonly PermissionKey[] = ["faceEmbedding.manage"],
+): Promise<{ scope: CollegeScope; department: { id: string; name: string }; studentIds: Set<string> }> {
+  const scope = await resolveCollegeScope(actor, adminPermissions);
+  const tree = buildTree(await repo.listCollegeUnits(prisma, scope.institutionId));
+  const department = tree.byId.get(departmentId);
+  if (!department || department.kind !== "DEPARTMENT" || !departmentInScope(scope, department.id)) {
+    throw new CollegeSetupError(NOT_HERE.department);
+  }
+  const placed = await repo.studentsPlacedIn(
+    prisma,
+    scope.institutionId,
+    studentIds,
+    sectionUnitIds(tree, departmentCourses(tree, department.id).map((course) => course.id)),
+    { openSessionsOnly: true },
+  );
+  return { scope, department: { id: department.id, name: department.name }, studentIds: placed };
+}
+
 export interface DepartmentStudentFace extends StudentFaceEnrollment {
   department: { id: string; name: string; code: string | null };
   student: { studentId: string; studentCode: string; firstName: string; lastName: string };
@@ -3274,7 +3326,6 @@ export async function enrollDepartmentStudentFace(
     studentId: string;
     imageBase64: string;
     captureSource: FaceCaptureSource;
-    confirmDistinctFromStudentId?: string;
   },
   mode: "add" | "replace",
   overrides: FaceEnrollmentDeps = {},
@@ -3285,7 +3336,6 @@ export async function enrollDepartmentStudentFace(
     studentId: student.id,
     imageBase64: input.imageBase64,
     captureSource: input.captureSource,
-    ...(input.confirmDistinctFromStudentId ? { confirmDistinctFromStudentId: input.confirmDistinctFromStudentId } : {}),
   };
   return mode === "replace"
     ? replaceFaceEnrollmentRequest(caller, request, overrides)

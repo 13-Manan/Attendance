@@ -1,3 +1,5 @@
+import type { StudentVerification, VerificationFilter } from "@/modules/students/verification";
+
 /**
  * College academic setup: the shapes the college screens work with.
  *
@@ -342,6 +344,8 @@ export interface DepartmentStudentRow {
   login: StudentLoginState;
   /** Each of this department's sections they are in. */
   sections: StudentSectionRef[];
+  /** Whether they are fully set up (modules/students/verification.ts). */
+  verification?: StudentVerification;
 }
 
 export interface DepartmentStudentFilters {
@@ -352,6 +356,8 @@ export interface DepartmentStudentFilters {
   sectionId?: string;
   face?: "enrolled" | "not_enrolled" | "";
   login?: StudentLoginState | "";
+  /** Verification state, or empty for any. */
+  verification?: VerificationFilter;
 }
 
 export interface DepartmentStudents {
@@ -365,6 +371,9 @@ export interface DepartmentStudents {
   students: DepartmentStudentRow[];
   /** More matched than are listed; the search box narrows it. */
   truncated: boolean;
+  /** The department's students this session, before any filter, and how many are not fully verified. */
+  totalStudents?: number;
+  incompleteStudents?: number;
 }
 
 export interface DepartmentFacultyRow {

@@ -363,8 +363,9 @@ frame.
      confidently match theirs (`findLookalikeStudents`). In practice that is
      identical twins, and between them the margin is not evidence of which
      one it is, however wide. Enrolment refuses a sample that close to
-     another student unless staff confirm they are different people, so a
-     pair is normally a confirmed one. No pair was found among unrelated
+     another student unless staff with authority over both have confirmed
+     the pair different people (Twin / Lookalike confirmations), so a pair is
+     normally a confirmed one. No pair was found among unrelated
      people ([CALIBRATION.md](../services/face-ai/docs/CALIBRATION.md#twins)).
    - `duplicate_within_capture` — see §6.
    - `low_quality_face` — the winning face failed a quality check that face-ai

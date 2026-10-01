@@ -673,8 +673,10 @@ template or a vector (the numbers below are illustrative):
   ordinary light. Most of a class flagged on a normal day means the camera or
   the room, not the students: check focus and light before anything else.
 - `lookalikeStudents` — students in the pool with a lookalike in it,
-  normally a pair of identical twins that staff confirmed at enrolment
-  (the `face_enrollment.distinct_person_confirmed` audit row). A match to
+  normally a pair of identical twins that staff confirmed in Twin /
+  Lookalike confirmations (the `face_twin_confirmation.confirmed` audit row;
+  each sample enrolled under it is a `face_enrollment.distinct_person_confirmed`
+  row). A match to
   either of them is never marked present automatically. An unexpected
   non-zero count in a class without twins means two students' templates are
   confidently alike — find the confirmation in the audit log and check it
