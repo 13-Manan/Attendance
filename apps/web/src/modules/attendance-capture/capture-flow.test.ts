@@ -10,11 +10,14 @@ import {
   captureFlowErrorCode,
   describeCaptureFlowError,
   doneStateOf,
+  failureHeadline,
   formatElapsed,
+  isConnectionError,
   nextSequenceNumber,
   photoStatusOf,
   platformOf,
   readySummaryOf,
+  retryLabel,
   type CaptureFlowErrorCode,
   type FlowShot,
 } from "./capture-flow.ts";
@@ -57,7 +60,8 @@ test("camera permission denied: device-specific steps, a retry, and a way to mar
   const desktop = cameraHelp("permission_denied", "other");
   assert.match(desktop.steps.join(" "), /address bar/);
   for (const help of [ios, android, desktop]) {
-    assert.equal(help.title, "Camera access is turned off");
+    assert.equal(help.title, "Camera isn't available");
+    assert.equal(help.reason, "Camera access is turned off for this site.");
     assert.equal(help.canRetry, true);
     assert.equal(help.offerMarkByHand, true);
     assert.doesNotMatch(help.steps.join(" "), JARGON);
@@ -77,8 +81,9 @@ test("camera unavailable: no camera, busy, insecure or unsupported — each says
     const help = cameraHelp(kind, "android");
     assert.equal(help.canRetry, retry, kind);
     assert.equal(help.offerMarkByHand, true, kind);
-    assert.ok(help.title.length > 0 && help.steps.length > 0, kind);
-    assert.doesNotMatch(`${help.title} ${help.steps.join(" ")}`, JARGON, kind);
+    assert.equal(help.title, "Camera isn't available", "one headline, whatever the cause");
+    assert.ok(help.reason.length > 0 && help.reason.length <= 60 && help.steps.length > 0, kind);
+    assert.doesNotMatch(`${help.title} ${help.reason} ${help.steps.join(" ")}`, JARGON, kind);
   }
 });
 
@@ -122,7 +127,12 @@ test("a photo's check: checking, faces found, unclear, none, or couldn't check �
   assert.equal(photoStatusOf(shot({ analysis: { faceCount: 0, qualityLabel: "no_faces" } })).label, "No faces found");
   const failed = photoStatusOf(shot({ failure: { message: "Face detection took too long to respond. Try again." } }));
   assert.equal(failed.tone, "bad");
-  assert.equal(failed.label, "Couldn't check this photo");
+  assert.equal(failed.label, "Couldn't finish checking this photo");
+  assert.deepEqual(photoStatusOf(shot({ failure: { message: "x", kind: "connection" } })), {
+    tone: "bad",
+    label: "Connection lost",
+    detail: "Your photo hasn't been submitted.",
+  });
   for (const label of ["good", "acceptable", "poor", "no_faces"] as const) {
     const status = photoStatusOf(shot({ analysis: { faceCount: 4, qualityLabel: label } }));
     assert.doesNotMatch(`${status.label} ${status.detail ?? ""}`, JARGON, label);
@@ -133,6 +143,10 @@ test("Done is allowed exactly when Process attendance was: a photo, every check 
   const good: FlowShot = { sequenceNumber: 1, analysis: { faceCount: 5, qualityLabel: "good" } };
   assert.deepEqual(doneStateOf([]), { enabled: false, reason: "Take a photo of the class first." });
   assert.equal(doneStateOf([good, { sequenceNumber: 2, checking: true }]).enabled, false);
+  assert.deepEqual(doneStateOf([good, { sequenceNumber: 2, checking: true }], { offline: true }), {
+    enabled: false,
+    reason: "Waiting for the connection",
+  });
   assert.equal(doneStateOf([good, { sequenceNumber: 2, failure: { message: "x" } }]).enabled, false);
   assert.deepEqual(doneStateOf([good]), { enabled: true, reason: null });
   // Unchanged rule: a photo with nobody in it does not block — the register
@@ -253,4 +267,62 @@ test("every code has words a teacher can act on; marking by hand only once a reg
   assert.equal(describeCaptureFlowError("matching_slow", "process").canMarkByHand, true);
   assert.equal(describeCaptureFlowError("matching_slow", "process").canRetry, true);
   assert.equal(describeCaptureFlowError("register_finished", "process").canRetry, false);
+});
+
+// ---------------------------------------------------------------------------
+// When the connection, the camera or the matching fails
+// ---------------------------------------------------------------------------
+
+test("a dropped connection is told apart from a server's answer, in every browser's wording", () => {
+  assert.equal(isConnectionError(new TypeError("Failed to fetch")), true, "Chrome");
+  assert.equal(isConnectionError(new TypeError("Load failed")), true, "Safari");
+  assert.equal(isConnectionError(new TypeError("NetworkError when attempting to fetch resource.")), true, "Firefox");
+  assert.equal(isConnectionError(new Error("anything"), false), true, "an offline device, whatever the error");
+  assert.equal(isConnectionError(new Error("Minified React error #441")), false);
+  assert.equal(isConnectionError(new TypeError("x is not a function")), false);
+  assert.equal(isConnectionError(undefined), false);
+});
+
+test("connection lost: says what did not happen, offers Retry, and never offers a by-hand path that also needs the server", () => {
+  const start = describeCaptureFlowError("connection_lost", "start");
+  const process = describeCaptureFlowError("connection_lost", "process");
+  assert.match(start.message, /hasn't been started/);
+  assert.match(process.message, /Your photo hasn't been submitted/);
+  for (const copy of [start, process, describeCaptureFlowError("connection_lost", "markByHand")]) {
+    assert.equal(copy.canRetry, true);
+    assert.equal(copy.canMarkByHand, false);
+    assert.doesNotMatch(copy.message, JARGON);
+  }
+  assert.equal(retryLabel("connection_lost"), "Retry");
+  assert.equal(retryLabel("matching_slow"), "Try again");
+});
+
+test("failure headlines: 'Connection lost', 'Couldn't finish checking this photo.' — or these photos", () => {
+  assert.equal(failureHeadline("connection_lost", "process"), "Connection lost");
+  assert.equal(failureHeadline("matching_slow", "process", 1), "Couldn't finish checking this photo.");
+  assert.equal(failureHeadline("matching_failed", "process", 3), "Couldn't finish checking these photos.");
+  assert.equal(failureHeadline("unknown", "start"), "Couldn't start attendance");
+  assert.equal(failureHeadline("connection_lost", "start"), "Connection lost");
+});
+
+test("a check still in flight when the connection drops reads 'Connection lost', not an endless spinner", () => {
+  const pending: FlowShot = { sequenceNumber: 1, checking: true };
+  assert.equal(photoStatusOf(pending).label, "Checking faces…");
+  const offline = photoStatusOf(pending, { offline: true });
+  assert.equal(offline.label, "Connection lost");
+  assert.match(offline.detail ?? "", /Your photo hasn't been submitted/);
+  assert.equal(photoStatusOf({ sequenceNumber: 1, analysis: { faceCount: 3, qualityLabel: "good" } }, { offline: true }).label, "3 faces found", "a finished check is not undone by going offline");
+});
+
+test("a face service that is down is told apart from everything else, and worded as an outage", () => {
+  assert.equal(captureFlowErrorCode(new TypeError("fetch failed")), "matching_unavailable");
+  assert.equal(captureFlowErrorCode(new Error("face-ai /v1/detect-embed failed: 503 azure_face_unavailable")), "matching_unavailable");
+  assert.equal(captureFlowErrorCode(new Error("face-ai model-info failed: 502")), "matching_unavailable");
+  assert.equal(captureFlowErrorCode(new Error("face-ai /v1/detect-embed failed: 400")), "unknown", "a refused request is not an outage");
+  const copy = describeCaptureFlowError("matching_unavailable", "process");
+  assert.match(copy.message, /isn't responding/);
+  assert.equal(copy.canRetry, true);
+  assert.equal(copy.canMarkByHand, true);
+  assert.doesNotMatch(copy.message, JARGON);
+  assert.equal(failureHeadline("matching_unavailable", "process"), "Couldn't finish checking this photo.");
 });

@@ -39,7 +39,14 @@ export type CaptureFlowErrorCode =
   | "matching_slow"
   | "matching_changed"
   | "matching_failed"
+  /** The face service did not answer, or answered with a server error: an outage, not this photo. */
+  | "matching_unavailable"
   | "photos_invalid"
+  /**
+   * Browser side only: the request never came back — the phone is offline, or
+   * the connection dropped. The server never sends this code.
+   */
+  | "connection_lost"
   | "unknown";
 
 export type CaptureFlowResult<T> = { ok: true; value: T } | { ok: false; code: CaptureFlowErrorCode };
@@ -48,6 +55,11 @@ export type CaptureFlowResult<T> = { ok: true; value: T } | { ok: false; code: C
 export function captureFlowErrorCode(error: unknown): CaptureFlowErrorCode {
   if (error instanceof ForbiddenError) return "not_allowed";
   const raw = error instanceof Error ? error.message : "";
+  // The server's own call to the face service failed: unreachable ("fetch
+  // failed" — the only outbound request these steps make) or a 5xx from it.
+  if ((error instanceof TypeError && /fetch failed/i.test(raw)) || /^face-ai \S+ failed: 5\d\d/.test(raw)) {
+    return "matching_unavailable";
+  }
   if (raw.startsWith("session_locked:FINALIZED") || raw === "attendance_finalized") {
     return "register_finished";
   }
@@ -80,6 +92,18 @@ export function captureFlowErrorCode(error: unknown): CaptureFlowErrorCode {
   }
   if (raw === "cohort_not_found" || raw === "institution_not_found") return "not_allowed";
   return "unknown";
+}
+
+/**
+ * Whether a Server Action call failed because the connection did, rather than
+ * because the server answered with an error. Browsers word it differently —
+ * "Failed to fetch" (Chrome), "Load failed" (Safari), "NetworkError …"
+ * (Firefox) — and an offline device says so outright.
+ */
+export function isConnectionError(error: unknown, online: boolean = true): boolean {
+  if (!online) return true;
+  if (!(error instanceof TypeError)) return false;
+  return /failed to fetch|load failed|networkerror|network request failed|network error/i.test(error.message);
 }
 
 export interface FlowErrorCopy {
@@ -160,11 +184,29 @@ export function describeCaptureFlowError(
         canRetry: true,
         canMarkByHand: afterStart,
       };
+    case "matching_unavailable":
+      return {
+        message: "Face matching isn't responding right now. Try again in a moment, or mark attendance by hand.",
+        canRetry: true,
+        canMarkByHand: afterStart,
+      };
     case "photos_invalid":
       return {
         message: "Something was wrong with the photos. Take them again.",
         canRetry: false,
         canMarkByHand: afterStart,
+      };
+    case "connection_lost":
+      return {
+        message:
+          stage === "start"
+            ? "Attendance hasn't been started. Check the connection, then retry."
+            : stage === "process"
+              ? "Your photo hasn't been submitted. Check the connection, then retry."
+              : "Nothing has been changed. Check the connection, then retry.",
+        canRetry: true,
+        // Marking by hand needs the server too.
+        canMarkByHand: false,
       };
     case "unknown":
       return {
@@ -175,6 +217,23 @@ export function describeCaptureFlowError(
         canMarkByHand: afterStart,
       };
   }
+}
+
+/** The large line over a failure: what didn't happen, in a teacher's words. */
+export function failureHeadline(
+  code: CaptureFlowErrorCode,
+  stage: "start" | "process" | "markByHand",
+  photoCount = 1,
+): string {
+  if (code === "connection_lost") return "Connection lost";
+  if (stage === "start") return "Couldn't start attendance";
+  if (stage === "markByHand") return "Couldn't mark attendance by hand";
+  return photoCount > 1 ? "Couldn't finish checking these photos." : "Couldn't finish checking this photo.";
+}
+
+/** "Retry" after a dropped connection — the same request again; "Try again" otherwise. */
+export function retryLabel(code: CaptureFlowErrorCode): string {
+  return code === "connection_lost" ? "Retry" : "Try again";
 }
 
 // ---------------------------------------------------------------------------
@@ -212,12 +271,17 @@ export function platformOf(userAgent: string): DevicePlatform {
 }
 
 export interface CameraHelp {
+  /** Always "Camera isn't available": one headline, whatever the cause. */
   title: string;
+  /** The cause, in one short sentence. */
+  reason: string;
   steps: string[];
   canRetry: boolean;
   /** Offer marking the register by hand instead. */
   offerMarkByHand: boolean;
 }
+
+const CAMERA_UNAVAILABLE = "Camera isn't available";
 
 /**
  * What to do when the camera does not start. Specific to the device in hand,
@@ -231,7 +295,8 @@ export function cameraHelp(
   switch (kind) {
     case "permission_denied":
       return {
-        title: "Camera access is turned off",
+        title: CAMERA_UNAVAILABLE,
+        reason: "Camera access is turned off for this site.",
         steps:
           platform === "ios"
             ? [
@@ -252,35 +317,40 @@ export function cameraHelp(
       };
     case "no_device":
       return {
-        title: "No camera found",
+        title: CAMERA_UNAVAILABLE,
+        reason: "No camera was found on this device.",
         steps: ["Use a phone or tablet with a camera, or mark attendance by hand."],
         canRetry: true,
         offerMarkByHand: true,
       };
     case "device_in_use":
       return {
-        title: "The camera is busy",
+        title: CAMERA_UNAVAILABLE,
+        reason: "Another app is using the camera.",
         steps: ["Close any other app using the camera, such as a video call.", "Then tap Try again."],
         canRetry: true,
         offerMarkByHand: true,
       };
     case "insecure_context":
       return {
-        title: "The camera can't be used here",
+        title: CAMERA_UNAVAILABLE,
+        reason: "The camera only works on the site's secure address.",
         steps: ["Open the attendance site using its https:// address."],
         canRetry: false,
         offerMarkByHand: true,
       };
     case "unsupported":
       return {
-        title: "This browser can't use the camera",
+        title: CAMERA_UNAVAILABLE,
+        reason: "This browser can't use the camera.",
         steps: ["Open this page in Chrome or Safari, or mark attendance by hand."],
         canRetry: false,
         offerMarkByHand: true,
       };
     case "unknown":
       return {
-        title: "The camera didn't start",
+        title: CAMERA_UNAVAILABLE,
+        reason: "The camera didn't start.",
         steps: ["Tap Try again, or mark attendance by hand."],
         canRetry: true,
         offerMarkByHand: true,
@@ -296,7 +366,8 @@ export interface FlowShot {
   sequenceNumber: 1 | 2 | 3;
   checking?: boolean;
   analysis?: Pick<CaptureImageAnalysis, "faceCount" | "qualityLabel">;
-  failure?: { message: string };
+  /** `connection`: the photo never reached the server; `service`: it did, and the check failed. */
+  failure?: { message: string; kind?: "connection" | "service" };
 }
 
 /** The lowest free photo slot. A retaken photo reuses the slot it gave up. */
@@ -318,11 +389,23 @@ function faces(n: number): string {
   return `${n} face${n === 1 ? "" : "s"}`;
 }
 
-/** One photo's face check, as a chip and a line of advice. */
-export function photoStatusOf(shot: FlowShot): PhotoStatus {
+/**
+ * One photo's face check, as a chip and a line of advice.
+ *
+ * `offline`: the connection is down. A check still in flight then has not
+ * reached the server — the framework holds it and sends it, once, when the
+ * connection returns — so it reads "Connection lost" rather than a spinner
+ * that never ends.
+ */
+export function photoStatusOf(shot: FlowShot, options: { offline?: boolean } = {}): PhotoStatus {
+  if (shot.checking && options.offline) {
+    return { tone: "bad", label: "Connection lost", detail: "Your photo hasn't been submitted. It will be sent once the connection is back." };
+  }
   if (shot.checking) return { tone: "checking", label: "Checking faces…", detail: null };
   if (shot.failure) {
-    return { tone: "bad", label: "Couldn't check this photo", detail: shot.failure.message };
+    return shot.failure.kind === "connection"
+      ? { tone: "bad", label: "Connection lost", detail: "Your photo hasn't been submitted." }
+      : { tone: "bad", label: "Couldn't finish checking this photo", detail: shot.failure.message };
   }
   const analysis = shot.analysis;
   if (!analysis) return { tone: "checking", label: "Not checked yet", detail: null };
@@ -362,9 +445,12 @@ export interface DoneState {
  * failed. A photo with no faces in it still counts — the register then asks
  * the teacher about everyone, which is the existing, deliberate behaviour.
  */
-export function doneStateOf(shots: FlowShot[]): DoneState {
+export function doneStateOf(shots: FlowShot[], options: { offline?: boolean } = {}): DoneState {
   if (shots.length === 0) return { enabled: false, reason: "Take a photo of the class first." };
-  if (shots.some((s) => s.checking)) return { enabled: false, reason: "Checking faces…" };
+  if (shots.some((s) => s.checking)) {
+    // Held for the connection, not being checked: say what it is waiting for.
+    return { enabled: false, reason: options.offline ? "Waiting for the connection" : "Checking faces…" };
+  }
   if (shots.some((s) => s.failure)) {
     return { enabled: false, reason: "Retake or remove the photo that couldn't be checked." };
   }

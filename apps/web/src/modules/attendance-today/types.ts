@@ -37,7 +37,7 @@ export interface TodayLink {
 }
 
 export interface TodayRegisterView extends TodayRegister {
-  /** "Not started yet", "In progress", … */
+  /** "Not started", "In progress", "Needs review", "Completed" — or "Sent for review" for an operator. */
   statusLabel: string;
   /** What the big button does for this register. Null once today's is done. */
   primary: TodayLink | null;

@@ -91,6 +91,25 @@ export function AlertIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** "Not started": an empty circle. */
+export function CircleIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+    </Icon>
+  );
+}
+
+/** "In progress": a clock — still, unlike the spinner, because nothing is loading. */
+export function ClockIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </Icon>
+  );
+}
+
 /** A spinner that respects reduced motion: it simply stops turning. */
 export function Spinner({ className = "", ...props }: SVGProps<SVGSVGElement>) {
   return (

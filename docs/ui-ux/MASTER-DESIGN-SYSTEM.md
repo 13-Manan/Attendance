@@ -622,6 +622,20 @@ wait and the result summary — in `app/dashboard/attendance/[cohortId]/capture`
 Face boxes and per-face Matched/Uncertain/Unmatched overlays are still
 principles only.
 
+**Implemented (2026-10-02, Phases 2–3):**
+- The review board leads with "✓ N Present" and "⚠ N need attention" → **Review N
+  students**. Each student who needs attention shows a "Reason:" line and
+  Present / Absent / Review. Present is folded on a phone and sits beside Needs
+  attention from 1024px.
+- Failure states use one plain headline, then the cause, then the next step:
+  - **Camera isn't available**: the cause, device-specific steps, then Try again.
+  - **Couldn't finish checking this photo.**: Try again, or mark by hand.
+  - **Connection lost**: "Your photo hasn't been submitted.", then Retry.
+- The Today card names each register's status with an icon and a word: Not
+  started, In progress, Needs review, Completed. The action matches the status:
+  Take today's attendance, Continue attendance, Review attendance, View
+  attendance.
+
 | State | Visual treatment |
 |---|---|
 | Camera permission needed | Full-panel alert with `--color-info` tone, primary "Enable camera" button |

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
+import { useOffline } from "next/offline";
 import { AlertIcon, CameraIcon, CheckIcon, PlusIcon, RetakeIcon, Spinner, SwitchCameraIcon } from "@/components/attendance/icons";
 import type {
   CaptureImageAnalysis,
@@ -17,11 +18,14 @@ import {
   cameraStageOf,
   describeCaptureFlowError,
   doneStateOf,
+  failureHeadline,
   formatElapsed,
+  isConnectionError,
   nextSequenceNumber,
   photoStatusOf,
   platformOf,
   readySummaryOf,
+  retryLabel,
   type CaptureFlowErrorCode,
   type ProcessingPhase,
 } from "@/modules/attendance-capture/capture-flow";
@@ -99,9 +103,9 @@ interface CapturedShot {
   analysis?: CaptureImageAnalysis;
   /** Set while the face check is in flight. */
   checking?: boolean;
-  /** Set when the check failed — the shot gets a retake rather than being
-   * silently dropped. */
-  failure?: { message: string; retryable: boolean };
+  /** Set when the check failed — the shot gets a retry or a retake rather
+   * than being silently dropped. `connection`: it never reached the server. */
+  failure?: { message: string; retryable: boolean; kind: "connection" | "service" };
 }
 
 interface Props {
@@ -215,6 +219,12 @@ export function CaptureWizard({
   const headingRef = useRef<HTMLHeadingElement | null>(null);
 
   const isOnline = useSyncExternalStore(subscribeToOnlineStatus, getOnlineSnapshot, alwaysTrue);
+  // Next's own reading (next.config `useOffline`): it polls a real request, so
+  // it also catches a classroom access point with no upstream, which
+  // `navigator.onLine` reports as online. While it says offline, a request
+  // already made is held and sent once, when the connection returns.
+  const frameworkOffline = useOffline();
+  const offline = frameworkOffline || !isOnline;
   const isVisible = useSyncExternalStore(subscribeToVisibility, getVisibleSnapshot, alwaysTrue);
 
   // The fixture source is constructed once, and only when explicitly asked
@@ -318,8 +328,8 @@ export function CaptureWizard({
         return;
       }
       setStep("camera");
-    } catch {
-      setStartError("unknown");
+    } catch (error) {
+      setStartError(isConnectionError(error, navigator.onLine) ? "connection_lost" : "unknown");
     } finally {
       setStarting(false);
     }
@@ -361,7 +371,7 @@ export function CaptureWizard({
         settle({
           checking: false,
           analysis: undefined,
-          failure: { message: describeCaptureFlowError(result.code, "process").message, retryable: true },
+          failure: { message: describeCaptureFlowError(result.code, "process").message, retryable: true, kind: "service" },
         });
       } else if (result.value.ok) {
         settle({ checking: false, analysis: result.value, failure: undefined });
@@ -369,13 +379,16 @@ export function CaptureWizard({
         settle({
           checking: false,
           analysis: undefined,
-          failure: { message: result.value.message, retryable: result.value.retryable },
+          failure: { message: result.value.message, retryable: result.value.retryable, kind: "service" },
         });
       }
-    } catch {
+    } catch (error) {
+      // The photo is still in hand: Retry sends this same frame again.
       settle({
         checking: false,
-        failure: { message: "Couldn't reach the server to check this photo. Check the connection and retake.", retryable: true },
+        failure: isConnectionError(error, navigator.onLine)
+          ? { message: "Your photo hasn't been submitted.", retryable: true, kind: "connection" }
+          : { message: "Something went wrong. Try again, or retake the photo.", retryable: true, kind: "service" },
       });
     }
   }, []);
@@ -441,7 +454,7 @@ export function CaptureWizard({
   // claim everybody was matched — attendance would be asserted by the device
   // rather than measured. What the browser gets back is display-only.
   // -------------------------------------------------------------------------
-  const done = doneStateOf(shots);
+  const done = doneStateOf(shots, { offline });
 
   const process = useCallback(async () => {
     if (!started || !doneStateOf(shots).enabled) return;
@@ -469,9 +482,9 @@ export function CaptureWizard({
       } else {
         setProcessError(result.code);
       }
-    } catch {
+    } catch (error) {
       // The request itself failed — the connection, usually.
-      setProcessError("unknown");
+      setProcessError(isConnectionError(error, navigator.onLine) ? "connection_lost" : "unknown");
     }
 
     setPhase("preparing");
@@ -487,6 +500,40 @@ export function CaptureWizard({
   const reviewHref = started
     ? `/dashboard/attendance/${cohortId}/review/${started.session.id}`
     : null;
+
+  /**
+   * Retry while the connection is down. The request already made is being
+   * held and is sent by itself when the connection returns; sending it again
+   * from here would make two. A refresh is a real request: if the connection
+   * is back it succeeds, and the held one goes at once.
+   */
+  const retryConnection = useCallback(() => {
+    router.refresh();
+  }, [router]);
+
+  /**
+   * Retry after a failed match. When the connection dropped, the request may
+   * still have reached the server and finished, so ask first: a register now
+   * in review was written by that request — open it rather than send the
+   * photos again. A register being added to was in review already, so for
+   * that one the photos are simply sent again (each student keeps the
+   * stronger finding).
+   */
+  const retryProcess = useCallback(async () => {
+    if (processError === "connection_lost" && started && reviewHref && started.session.status !== "REVIEW") {
+      try {
+        const latest = await summarizeCaptureFlow({ sessionId: started.session.id });
+        if (latest.ok && latest.value.status === "REVIEW") {
+          camera.stop();
+          router.push(reviewHref);
+          return;
+        }
+      } catch {
+        // Still offline: processing below reports it again.
+      }
+    }
+    void process();
+  }, [camera, process, processError, reviewHref, router, started]);
 
   /**
    * Marking by hand: the register is built from the class list with every
@@ -506,8 +553,8 @@ export function CaptureWizard({
         return;
       }
       setMarkByHandError(result.code);
-    } catch {
-      setMarkByHandError("unknown");
+    } catch (error) {
+      setMarkByHandError(isConnectionError(error, navigator.onLine) ? "connection_lost" : "unknown");
     } finally {
       setMarkByHandBusy(false);
     }
@@ -566,7 +613,7 @@ export function CaptureWizard({
   const subtitle = [context.subtitle, context.dateLabel].filter(Boolean).join(" · ");
   const platform = typeof navigator === "undefined" ? "other" : platformOf(navigator.userAgent);
 
-  const offlineNotice = !isOnline ? (
+  const offlineNotice = offline ? (
     <p
       role="alert"
       className="mx-4 mt-2 rounded-lg bg-amber-100 px-3 py-2 text-sm text-amber-950 md:mx-5"
@@ -679,7 +726,7 @@ export function CaptureWizard({
         onBack={leave}
         backLabel={backTarget.label}
         headingRef={headingRef}
-        heading={error ? "Couldn't start attendance" : "Getting ready"}
+        heading={error && startError ? failureHeadline(startError, "start") : "Getting ready"}
         showHeading={false}
         notices={offlineNotice}
         footer={
@@ -687,7 +734,8 @@ export function CaptureWizard({
             <div className="flex flex-col gap-2">
               {error.canRetry ? (
                 <ActionButton tone="dark" size="lg" onClick={() => void start()} disabled={starting}>
-                  Try again
+                  {starting ? <Spinner className="size-5" /> : null}
+                  {startError ? retryLabel(startError) : "Try again"}
                 </ActionButton>
               ) : null}
               <ActionButton tone="dark" kind="secondary" onClick={leave}>
@@ -699,10 +747,21 @@ export function CaptureWizard({
       >
         <Viewfinder>
           <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center text-white">
-            {error ? (
+            {!error && offline ? (
+              <>
+                <AlertIcon className="size-9" />
+                <p className="text-lg font-semibold">Connection lost</p>
+                <p role="alert" className="text-sm text-white/85">
+                  Attendance hasn&apos;t been started. It will start once the connection is back.
+                </p>
+                <ActionButton tone="dark" kind="secondary" onClick={retryConnection}>
+                  Retry
+                </ActionButton>
+              </>
+            ) : error ? (
               <>
                 <p className="text-lg font-semibold" aria-hidden="true">
-                  Couldn&apos;t start attendance
+                  {startError ? failureHeadline(startError, "start") : "Couldn't start attendance"}
                 </p>
                 <p role="alert" className="text-sm text-white/85">
                   {error.message}
@@ -856,7 +915,11 @@ export function CaptureWizard({
                 </>
               ) : help ? (
                 <>
+                  <AlertIcon className="size-9" />
                   <p className="text-lg font-semibold">{help.title}</p>
+                  <p role="alert" className="max-w-xs text-sm text-white/90">
+                    {help.reason}
+                  </p>
                   <ol className="flex max-w-xs list-decimal flex-col gap-1.5 pl-5 text-left text-sm text-white/85">
                     {help.steps.map((stepText) => (
                       <li key={stepText}>{stepText}</li>
@@ -900,7 +963,8 @@ export function CaptureWizard({
   // Photo — the captured frame, its face check, and what next
   // =========================================================================
   if (step === "photo" && selectedShot) {
-    const status = photoStatusOf(selectedShot);
+    const status = photoStatusOf(selectedShot, { offline });
+    const waitingForConnection = Boolean(selectedShot.checking) && offline;
     const t = toneClasses("dark");
     return (
       <CaptureShell
@@ -915,6 +979,15 @@ export function CaptureWizard({
         footer={
           <>
             {status.detail ? <p className={`text-sm ${t.body}`}>{status.detail}</p> : null}
+            {waitingForConnection ? (
+              <ActionButton tone="dark" kind="secondary" onClick={retryConnection}>
+                Retry
+              </ActionButton>
+            ) : selectedShot.failure?.retryable && started ? (
+              <ActionButton tone="dark" kind="secondary" onClick={() => void checkShot(started.session.id, selectedShot)}>
+                {selectedShot.failure.kind === "connection" ? "Retry" : "Try again"}
+              </ActionButton>
+            ) : null}
             {leaveBar("dark")}
             <div className="grid grid-cols-2 gap-3">
               <ActionButton tone="dark" kind="secondary" onClick={() => retakeShot(selectedShot.sequenceNumber)}>
@@ -940,7 +1013,7 @@ export function CaptureWizard({
                 </>
               ) : (
                 <>
-                  {shots.some((s) => s.checking) ? <Spinner className="size-5" /> : null}
+                  {shots.some((s) => s.checking) && !offline ? <Spinner className="size-5" /> : null}
                   {done.reason}
                 </>
               )}
@@ -962,7 +1035,7 @@ export function CaptureWizard({
         {shots.length > 1 ? (
           <div className="flex items-center justify-center gap-3 px-4 pt-3 md:justify-start md:px-5">
             {shots.map((shot) => {
-              const shotStatus = photoStatusOf(shot);
+              const shotStatus = photoStatusOf(shot, { offline });
               const isSelected = shot.sequenceNumber === selectedShot.sequenceNumber;
               return (
                 <button
@@ -1020,21 +1093,40 @@ export function CaptureWizard({
         backLabel={backTarget.label}
         backDisabled
         headingRef={headingRef}
-        heading="Matching students"
+        heading={offline ? "Connection lost" : "Matching students"}
         showHeading={false}
-        notices={offlineNotice}
+        footer={
+          offline ? (
+            <ActionButton tone="light" size="lg" onClick={retryConnection}>
+              Retry
+            </ActionButton>
+          ) : undefined
+        }
       >
-        <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-12 text-center">
-          <Spinner className="size-12 text-neutral-900" />
-          <p className="text-xl font-semibold text-neutral-900" role="status" aria-live="polite">
-            {PROCESSING_LABEL[phase]}
-          </p>
-          <p className="text-sm tabular-nums text-neutral-500">{formatElapsed(clock - processingSince)}</p>
-          <p className="max-w-xs text-sm text-neutral-600">
-            Keep this screen open. {shots.length === 1 ? "Your photo is" : `All ${shots.length} photos are`}{" "}
-            checked together, so a student in two photos is counted once.
-          </p>
-        </div>
+        {offline ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-12 text-center">
+            <span className="inline-flex size-14 items-center justify-center rounded-full bg-red-50 text-red-700">
+              <AlertIcon className="size-7" />
+            </span>
+            <p className="text-xl font-semibold text-neutral-900">Connection lost</p>
+            <p role="alert" className="max-w-xs text-sm text-neutral-700">
+              Your {shots.length === 1 ? "photo hasn't" : "photos haven't"} been submitted.{" "}
+              {shots.length === 1 ? "It" : "They"} will be sent once the connection is back — keep this screen open.
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-12 text-center">
+            <Spinner className="size-12 text-neutral-900" />
+            <p className="text-xl font-semibold text-neutral-900" role="status" aria-live="polite">
+              {PROCESSING_LABEL[phase]}
+            </p>
+            <p className="text-sm tabular-nums text-neutral-500">{formatElapsed(clock - processingSince)}</p>
+            <p className="max-w-xs text-sm text-neutral-600">
+              Keep this screen open. {shots.length === 1 ? "Your photo is" : `All ${shots.length} photos are`}{" "}
+              checked together, so a student in two photos is counted once.
+            </p>
+          </div>
+        )}
       </CaptureShell>
     );
   }
@@ -1073,15 +1165,15 @@ export function CaptureWizard({
       onBack={leave}
       backLabel={backTarget.label}
       headingRef={headingRef}
-      heading={failed ? "Couldn't match students" : "Attendance ready"}
+      heading={failed && processError ? failureHeadline(processError, "process", shots.length) : "Attendance ready"}
       showHeading={false}
       notices={offlineNotice}
       footer={
         failed ? (
           <>
-            {failure?.canRetry ? (
-              <ActionButton tone="light" size="lg" onClick={() => void process()} disabled={markByHandBusy}>
-                Try again
+            {failure?.canRetry && processError ? (
+              <ActionButton tone="light" size="lg" onClick={() => void retryProcess()} disabled={markByHandBusy}>
+                {retryLabel(processError)}
               </ActionButton>
             ) : null}
             {failure?.canMarkByHand && canReview ? (
@@ -1121,16 +1213,18 @@ export function CaptureWizard({
         {failed ? (
           <div className="flex flex-col items-center gap-3 text-center">
             <span className="inline-flex size-14 items-center justify-center rounded-full bg-red-50 text-red-700">
-              <CameraIcon className="size-7" />
+              {processError === "connection_lost" ? <AlertIcon className="size-7" /> : <CameraIcon className="size-7" />}
             </span>
             <p className="text-xl font-semibold text-neutral-900" aria-hidden="true">
-              Couldn&apos;t match students
+              {processError ? failureHeadline(processError, "process", shots.length) : null}
             </p>
             <p role="alert" className="max-w-sm text-sm text-neutral-700">
               {failure?.message}
             </p>
             <p className="max-w-sm text-xs text-neutral-500">
-              Nobody has been marked present or absent because of this.
+              {processError === "connection_lost"
+                ? "Your photos are kept on this device. If they did reach the server, Retry opens the result instead of sending them again."
+                : "Nobody has been marked present or absent because of this."}
             </p>
           </div>
         ) : (

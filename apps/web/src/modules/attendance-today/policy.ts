@@ -112,17 +112,19 @@ export function registerStateOf(status: SessionStatus | null): TodayRegisterStat
   }
 }
 
-const STATUS_LABEL: Record<TodayRegisterState, string> = {
-  not_started: "Not started yet",
+/** Where today's register stands, in four words a teacher reads at a glance. */
+export const STATUS_LABEL: Record<TodayRegisterState, string> = {
+  not_started: "Not started",
   in_progress: "In progress",
-  in_review: "Ready for your review",
-  done: "Done for today",
+  in_review: "Needs review",
+  done: "Completed",
 };
 
+/** The one thing to do next, named for what it does. */
 const PRIMARY_LABEL: Record<Exclude<TodayRegisterState, "done">, string> = {
   not_started: "Take today's attendance",
-  in_progress: "Continue today's attendance",
-  in_review: "Review today's attendance",
+  in_progress: "Continue attendance",
+  in_review: "Review attendance",
 };
 
 // ---------------------------------------------------------------------------
@@ -214,7 +216,7 @@ export function viewOf(
     // yet (capture).
     viewToday:
       sessionId && options.canReview && state === "done"
-        ? { label: "View today's attendance", href: reviewHref(register.cohortId, sessionId) }
+        ? { label: "View attendance", href: reviewHref(register.cohortId, sessionId) }
         : null,
     history: { label: "Previous attendance", href: historyHref(register.cohortId) },
   };

@@ -214,6 +214,15 @@ failure mode `navigator.onLine` misses — an access point that is associated an
 has no upstream. What it explicitly does not cover is a **full page reload with
 no network**, which needs a worker.
 
+The online capture flow leans on that retry rather than fighting it (since
+2026-10-02). A photo check or a match that cannot reach the server is held by
+Next and sent, once, when the connection returns — so the screen reads
+"Connection lost. Your photo hasn't been submitted." instead of a spinner that
+never ends, and its **Retry** only nudges a reconnection (a refresh, which is a
+real request) rather than sending the photo a second time. A request that fails
+in a way Next does not hold is reported as `connection_lost`, and Retry there
+first asks whether the register was already written before matching again.
+
 So: `/offline` is a static, data-free route, precached along with its
 `/_next/static/` chunks, and served as the navigation fallback. From there the
 teacher reaches the same workbench, the same rosters in IndexedDB, and the same

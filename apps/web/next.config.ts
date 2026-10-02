@@ -46,8 +46,12 @@ const nextConfig: NextConfig = {
      * Retrying a request is only useful while the tab is open and the teacher
      * is waiting; attendance has to survive the tab being closed, the device
      * sleeping, and the walk back to the staff room. That is what IndexedDB
-     * and `modules/offline-sync` are for. Nothing in the capture flow depends
-     * on this flag.
+     * and `modules/offline-sync` are for.
+     *
+     * The capture screen reads `useOffline()` too: a photo check or a match
+     * held for the connection says "Connection lost" instead of spinning, and
+     * its Retry only nudges a reconnection — the held request is the one that
+     * goes, once, so nothing is sent twice.
      */
     useOffline: true,
 

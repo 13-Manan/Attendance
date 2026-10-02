@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getAttendanceReviewBoard } from "@/modules/attendance-review/service";
+import { logAttendanceUx } from "@/modules/attendance-capture/ux-events";
 import { formatInTimeZone } from "@/modules/attendance-today/policy";
 import { getInstitutionById } from "@/modules/institutions/repository";
 import { hasPermission } from "@/modules/authorization/service";
@@ -45,6 +46,16 @@ export default async function AttendanceReviewPage({ params, searchParams }: Pag
   if (board.session.cohortId !== cohortId) {
     redirect(`/dashboard/attendance/${board.session.cohortId}/review/${sessionId}`);
   }
+
+  logAttendanceUx("review_open", {
+    sessionId,
+    cohortId,
+    status: board.session.processingStatus,
+    present: board.counts.present,
+    needsReview: board.counts.needsReview,
+    absent: board.counts.absent,
+    total: board.counts.total,
+  });
 
   // Only a register still in review takes more photos, and only from someone
   // who may capture; the capture page re-checks both before anything runs.

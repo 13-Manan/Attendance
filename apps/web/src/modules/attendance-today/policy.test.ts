@@ -79,7 +79,7 @@ test("today's attendance: each session status reads as the teacher thinks of it"
   assert.equal(registerStateOf("FINALIZED"), "done");
 });
 
-test("the big button: take, continue or review — and nothing once today's is done", () => {
+test("status and action: Not started → Take, In progress → Continue, Needs review → Review, Completed → View", () => {
   const take = viewOf(register({ key: "c1", className: "7A" }));
   assert.deepEqual(take.primary, {
     label: "Take today's attendance",
@@ -87,24 +87,26 @@ test("the big button: take, continue or review — and nothing once today's is d
   });
   assert.equal(take.viewToday, null);
   assert.equal(take.history.href, "/dashboard/attendance/c1/history");
-  assert.equal(take.statusLabel, "Not started yet");
+  assert.equal(take.statusLabel, "Not started");
 
   const cont = viewOf(register({ key: "c1", className: "7A", state: "in_progress", sessionId: "s1" }));
-  assert.equal(cont.primary?.label, "Continue today's attendance");
+  assert.equal(cont.primary?.label, "Continue attendance");
+  assert.equal(cont.statusLabel, "In progress");
   assert.equal(cont.primary?.href, "/dashboard/attendance/c1/capture?start=1&from=today");
   assert.equal(cont.viewToday, null, "a register still being captured has nothing to look at yet");
 
   const review = viewOf(register({ key: "c1", className: "7A", state: "in_review", sessionId: "s1" }));
   assert.deepEqual(review.primary, {
-    label: "Review today's attendance",
+    label: "Review attendance",
     href: "/dashboard/attendance/c1/review/s1",
   });
   assert.equal(review.viewToday, null, "the big button already opens it");
+  assert.equal(review.statusLabel, "Needs review");
 
   const done = viewOf(register({ key: "c1", className: "7A", state: "done", sessionId: "s1" }));
   assert.equal(done.primary, null);
-  assert.deepEqual(done.viewToday, { label: "View today's attendance", href: "/dashboard/attendance/c1/review/s1" });
-  assert.equal(done.statusLabel, "Done for today");
+  assert.deepEqual(done.viewToday, { label: "View attendance", href: "/dashboard/attendance/c1/review/s1" });
+  assert.equal(done.statusLabel, "Completed");
 });
 
 test("a college register's link carries its subject; ids are encoded, never interpolated raw", () => {

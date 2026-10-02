@@ -285,7 +285,11 @@ export default async function DashboardHomePage() {
         {/* `grid-cols-1` is `minmax(0, 1fr)`: without it a phone's single
             column grows to its longest line instead of the screen. */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
-          <TodayAttendance today={teacherToday} greeting={`Welcome, ${user.name}`} />
+          {/* Who is signed in, as the header names them: a shared classroom device should never leave this in doubt. */}
+          <TodayAttendance
+            today={teacherToday}
+            greeting={user.roles[0]?.name ? `${user.name} · ${user.roles[0].name}` : user.name}
+          />
           <div className="flex flex-col gap-5">
             {pendingReviewPanel}
             {dashboard.today.length > 0 ? todaysSessionsPanel : null}

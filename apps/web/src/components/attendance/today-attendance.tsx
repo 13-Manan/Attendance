@@ -1,13 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
-import type { TeacherToday, TodayRegisterView } from "@/modules/attendance-today/types";
-import { CameraIcon, CheckIcon } from "./icons";
+import { useId, useState } from "react";
+import type { TeacherToday, TodayRegisterState, TodayRegisterView } from "@/modules/attendance-today/types";
+import { AlertIcon, CameraIcon, CheckIcon, CircleIcon, ClockIcon } from "./icons";
 
 /**
- * The teacher's Today card: today's date, the register to take, and one
- * dominant button.
+ * The teacher's Today card: today's date, who is signed in, the register to
+ * take with where it stands, and one dominant button — "Take today's
+ * attendance", "Continue attendance", "Review attendance" — or, once it is
+ * completed, "View attendance".
  *
  * A client component only for the "Which class?" selector. Every link it can
  * show was computed on the server from the teacher's own assignments, and the
@@ -31,11 +33,38 @@ function registerSubtitle(r: TodayRegisterView): string {
   return bits.join(" · ");
 }
 
+const STATUS_TONE: Record<TodayRegisterState, string> = {
+  not_started: "bg-neutral-100 text-neutral-700",
+  in_progress: "bg-sky-50 text-sky-800",
+  in_review: "bg-amber-50 text-amber-900",
+  done: "bg-emerald-50 text-emerald-800",
+};
+
+/** Where a register stands — an icon and a word, so colour is never the only signal. */
+function StatusChip({ register, className = "" }: { register: TodayRegisterView; className?: string }) {
+  const Icon =
+    register.state === "done"
+      ? CheckIcon
+      : register.state === "in_review"
+        ? AlertIcon
+        : register.state === "in_progress"
+          ? ClockIcon
+          : CircleIcon;
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_TONE[register.state]} ${className}`}
+    >
+      <Icon className="size-3.5" />
+      {register.statusLabel}
+    </span>
+  );
+}
+
 const QUIET_LINK =
   "inline-flex min-h-11 items-center text-sm font-medium text-neutral-600 underline-offset-4 hover:text-neutral-900 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 rounded-sm";
 
 const PRIMARY_LINK =
-  "flex min-h-14 w-full items-center justify-center gap-2.5 rounded-xl bg-neutral-900 px-5 text-base font-semibold text-white shadow-sm transition-colors hover:bg-neutral-700 active:bg-neutral-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2";
+  "flex min-h-14 w-full items-center justify-center gap-2 rounded-xl bg-neutral-900 px-4 text-base font-semibold text-white shadow-sm transition-colors hover:bg-neutral-700 active:bg-neutral-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2";
 
 export function TodayAttendance({
   today,
@@ -43,21 +72,27 @@ export function TodayAttendance({
   heading = "h1",
 }: {
   today: TeacherToday;
-  /** "Welcome, Priya Nair" — shown small, under the date. */
+  /** Who is signed in — "Priya Nair · Class Teacher" — shown small, under the date. */
   greeting?: string | null;
   /** h1 when the card is the page; h2 when it sits inside another page. */
   heading?: "h1" | "h2";
 }) {
   const Heading = heading;
+  // Unique per card. A second copy of this card in the document — the router
+  // can keep an earlier page mounted while hidden — must not share the radio
+  // group: React refuses to sync radios it does not manage under one name
+  // (error #90), which broke the tap that chooses a class.
+  const headingId = useId();
+  const groupName = useId();
   const [selectedKey, setSelectedKey] = useState(today.selectedKey);
   const selected = today.choices.find((c) => c.key === selectedKey) ?? today.choices[0] ?? null;
   const subjectWise = today.attendanceMode === "SUBJECT_WISE";
 
   return (
-    <section aria-labelledby="today-heading" className="flex w-full flex-col gap-4 sm:max-w-xl">
+    <section aria-labelledby={headingId} className="flex w-full flex-col gap-4 sm:max-w-xl">
       <header className="flex flex-col gap-0.5">
         <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Today</span>
-        <Heading id="today-heading" className="text-2xl font-semibold tracking-tight text-neutral-900">
+        <Heading id={headingId} className="text-2xl font-semibold tracking-tight text-neutral-900">
           {today.date.long}
         </Heading>
         {greeting ? <p className="text-sm text-neutral-500">{greeting}</p> : null}
@@ -77,35 +112,49 @@ export function TodayAttendance({
                 >
                   <input
                     type="radio"
-                    name="today-register"
+                    name={groupName}
                     value={choice.key}
                     checked={choice.key === selected.key}
                     onChange={() => setSelectedKey(choice.key)}
                     className="size-5 shrink-0 accent-neutral-900"
                   />
-                  <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate text-base font-medium text-neutral-900">
-                      {registerTitle(choice)}
+                  {/* Wraps, never truncates: the section is often all that tells two rows of one subject apart.
+                      On a phone the status sits under the name, so the name keeps the width. */}
+                  <span className="flex min-w-0 flex-1 flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                    <span className="flex min-w-0 flex-col">
+                      <span className="break-words text-base font-medium text-neutral-900">{registerTitle(choice)}</span>
+                      <span className="break-words text-xs text-neutral-500">{registerSubtitle(choice)}</span>
                     </span>
-                    <span className="truncate text-xs text-neutral-500">{registerSubtitle(choice)}</span>
+                    <StatusChip register={choice} className="self-start sm:self-auto" />
                   </span>
-                  <span className="shrink-0 text-xs text-neutral-500">{choice.statusLabel}</span>
                 </label>
               ))}
             </fieldset>
           ) : (
             <div className="flex flex-col gap-1">
-              <p className="text-lg font-semibold leading-snug text-neutral-900">{registerTitle(selected)}</p>
+              <div className="flex items-start justify-between gap-3">
+                <p className="min-w-0 text-lg font-semibold leading-snug text-neutral-900">{registerTitle(selected)}</p>
+                <StatusChip register={selected} />
+              </div>
               <p className="text-sm text-neutral-500">{registerSubtitle(selected)}</p>
-              <p className="text-sm text-neutral-700">{selected.statusLabel}</p>
             </div>
           )}
 
           {selected.primary ? (
-            <Link href={selected.primary.href} className={PRIMARY_LINK}>
-              <CameraIcon className="size-5" />
-              {selected.primary.label}
-            </Link>
+            // With several classes to choose from, the button stays in reach
+            // at the bottom of a phone screen while the list scrolls.
+            <div
+              className={
+                today.kind === "choose"
+                  ? "max-md:sticky max-md:bottom-[max(0.75rem,env(safe-area-inset-bottom))] max-md:z-10 max-md:rounded-xl max-md:bg-white max-md:shadow-[0_-4px_16px_rgba(0,0,0,0.08)]"
+                  : ""
+              }
+            >
+              <Link href={selected.primary.href} className={PRIMARY_LINK}>
+                {selected.state === "in_review" ? <AlertIcon className="size-5" /> : <CameraIcon className="size-5" />}
+                {selected.primary.label}
+              </Link>
+            </div>
           ) : null}
         </div>
       ) : today.kind === "all_done" ? (
@@ -116,11 +165,11 @@ export function TodayAttendance({
           </p>
           <ul className="flex flex-col divide-y divide-emerald-100">
             {today.done.map((r) => (
-              <li key={r.key} className="flex flex-wrap items-center justify-between gap-x-3 py-1">
-                <span className="min-w-0 text-sm text-emerald-900">
+              <li key={r.key} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-1.5">
+                <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm text-emerald-900">
                   {registerTitle(r)}
-                  {r.subjectName ? <span className="text-emerald-700"> · {r.className}</span> : null}
-                  <span className="text-emerald-700"> · {r.statusLabel}</span>
+                  {r.subjectName ? <span className="text-emerald-700">· {r.className}</span> : null}
+                  <StatusChip register={r} />
                 </span>
                 {r.viewToday ? (
                   <Link href={r.viewToday.href} className={QUIET_LINK}>

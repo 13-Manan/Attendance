@@ -280,8 +280,8 @@ test("date handling: the date is the institution's; the register window is Start
 
 test("already-created register: continued, reviewed, or shown as done — never started twice", async () => {
   const cases: Array<[SessionStatus, string | null, string]> = [
-    ["CAPTURING", "Continue today's attendance", "/dashboard/attendance/g8a/capture?start=1&from=today"],
-    ["REVIEW", "Review today's attendance", "/dashboard/attendance/g8a/review/s1"],
+    ["CAPTURING", "Continue attendance", "/dashboard/attendance/g8a/capture?start=1&from=today"],
+    ["REVIEW", "Review attendance", "/dashboard/attendance/g8a/review/s1"],
     ["CANCELLED", "Take today's attendance", "/dashboard/attendance/g8a/capture?start=1&from=today"],
   ];
   for (const [status, label, href] of cases) {

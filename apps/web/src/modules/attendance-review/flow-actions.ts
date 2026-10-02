@@ -1,5 +1,6 @@
 "use server";
 
+import { logAttendanceUx } from "@/modules/attendance-capture/ux-events";
 import { confirmAttendanceAction, submitReviewDecisionAction } from "./actions";
 import { reviewFlowErrorCode, type ReviewFlowResult } from "./review-flow";
 
@@ -42,5 +43,14 @@ export async function decideStudentFlow(
 export async function finishAttendanceFlow(
   input: Parameters<typeof confirmAttendanceAction>[0],
 ): Promise<ReviewFlowResult<Awaited<ReturnType<typeof confirmAttendanceAction>>>> {
-  return run("finish", () => confirmAttendanceAction(input));
+  const result = await run("finish", () => confirmAttendanceAction(input));
+  if (result.ok) {
+    logAttendanceUx("attendance_finalize", {
+      sessionId: input.sessionId,
+      present: result.value.counts.present,
+      absent: result.value.counts.absent,
+      total: result.value.counts.total,
+    });
+  }
+  return result;
 }
