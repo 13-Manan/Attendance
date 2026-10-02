@@ -1,7 +1,8 @@
 # Attendance Platform
 
-School & college face-recognition attendance management, where the
-recognition is **advisory** and a faculty member owns every final result.
+School & college face-recognition attendance management, where a confident
+recognition is recorded present and a faculty member decides everyone else —
+and finishes every register.
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the system design and
 [`docs/`](docs/) for data model, API contracts, multi-tenancy, and ADRs.
 
@@ -127,10 +128,11 @@ and frontend page/network cost — are in
 number: recognition accuracy on real faces remains unmeasured, and the report
 says so rather than filling the gap with an estimate.
 
-How a capture becomes an advisory attendance suggestion:
-[`docs/RECOGNITION_ENGINE.md`](docs/RECOGNITION_ENGINE.md). How that advisory
-becomes a register a faculty member confirms — and what the system refuses to
-guess: [`docs/ATTENDANCE_ENGINE.md`](docs/ATTENDANCE_ENGINE.md).
+How a capture is matched to students:
+[`docs/RECOGNITION_ENGINE.md`](docs/RECOGNITION_ENGINE.md). How the matches
+become a register — confident matches present, everyone else waiting for the
+teacher, and what the system refuses to guess:
+[`docs/ATTENDANCE_ENGINE.md`](docs/ATTENDANCE_ENGINE.md).
 
 ## Using it
 

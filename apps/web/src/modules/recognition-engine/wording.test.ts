@@ -22,17 +22,19 @@ test("the test stand-in is reported as unavailable, never as ready", () => {
   assert.match(m.detail, /cannot tell one real face from another/);
 });
 
-test("a real but unapproved model says results need confirmation and why", () => {
+test("a real but unapproved model says so, and that recognised students are marked present", () => {
   const m = describeRecognitionAvailability(UNAPPROVED, { showDiagnostics: false });
   assert.equal(m.availability, "not_approved");
-  assert.equal(m.headline, "Recognition results require confirmation");
+  assert.equal(m.headline, "Check recognised students before finishing");
   assert.match(m.detail, /not approved for production/);
+  assert.match(m.detail, /marked present/);
 });
 
-test("an approved model is ready, and still needs confirmation", () => {
+test("an approved model is ready: recognised students present, the rest wait, nothing final until finished", () => {
   const m = describeRecognitionAvailability(APPROVED, { showDiagnostics: false });
   assert.equal(m.headline, "Face recognition ready");
-  assert.match(m.detail, /require confirmation/);
+  assert.match(m.detail, /marked present/);
+  assert.match(m.detail, /until you finish the register/);
 });
 
 test("teachers never see the provider; admins do", () => {
@@ -50,7 +52,7 @@ test("teachers never see the provider; admins do", () => {
 
 test("count labels read as the product words them", () => {
   assert.deepEqual(recognitionCountLabels({ present: 3, review: 2, notDetected: 1, unknownFaces: 1 }), {
-    present: "3 Present suggestions",
+    present: "3 Present",
     review: "2 Need review",
     notDetected: "1 Not detected",
     unknownFaces: "1 Unknown face",

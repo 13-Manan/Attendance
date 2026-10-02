@@ -10,8 +10,13 @@ authoritative split in the schema), and
 [`adr/0004-realtime-sse-in-memory-pubsub.md`](adr/0004-realtime-sse-in-memory-pubsub.md)
 (how a finalized result reaches a student's screen).
 
-> **Recognition suggests. Faculty decide. Nothing becomes final without a
-> human pressing Confirm.**
+> **A confident recognition is recorded present. Everyone else — every
+> absence, every doubt — is decided by a person. Nothing becomes final until a
+> person finishes the register.**
+>
+> (Until 2026-10-02 a confident match was only a suggestion the teacher
+> confirmed. The product owner decided a recognised student should be present
+> without a separate approval; see §5.)
 
 ---
 
@@ -150,9 +155,17 @@ The decision table (`decideCandidate`, a pure function, tested directly):
 | Recognition did not run (manual roll call) | `NOT_EVALUATED` | `NEEDS_REVIEW` | `recognition_unavailable` |
 | No active face template | `NOT_EVALUATED` | `NEEDS_REVIEW` | `no_face_template` |
 | Template exists but for another model build | `NOT_EVALUATED` | `NEEDS_REVIEW` | `incompatible_face_template` |
-| Best similarity ≥ `presentMin` | `PRESENT` | `PRESENT` | — |
-| Between `reviewMin` and `presentMin`, or within the ambiguity margin of a runner-up | `NEEDS_REVIEW` | `NEEDS_REVIEW` | `low_confidence` / `ambiguous_match` |
-| Compared, nothing above `reviewMin` | `ABSENT` | `ABSENT` | `no_match` |
+| Best similarity ≥ `presentMin`, and the match survived every demotion (ambiguity, reassigned or duplicated face, lookalike, low quality) | `PRESENT` | `PRESENT` | — |
+| Between `reviewMin` and `presentMin`, within the ambiguity margin of a runner-up, a lookalike, or demoted for quality | `NEEDS_REVIEW` | `NEEDS_REVIEW` | `low_confidence` / `ambiguous_match` / `duplicate_in_capture` / `low_quality` / `face_too_small` |
+| Compared, nothing above `reviewMin` | `ABSENT` | `NEEDS_REVIEW` | `no_match` |
+
+The PRESENT row writes no `AttendanceCorrection` — recognition, not a person,
+decided it, and `isManuallyCorrected` stays false to say so. The teacher sees
+those students as present and can change any of them (Edit → Mark absent),
+which is then a recorded faculty decision like any other. A register written
+before 2026-10-02 still holds confident matches as suggestions
+(`finalResult: NEEDS_REVIEW`, note `aiSuggestion: PRESENT`); finishing it
+records each as the teacher's decision, exactly as before.
 
 Rows 2 and 3 are the point of the table. **A student who could not be compared
 is not marked absent.** "We never looked" and "we looked and you were not
@@ -245,9 +258,29 @@ A finalized register is still correctable, but the path is narrower:
 
 ## 9. Finalization
 
-Before confirming, the faculty member sees Total Students / Present / Absent /
-Needs Review. Confirmation is two-step — summary, then "Yes, finalize
-attendance".
+The review board leads with "✓ N Present", then "⚠ N need attention" with
+**Review N students**. Each student who needs attention shows a "Reason:" line
+("Not detected in the photo", "Looks like another student", …) and three
+buttons: **Present**, **Absent**, and **Review**, which opens the full reason
+and what recognition found. Not detected is never shown or recorded as absent.
+The Present list is folded under its count on a phone and sits beside Needs
+attention on a wide screen; every present or absent row has **Edit**. When
+nobody needs attention, **Finish attendance** (pinned to the bottom of a phone
+screen) asks once — "Finish today's attendance? N present · N absent" — and
+finishes. There is no step that approves the recognised students; finishing
+closes the register.
+
+What the audit trail says about it, with no approval invented:
+
+- `attendance.candidates_generated` (actor: whoever ran recognition) carries
+  `confidentMatches` — `"recorded"`, or `"suggested"` for the test stand-in —
+  plus `presentByRecognition`, `presentByRecognitionStudentIds` and
+  `needsReview`.
+- A recognised student has no `AttendanceCorrection` row, because no person
+  decided them. Any later change to one is a correction with its own actor,
+  `previousResult: PRESENT`, and the source rules in §8.
+- `attendance.finalized` carries `counts: { present, absent,
+  presentByRecognition, presentByTeacher }` for the register as it closed.
 
 `finalizeAttendanceSession` refuses when:
 

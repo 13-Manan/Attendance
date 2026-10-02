@@ -403,7 +403,7 @@ test("a compared student with no match is NOT marked absent — only a person ma
   assert.equal(unmatched.note.wasComparable, true);
 });
 
-test("a confident match is a suggestion, not a decision", () => {
+test("a confident match is recorded present", () => {
   const matched = decideCandidate({
     aggregate: {
       advisoryResult: "PRESENT",
@@ -418,17 +418,14 @@ test("a confident match is a suggestion, not a decision", () => {
   });
   assert.equal(matched.aiResult, "PRESENT");
   assert.equal(matched.aiConfidence, 0.91);
-  assert.equal(matched.note.aiSuggestion, "PRESENT");
-  assert.equal(
-    matched.finalResult,
-    "NEEDS_REVIEW",
-    "the register records it as unresolved until somebody confirms",
-  );
+  assert.equal(matched.note.aiSuggestion, "PRESENT", "kept as provenance: recognition decided this row");
+  assert.equal(matched.finalResult, "PRESENT", "no separate approval keeps a recognised student present");
 });
 
-test("no branch of the decision table can write a final PRESENT or ABSENT", () => {
+test("only a confident, compared match writes a final result, and nothing ever writes ABSENT", () => {
   // The structural guarantee, asserted over every reachable combination rather
-  // than one case at a time.
+  // than one case at a time: PRESENT only for a confident match recognition
+  // actually compared; every other combination waits for a person; ABSENT never.
   const advisories = ["PRESENT", "NEEDS_REVIEW", "ABSENT", undefined] as const;
   for (const advisory of advisories) {
     for (const recognitionRan of [true, false]) {
@@ -448,11 +445,10 @@ test("no branch of the decision table can write a final PRESENT or ABSENT", () =
             hasAnyTemplate: hasComparable,
             noFacesDetected: noFaces,
           });
-          assert.equal(
-            d.finalResult,
-            "NEEDS_REVIEW",
-            `advisory=${advisory} ran=${recognitionRan} comparable=${hasComparable} noFaces=${noFaces}`,
-          );
+          const label = `advisory=${advisory} ran=${recognitionRan} comparable=${hasComparable} noFaces=${noFaces}`;
+          const confident = advisory === "PRESENT" && recognitionRan && hasComparable && !noFaces;
+          assert.equal(d.finalResult, confident ? "PRESENT" : "NEEDS_REVIEW", label);
+          assert.notEqual(d.finalResult, "ABSENT", label);
         }
       }
     }
@@ -568,11 +564,11 @@ test("every enrolled student gets a row, including those recognition never retur
 
   assert.equal(result.counts.total, 50, "every enrolled student has a row");
   assert.equal(store.rows.size, 50);
-  // Nobody is decided at generation, including the 40 the model never
-  // returned. "Recognition did not mention you" is not a fact about you.
-  assert.equal(result.counts.present, 0);
+  // The 10 recognised are present. The 40 the model never returned are not
+  // absent: "recognition did not mention you" is not a fact about you.
+  assert.equal(result.counts.present, 10);
   assert.equal(result.counts.absent, 0);
-  assert.equal(result.counts.needsReview, 50);
+  assert.equal(result.counts.needsReview, 40);
 });
 
 test("generation walks the session CAPTURING → PROCESSING → REVIEW", async () => {
@@ -637,10 +633,11 @@ test("reprocessing refreshes untouched rows and preserves manual corrections", a
   // The human decision is untouched by reprocessing.
   assert.equal(store.rows.get("stu-001")!.finalResult, "PRESENT");
   assert.equal(store.rows.get("stu-001")!.isManuallyCorrected, true);
-  // Everyone else stays unresolved — a second recognition run is more
-  // evidence, not a decision.
-  assert.equal(store.rows.get("stu-002")!.finalResult, "NEEDS_REVIEW");
+  // Recognised on the second run: present now. Still not found: unresolved —
+  // a second run is more evidence, never an absence.
+  assert.equal(store.rows.get("stu-002")!.finalResult, "PRESENT");
   assert.equal(store.rows.get("stu-002")!.aiResult, "PRESENT", "refreshed advisory");
+  assert.equal(store.rows.get("stu-002")!.isManuallyCorrected, false);
   assert.equal(store.rows.get("stu-003")!.finalResult, "NEEDS_REVIEW");
 });
 
@@ -693,34 +690,34 @@ async function seedScenario() {
   return { store, students, result };
 }
 
-test("scenario: generation decides nothing — all 50 rows are unresolved", async () => {
-  // The Phase 6 invariant, at register scale. 43 confident matches, 5 that
-  // matched nobody and 2 uncertain all land in the same place: waiting for a
-  // person. The machine's findings are recorded, the register is not.
+test("scenario: the 43 recognised are present; the 7 others wait for a person", async () => {
+  // At register scale. 43 confident matches are recorded present; the 5 that
+  // matched nobody and the 2 uncertain all wait for the teacher. Nobody is
+  // recorded absent by the machine.
   const { result } = await seedScenario();
   assert.deepEqual(result.counts, {
     total: 50,
-    present: 0,
+    present: 43,
     absent: 0,
-    needsReview: 50,
+    needsReview: 7,
     notEvaluated: 0,
   });
 });
 
-test("scenario: the board shows 43 as suggested-present and 7 as needing a decision", async () => {
+test("scenario: the board shows 43 present and 7 needing attention — nothing to approve", async () => {
   const { store } = await seedScenario();
   const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
 
-  assert.equal(board.present.length, 43, "confident matches surface where a reviewer looks");
+  assert.equal(board.present.length, 43, "recognised students are present");
   assert.equal(board.absent.length, 0, "nothing is absent until somebody says so");
   assert.equal(board.needsReview.length, 7, "5 unmatched + 2 uncertain");
-  assert.equal(board.awaitingConfirmation, 43);
+  assert.equal(board.awaitingConfirmation, 0, "no approval is owed on a recognised student");
   assert.equal(board.awaitingDecision, 7);
 
-  // Every row in Present is still a suggestion, not a result.
-  assert.ok(board.present.every((r) => r.finalResult === "NEEDS_REVIEW"));
-  assert.ok(board.present.every((r) => r.aiSuggestion === "PRESENT"));
-  // And nothing in Needs Review carries a suggestion.
+  // Present rows are results, recorded by recognition (not by a person).
+  assert.ok(board.present.every((r) => r.finalResult === "PRESENT"));
+  assert.ok(board.present.every((r) => !r.isManuallyCorrected && r.aiSuggestion === "PRESENT"));
+  // And nothing needing attention was recognised.
   assert.ok(board.needsReview.every((r) => r.aiSuggestion === null));
 });
 
@@ -744,9 +741,9 @@ test("scenario: marking an unmatched student present moves exactly one row", asy
     store.deps,
   );
 
-  assert.equal(decision.counts.present, 1, "one faculty-owned PRESENT");
+  assert.equal(decision.counts.present, 44, "43 recognised + one faculty-owned PRESENT");
   assert.equal(decision.counts.absent, 0);
-  assert.equal(decision.counts.needsReview, 49);
+  assert.equal(decision.counts.needsReview, 6);
   // The four buckets still partition the class exactly.
   assert.equal(
     decision.counts.present +
@@ -770,7 +767,7 @@ test("scenario: a review row can be resolved either way", async () => {
     },
     asPresent.store.deps,
   );
-  assert.equal(presentBranch.counts.present, 1);
+  assert.equal(presentBranch.counts.present, 44);
   assert.equal(presentBranch.counts.absent, 0);
 
   const asAbsent = await seedScenario();
@@ -783,7 +780,7 @@ test("scenario: a review row can be resolved either way", async () => {
     asAbsent.store.deps,
   );
   assert.equal(absentBranch.counts.absent, 1, "the only route to ABSENT is this one");
-  assert.equal(absentBranch.counts.present, 0);
+  assert.equal(absentBranch.counts.present, 43);
 });
 
 test("scenario: the register cannot be confirmed while an undecided row remains", async () => {
@@ -805,8 +802,40 @@ test("scenario: the register cannot be confirmed while an undecided row remains"
   assert.notEqual(store.status, "FINALIZED");
 });
 
-test("scenario: confirming accepts every suggestion and records who accepted it", async () => {
+test("scenario: finishing needs only the 7 decisions — the 43 recognised are not decided again", async () => {
   const { store, students } = await seedScenario();
+  for (const index of [43, 44, 45, 46, 47, 48, 49]) {
+    await applyReviewDecision(
+      makeUser(),
+      { attendanceRecordId: store.recordIdFor(students[index].studentId), newResult: "ABSENT" },
+      store.deps,
+    );
+  }
+
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+  assert.equal(board.canFinalize, true);
+  assert.equal(board.awaitingConfirmation, 0);
+
+  const correctionsBefore = store.corrections.length;
+  const confirmed = await confirmAttendance(makeUser(), "sess-1", store.deps);
+
+  assert.equal(store.status, "FINALIZED");
+  assert.equal(confirmed.counts.present, 43);
+  assert.equal(confirmed.counts.absent, 7);
+  assert.equal(confirmed.counts.needsReview, 0);
+  assert.equal(confirmed.finalizedByUserId, "user-faculty", "a person closed the register");
+  assert.equal(store.corrections.length, correctionsBefore, "no approval rows for recognised students");
+
+  const finalizedEvent = store.events.find((e) => e.type === "attendance-session-finalized");
+  assert.ok(finalizedEvent, "session channel received the finalization");
+});
+
+test("scenario: a register written under the suggestion rule still records who accepted each suggestion", async () => {
+  // Registers in review when the rule changed carry suggestions
+  // (finalResult NEEDS_REVIEW + aiSuggestion PRESENT). Confirming one still
+  // turns each into a recorded faculty decision.
+  const { store, students } = await seedScenario();
+  for (const s of students.slice(0, 43)) store.rows.get(s.studentId)!.finalResult = "NEEDS_REVIEW";
   for (const index of [43, 44, 45, 46, 47, 48, 49]) {
     await applyReviewDecision(
       makeUser(),
@@ -935,7 +964,7 @@ test("a correction publishes to the session board and to the student alone", asy
 
   const boardEvent = store.events.find((e) => e.type === "attendance-record-updated");
   assert.ok(boardEvent);
-  assert.equal(boardEvent.type === "attendance-record-updated" && boardEvent.counts.present, 1);
+  assert.equal(boardEvent.type === "attendance-record-updated" && boardEvent.counts.present, 44);
 
   assert.equal(store.studentEvents.length, 1);
   assert.equal(store.studentEvents[0].studentId, target);

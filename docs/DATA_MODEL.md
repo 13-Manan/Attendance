@@ -64,10 +64,15 @@ only `kind` values and tree depth differ.
 - `aiResult` / `aiConfidence` — written once by the recognition pipeline via
   `modules/recognition-results/service.ts#classifyRecognitionConfidence`.
   Never edited afterward.
-- `finalResult` / `isManuallyCorrected` — the authoritative result. Only
-  `modules/attendance/service.ts#correctAttendanceRecord` may change
-  `finalResult`, and it always does so inside a transaction that also
-  inserts an `AttendanceCorrection` row.
+- `finalResult` / `isManuallyCorrected` — the authoritative result. Register
+  generation seeds it — `PRESENT` for a confident match (since 2026-10-02),
+  `NEEDS_REVIEW` for everyone else, never `ABSENT` — and leaves
+  `isManuallyCorrected` false, so a row recognition decided is always
+  distinguishable from a person's. After that, only
+  `modules/attendance/service.ts#correctAttendanceRecord` (and the public
+  API's correction path, which writes the same audit row) may change
+  `finalResult`, always inside a transaction that also inserts an
+  `AttendanceCorrection` row and sets `isManuallyCorrected`.
 
 `AttendanceCorrection` is append-only: `previousResult`, `newResult`,
 `changedByUserId`, `reason` (optional), `source` (`FACULTY_REVIEW |

@@ -72,6 +72,21 @@ export function institutionToday(
   };
 }
 
+/**
+ * A moment as the institution's clock shows it — a register's date or start
+ * time. Server-rendered pages would otherwise use the container's timezone,
+ * which in production is UTC.
+ */
+export function formatInTimeZone(
+  at: Date | string,
+  timeZone: string | null | undefined,
+  options: Intl.DateTimeFormatOptions,
+  locale?: string,
+): string {
+  const zone = timeZone && isValidTimeZone(timeZone) ? timeZone : "UTC";
+  return new Intl.DateTimeFormat(locale, { ...options, timeZone: zone }).format(new Date(at));
+}
+
 // ---------------------------------------------------------------------------
 // Register state
 // ---------------------------------------------------------------------------

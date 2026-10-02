@@ -61,9 +61,11 @@ Classroom camera
   -> Student portal (app/portal/attendance), live over SSE
 ```
 
-Recognition is **advisory** at every step above the review board; the only
-thing that makes attendance final is a faculty member pressing Confirm. See
-`docs/ATTENDANCE_ENGINE.md`.
+A confident recognition is recorded present when the register is written;
+every other student — anyone not found, uncertain, ambiguous, a lookalike or
+without a usable face — waits for a faculty decision, and nothing is recorded
+absent by the machine. Only a faculty member finishing the register makes it
+final (visible to students and reports). See `docs/ATTENDANCE_ENGINE.md`.
 
 **Why the vector search happens in Next.js, not in the Python service**: the
 Python service has no database credentials at all — it is a pure function
@@ -75,19 +77,29 @@ configured per-institution via `Institution.settings.confidenceThresholds`.
 
 ## AI is advisory, faculty is authoritative
 
+Since 2026-10-02 the first half of that heading has a precise meaning: a
+*confident* match is recorded present without asking anyone (the product
+owner's decision — teachers review only the students who were not confidently
+recognised), and everything else stays the teacher's. The second half is
+unchanged: a faculty member decides every doubt, can change any result, and is
+the only one who can finish a register.
+
 `AttendanceRecord` carries two result fields:
 
-- `aiResult` / `aiConfidence` — written once by the pipeline, never edited.
+- `aiResult` / `aiConfidence` — written by the pipeline, never edited by a
+  correction.
 - `finalResult` — mutable, and the only field UI/API responses should treat
   as "the" attendance result.
 
-Every change to `finalResult` goes through
+Register generation writes `finalResult` exactly twice over: `PRESENT` for a
+confident match and `NEEDS_REVIEW` for everyone else, always leaving
+`isManuallyCorrected` false so the machine's rows are distinguishable from a
+person's. Every other change to `finalResult` goes through
 `modules/attendance/service.ts#correctAttendanceRecord`, which — inside one
 transaction — updates `finalResult` and inserts an append-only
 `AttendanceCorrection` row (previous result, new result, who, when, why,
 and a `source` enum distinguishing a faculty review from a public-API
-correction). There is no code path that can change `finalResult` without
-also writing that row. See `docs/DATA_MODEL.md`.
+correction). See `docs/DATA_MODEL.md`.
 
 ## Portals
 

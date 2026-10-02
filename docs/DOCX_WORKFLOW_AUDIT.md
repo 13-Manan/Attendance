@@ -128,7 +128,7 @@ FINAL ATTENDANCE  →  student portal · faculty portal · reports · webhooks
 | REQ-08 | Class-specific vector search | `enrollments: { some: { cohortId, status: "ACTIVE" } }` | SOURCE, TEST | MATCH | — |
 | REQ-09 | Confidence engine | `decideCandidate` → MATCHED / UNCERTAIN / UNMATCHED + score | SOURCE, BROWSER | MATCH | — |
 | REQ-10 | Attendance Review includes "Needs Review" | Review board with three lists; reason text per student | BROWSER | MATCH | — |
-| REQ-11 | Confident match → **directly** to Present list | Written `NEEDS_REVIEW`; shown as an AI *suggestion*; needs teacher confirm | BROWSER (97 % student sat in Needs Review), SOURCE | **MISMATCH — stricter** | **Decision needed** |
+| REQ-11 | Confident match → **directly** to Present list | **Resolved 2026-10-02:** written `PRESENT` at generation; no approval step; the teacher reviews only the others | SOURCE, TEST | MATCH | Decided by the product owner |
 | REQ-12 | Not detected / below threshold → Absent/Review | Both become `NEEDS_REVIEW` with a reason | BROWSER, SOURCE | MATCH | Never a silent Absent |
 | REQ-13 | Teacher roll-call over the list | Review board lists each unresolved student with Present/Absent | BROWSER | MATCH | — |
 | REQ-14 | [Mark Present] moves student to Present | Verified: 61 % student → Present | BROWSER | MATCH | — |

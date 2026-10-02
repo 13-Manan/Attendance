@@ -153,7 +153,7 @@ test("processing state: short labels and an honest elapsed time", () => {
   assert.equal(formatElapsed(-5), "0 s");
 });
 
-test("attendance ready: recognised students are counted as suggestions, everyone else as to check", () => {
+test("attendance ready: recognised students are present, everyone else is to check — nobody is counted absent", () => {
   const summary = readySummaryOf({
     total: 30,
     recognition: {
@@ -167,7 +167,12 @@ test("attendance ready: recognised students are counted as suggestions, everyone
     },
     availability: "ready",
   });
-  assert.deepEqual([summary.total, summary.recognised, summary.toCheck], [30, 26, 4]);
+  assert.deepEqual([summary.total, summary.present, summary.toCheck], [30, 26, 4]);
+
+  // Once the register is written its own count is used: a merged round keeps
+  // a student a teacher already marked present.
+  const merged = readySummaryOf({ total: 30, present: 27, recognition: null, availability: "ready" });
+  assert.deepEqual([merged.present, merged.toCheck], [27, 3]);
   assert.ok(summary.notices.some((n) => /too small/.test(n.text)));
   assert.ok(summary.notices.some((n) => /looked too alike/.test(n.text)));
   for (const notice of summary.notices) assert.doesNotMatch(notice.text, JARGON);
@@ -190,7 +195,7 @@ test("attendance ready, nobody recognised: the reason is said in a teacher's wor
   assert.match(noneOnFile.notices[0].text, /face photo on file/);
   const notAvailable = readySummaryOf({ total: 10, recognition: null, availability: "unavailable" });
   assert.match(notAvailable.notices[0].text, /isn't fully available/);
-  assert.deepEqual([notAvailable.recognised, notAvailable.toCheck], [0, 10]);
+  assert.deepEqual([notAvailable.present, notAvailable.toCheck], [0, 10]);
   for (const s of [noFaces, noneOnFile, notAvailable]) {
     for (const notice of s.notices) assert.doesNotMatch(notice.text, JARGON);
   }

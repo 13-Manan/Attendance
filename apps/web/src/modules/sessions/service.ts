@@ -47,7 +47,7 @@ export interface FinalizeAttendanceSessionDeps {
    * guard below is unit-testable without a database. */
   listAttendanceRecords?: (
     sessionId: string,
-  ) => Promise<Array<{ finalResult: AttendanceResult }>>;
+  ) => Promise<Array<{ finalResult: AttendanceResult; isManuallyCorrected?: boolean }>>;
   finalizeInDatabase?: (
     sessionId: string,
     actor: SessionUser,
@@ -98,7 +98,7 @@ export async function finalizeAttendanceSession(
     (async (id: string) =>
       prisma.attendanceRecord.findMany({
         where: { sessionId: id },
-        select: { finalResult: true },
+        select: { finalResult: true, isManuallyCorrected: true },
       }));
   const records = await listRecords(sessionId);
   if (records.length === 0) throw new Error("no_attendance_records");
@@ -106,6 +106,17 @@ export async function finalizeAttendanceSession(
     (r) => r.finalResult === "NEEDS_REVIEW" || r.finalResult === "NOT_EVALUATED",
   ).length;
   if (unresolved > 0) throw new Error(`unresolved_review_states:${unresolved}`);
+
+  // The register as it closes, by who decided each line: recognition recorded
+  // a present the person finishing never had to touch; a teacher marked the
+  // rest. Kept on the audit row, so the closed register says which presents
+  // came from recognition without anyone having approved them.
+  const counts = {
+    present: records.filter((r) => r.finalResult === "PRESENT").length,
+    absent: records.filter((r) => r.finalResult === "ABSENT").length,
+    presentByRecognition: records.filter((r) => r.finalResult === "PRESENT" && r.isManuallyCorrected === false).length,
+    presentByTeacher: records.filter((r) => r.finalResult === "PRESENT" && r.isManuallyCorrected === true).length,
+  };
 
   const finalizedAt = (deps.now ?? (() => new Date()))();
   if (deps.finalizeInDatabase) {
@@ -151,6 +162,7 @@ export async function finalizeAttendanceSession(
           status: "FINALIZED",
           finalizedByUserId: actor.userId,
           finalizedAt: finalizedAt.toISOString(),
+          counts,
         },
       },
       tx,

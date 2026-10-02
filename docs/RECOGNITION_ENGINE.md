@@ -1,7 +1,9 @@
 # Recognition Engine
 
-How a classroom capture becomes an **advisory** attendance suggestion, and
-where every decision that could mark the wrong student present is made.
+How a classroom capture is matched to students — the evidence a register is
+built from (a confident match is recorded present; everything else goes to the
+teacher, see `ATTENDANCE_ENGINE.md`) — and where every decision that could mark
+the wrong student present is made.
 
 Written in Phase 5, and revised when production gained a real recogniser.
 Companion documents:

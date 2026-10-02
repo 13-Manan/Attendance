@@ -16,7 +16,11 @@ import {
   removeStudentFromClassForRequest,
   setStudentStatusForRequest,
 } from "@/modules/students/directory-service";
-import { generateAttendanceCandidates } from "@/modules/attendance-review/service";
+import {
+  applyReviewDecision,
+  confirmAttendance,
+  generateAttendanceCandidates,
+} from "@/modules/attendance-review/service";
 import {
   findCandidateEmbeddingsWithVectorsForCohort,
   findCandidateEmbeddingsWithVectorsForCohortSubject,
@@ -107,6 +111,7 @@ function admin(institutionId: string): SessionUser {
 
 async function cleanup() {
   const institutions = { in: [I1, I2] };
+  await prisma.attendanceCorrection.deleteMany({ where: { attendanceRecord: { institutionId: institutions } } });
   await prisma.attendanceRecord.deleteMany({ where: { institutionId: institutions } });
   await prisma.attendanceSession.deleteMany({ where: { institutionId: institutions } });
   await prisma.faceGalleryPlacement.deleteMany({ where: { institutionId: institutions } });
@@ -638,6 +643,115 @@ test("adding another photo after a deletion does not keep the deleted student's 
   assert.equal((await recordOf(w.sessionId, b))?.aiResult, "PRESENT");
   // Unchanged merge rule for everyone else: C, not in round 2's photo, keeps round 1.
   assert.equal((await recordOf(w.sessionId, c))?.aiResult, "PRESENT");
+});
+
+// ---------------------------------------------------------------------------
+// Recognised students are present (2026-10-02)
+// ---------------------------------------------------------------------------
+
+/** The class's teacher: reviews, decides and finishes — the real permissions, and a real user row. */
+function classTeacher(institutionId: string): SessionUser {
+  return {
+    ...admin(institutionId),
+    roles: [
+      {
+        key: "CLASS_TEACHER",
+        name: "Class Teacher",
+        institutionId,
+        campusId: null,
+        permissions: [
+          "cohort.manage",
+          "attendanceRecord.read",
+          "attendanceRecord.correct",
+          "attendanceSession.capture",
+          "attendanceSession.finalize",
+        ],
+      },
+    ],
+  };
+}
+
+test("a confident match is recorded present on the real register — no approval row; the unfound wait; nobody is absent", { skip: SKIP }, async () => {
+  const w = await world();
+  const a = await w.student("a");
+  const b = await w.student("b");
+  const c = await w.student("c");
+  const d = await w.student("d");
+  await enrolFive(w, a, 40);
+  await enrolFive(w, b, 41);
+  await enrolFive(w, c, 42);
+  // d has no face on file; c is enrolled but not in the photo.
+  await writeRegister(w, await recognise(w, [40, 41]));
+
+  for (const id of [a, b]) {
+    const row = await recordOf(w.sessionId, id);
+    assert.equal(row?.aiResult, "PRESENT");
+    assert.equal(row?.finalResult, "PRESENT", "recognised: present, with nothing to approve");
+    assert.equal(row?.isManuallyCorrected, false, "recorded by recognition, not by a person");
+    assert.equal(await prisma.attendanceCorrection.count({ where: { attendanceRecordId: row!.id } }), 0);
+  }
+  const notFound = await recordOf(w.sessionId, c);
+  assert.deepEqual([notFound?.aiResult, notFound?.finalResult], ["ABSENT", "NEEDS_REVIEW"], "not found is not absent");
+  const noFace = await recordOf(w.sessionId, d);
+  assert.deepEqual([noFace?.aiResult, noFace?.finalResult], ["NOT_EVALUATED", "NEEDS_REVIEW"]);
+  assert.equal(
+    await prisma.attendanceRecord.count({ where: { sessionId: w.sessionId, finalResult: "ABSENT" } }),
+    0,
+    "the machine records nobody absent",
+  );
+});
+
+test("a lookalike pair is never recorded present, however clear the face in the photo", { skip: SKIP }, async () => {
+  const w = await world();
+  const a = await w.student("a");
+  const b = await w.student("b");
+  // Both students' templates are the same face: the run cannot tell them apart.
+  await enrolFive(w, a, 43);
+  await archive(w, a);
+  await enrolFive(w, b, 43);
+  await restore(w, a);
+  await writeRegister(w, await recognise(w, [43]));
+  for (const id of [a, b]) {
+    assert.notEqual((await recordOf(w.sessionId, id))?.finalResult, "PRESENT", "an uncertain match never becomes present");
+  }
+  assert.equal(
+    await prisma.attendanceRecord.count({ where: { sessionId: w.sessionId, finalResult: "PRESENT" } }),
+    0,
+  );
+});
+
+test("finishing needs only the students who were not recognised; the recognised get no approval rows", { skip: SKIP }, async () => {
+  const w = await world();
+  const teacher = classTeacher(w.institutionId);
+  const a = await w.student("a");
+  const b = await w.student("b");
+  const c = await w.student("c");
+  await enrolFive(w, a, 44);
+  await enrolFive(w, b, 45);
+  await enrolFive(w, c, 46);
+  // Start, as the capture page does: OPEN → CAPTURING. Generation then takes
+  // the register through PROCESSING to REVIEW.
+  await prisma.attendanceSession.update({ where: { id: w.sessionId }, data: { status: "CAPTURING" } });
+  await writeRegister(w, await recognise(w, [44, 45]));
+  assert.equal((await prisma.attendanceSession.findUniqueOrThrow({ where: { id: w.sessionId } })).status, "REVIEW");
+
+  // Only c needs the teacher.
+  await assert.rejects(() => confirmAttendance(teacher, w.sessionId), /unresolved/);
+  const decided = await recordOf(w.sessionId, c);
+  await applyReviewDecision(teacher, { attendanceRecordId: decided!.id, newResult: "ABSENT" });
+  const finished = await confirmAttendance(teacher, w.sessionId);
+
+  assert.deepEqual([finished.counts.present, finished.counts.absent, finished.counts.needsReview], [2, 1, 0]);
+  assert.equal((await prisma.attendanceSession.findUniqueOrThrow({ where: { id: w.sessionId } })).status, "FINALIZED");
+  for (const id of [a, b]) {
+    const row = await recordOf(w.sessionId, id);
+    assert.equal(row?.finalResult, "PRESENT");
+    assert.equal(await prisma.attendanceCorrection.count({ where: { attendanceRecordId: row!.id } }), 0, "no approval row");
+  }
+  const corrections = await prisma.attendanceCorrection.findMany({ where: { attendanceRecordId: decided!.id } });
+  assert.deepEqual(corrections.map((x) => [x.previousResult, x.newResult, x.changedByUserId]), [["NEEDS_REVIEW", "ABSENT", teacher.userId]]);
+  const finalizedAudit = await prisma.auditLog.count({ where: { entityId: w.sessionId, action: "attendance.finalized" } });
+  assert.equal(finalizedAudit, 1, "a person finished the register, and it is on record");
 });
 
 // ---------------------------------------------------------------------------

@@ -399,6 +399,12 @@ export type MatchingAvailability = RecognitionAvailability;
 export interface ReadyInput {
   /** Students in today's register. */
   total: number;
+  /**
+   * The register's own count of present students, once it is written — the
+   * recognised, plus anyone a teacher already marked in an earlier round.
+   * Falls back to the recognition run's count when there is no register.
+   */
+  present?: number;
   recognition: {
     recognised: number;
     lookAlikes: number;
@@ -413,8 +419,8 @@ export interface ReadyInput {
 
 export interface ReadySummary {
   total: number;
-  /** Suggested present by the camera — still the teacher's to confirm. */
-  recognised: number;
+  /** Present: recognised by the camera (recorded present) or already marked. */
+  present: number;
   /** Everyone else: waiting for the teacher's decision. */
   toCheck: number;
   notices: Array<{ tone: "info" | "warning"; text: string }>;
@@ -425,12 +431,13 @@ function students(n: number): string {
 }
 
 /**
- * "Attendance ready", summed up. Recognised students are suggestions the
- * teacher confirms on the next screen — the summary says how many, never that
- * anyone has been marked.
+ * "Attendance ready", summed up. Recognised students are recorded present;
+ * everyone else waits for the teacher on the next screen. Nobody is ever
+ * counted absent here — only a person marks a student absent.
  */
 export function readySummaryOf(input: ReadyInput): ReadySummary {
   const recognised = Math.min(input.recognition?.recognised ?? 0, input.total);
+  const present = Math.min(input.present ?? recognised, input.total);
   const notices: ReadySummary["notices"] = [];
   const r = input.recognition;
 
@@ -446,7 +453,7 @@ export function readySummaryOf(input: ReadyInput): ReadySummary {
         tone: "warning",
         text: "No faces were found in the photos, so nobody was recognised. Everyone is waiting for you to mark them.",
       });
-    } else if (recognised === 0) {
+    } else if (recognised === 0 && present === 0) {
       notices.push({
         tone: "warning",
         text:
@@ -480,5 +487,5 @@ export function readySummaryOf(input: ReadyInput): ReadySummary {
       });
     }
   }
-  return { total: input.total, recognised, toCheck: Math.max(0, input.total - recognised), notices };
+  return { total: input.total, present, toCheck: Math.max(0, input.total - present), notices };
 }

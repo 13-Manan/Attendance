@@ -16,9 +16,9 @@ Sessions still in review contribute to no numerator and no denominator.
 They are not hidden either — every surface reports outstanding review work as
 its own figure ("N registers still in review", "N marks awaiting review, not
 counted above"). This is the reporting half of the rule stated in
-`ARCHITECTURE.md` under *AI is advisory, faculty is authoritative*: an
-unreviewed recognition result is not an attendance fact, and a report is exactly
-the place where an unreviewed guess would quietly become an official number
+`ARCHITECTURE.md` under *AI is advisory, faculty is authoritative*: a register
+no person has finished is not an attendance fact, and a report is exactly the
+place where an unfinished register would quietly become an official number
 somebody quotes in a meeting.
 
 A record whose result is null or unresolved is counted in `unresolved`, never in

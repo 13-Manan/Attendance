@@ -1,6 +1,8 @@
 import { notFound, redirect } from "next/navigation";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getAttendanceReviewBoard } from "@/modules/attendance-review/service";
+import { formatInTimeZone } from "@/modules/attendance-today/policy";
+import { getInstitutionById } from "@/modules/institutions/repository";
 import { hasPermission } from "@/modules/authorization/service";
 import { ForbiddenError } from "@/modules/authorization/types";
 import { RETURN_PARAM } from "@/lib/return-path";
@@ -58,7 +60,9 @@ export default async function AttendanceReviewPage({ params, searchParams }: Pag
 
   // Opened from a list of registers, back to that list; otherwise to the class.
   const origin = registerOrigin((await searchParams)[RETURN_PARAM], cohortId);
-  const day = new Date(board.session.sessionDate).toLocaleDateString(undefined, {
+  // The institution's clock, not the server's: production runs in UTC.
+  const timeZone = (await getInstitutionById(board.session.institutionId))?.timezone ?? null;
+  const day = formatInTimeZone(board.session.sessionDate, timeZone, {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -83,14 +87,14 @@ export default async function AttendanceReviewPage({ params, searchParams }: Pag
           {board.session.institutionName}
           {board.session.academicSessionName ? ` · ${board.session.academicSessionName}` : ""}
           {" · "}
-          {new Date(board.session.sessionDate).toLocaleDateString(undefined, {
+          {formatInTimeZone(board.session.sessionDate, timeZone, {
             weekday: "short",
             year: "numeric",
             month: "short",
             day: "numeric",
           })}
           {" · started "}
-          {new Date(board.session.startedAt).toLocaleTimeString(undefined, {
+          {formatInTimeZone(board.session.startedAt, timeZone, {
             hour: "2-digit",
             minute: "2-digit",
           })}

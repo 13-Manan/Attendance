@@ -3,45 +3,55 @@
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { AlertIcon, CheckIcon } from "@/components/attendance/icons";
 import { Button } from "@/components/ui/button";
+import { getAttendanceReviewBoardAction } from "@/modules/attendance-review/actions";
+import { decideStudentFlow, finishAttendanceFlow } from "@/modules/attendance-review/flow-actions";
 import {
-  confirmAttendanceAction,
-  getAttendanceReviewBoardAction,
-  submitReviewDecisionAction,
-} from "@/modules/attendance-review/actions";
-import type {
-  AttendanceReviewBoard,
-  AttendanceReviewReason,
-  AttendanceReviewStudent,
-} from "@/modules/attendance-review/types";
+  absentProvenance,
+  describeReviewFlowError,
+  evidenceOf,
+  needAttentionWords,
+  presentProvenance,
+  reasonDetail,
+  reviewButtonLabel,
+  reviewSummaryOf,
+  shortReason,
+} from "@/modules/attendance-review/review-flow";
+import type { AttendanceReviewBoard, AttendanceReviewStudent } from "@/modules/attendance-review/types";
 import type { AttendanceRealtimeEvent } from "@/modules/realtime/types";
 import { useLiveStream } from "@/modules/realtime/use-live-stream";
-import {
-  describeRecognitionAvailability,
-  studentResultLabel,
-} from "@/modules/recognition-engine/wording";
+import { describeRecognitionAvailability } from "@/modules/recognition-engine/wording";
 
 /**
- * Phase 6 faculty review board.
+ * The faculty review board.
  *
- * Three lists — Present, Absent, Needs Review — over one register. Every
- * correction is optimistic: the counters and the lists move the instant the
- * button is pressed, because a teacher calling roll needs the tally to keep
- * up with them. The server's authoritative counts then replace the optimistic
- * ones, so a rejected correction snaps back rather than lingering as a lie.
+ * A recognised student is present — the register records it, and nothing is
+ * asked of the teacher to keep it that way. The board leads with that count,
+ * then with the students who were not confidently recognised: those, and only
+ * those, wait for the teacher ("Needs attention", each with Present, Absent
+ * and Review). Every present or absent row keeps an Edit. On a phone the
+ * Present list folds away under its count; a wide screen shows it beside
+ * Needs attention.
+ *
+ * Every decision is optimistic: the counts and lists move the instant a button
+ * is pressed, because a teacher calling roll needs the tally to keep up. The
+ * server's authoritative counts then replace the optimistic ones, so a refused
+ * decision snaps back rather than lingering as a lie.
  *
  * What this screen will NOT do:
- *   - promote an unresolved review row by omission (Confirm is disabled and
- *     says why)
- *   - hide a student who recognition never compared (they sit in Needs
- *     Review with the reason spelled out)
+ *   - finish a register while anyone still needs the teacher (the server
+ *     refuses too; the button says why)
+ *   - hide a student recognition never compared (they wait in "Needs
+ *     attention" with the reason on the row and the detail behind Review)
+ *   - call anyone absent who was only not detected — that is the teacher's call
  *   - refetch the whole page on every event (SSE carries the delta)
  */
 
 interface Props {
   initialBoard: AttendanceReviewBoard;
-  /** Admins (`faceEmbedding.manage`) see which provider and model build
-   * produced the suggestions; teachers see what it means for them. */
+  /** Admins (`faceEmbedding.manage`) see which provider and model build ran;
+   * teachers see what it means for them. */
   showDiagnostics?: boolean;
   /** Where "Add another photo" goes, or null when the caller cannot capture
    * for this session. Built on the server, which knows the permission. */
@@ -49,15 +59,6 @@ interface Props {
 }
 
 type DecisionResult = "PRESENT" | "ABSENT" | "NEEDS_REVIEW";
-
-type StatusFilter = "all" | "review" | "absent" | "present";
-
-const STATUS_FILTERS: Array<{ key: StatusFilter; label: string }> = [
-  { key: "all", label: "All" },
-  { key: "review", label: "Needs review" },
-  { key: "absent", label: "Absent" },
-  { key: "present", label: "Present" },
-];
 
 /**
  * Name or roll-number search over one register.
@@ -76,71 +77,30 @@ function matchesQuery(student: AttendanceReviewStudent, needle: string): boolean
   );
 }
 
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
 // ---------------------------------------------------------------------------
 // Presentation helpers
 // ---------------------------------------------------------------------------
 
-function reasonText(student: AttendanceReviewStudent): string {
-  const reason: AttendanceReviewReason = student.reason;
-  switch (reason) {
-    case "low_confidence":
-      return "Matched a face, but below the confidence required to mark present.";
-    case "ambiguous_match":
-      return "The best match was too close to another enrolled student to separate confidently.";
-    case "duplicate_in_capture":
-      return "Two different faces in the same photo both matched this student, so the match is not trustworthy on its own.";
-    case "no_match":
-      return "Compared against every captured face and matched none of them. That is not evidence of absence — they may have been hidden, turned away, or out of frame.";
-    case "no_face_detected":
-      return "No face was detected in any capture, so nobody could be compared. This is about the photograph, not the student.";
-    case "low_quality":
-      return "The captures were too poor to compare against. Retaking may resolve it.";
-    case "face_too_small":
-      return "A face that may be this student's was too small in the photo to identify reliably. A closer photo usually resolves it.";
-    case "recognition_error":
-      return "Recognition failed for this session. Decide each student by calling the roll.";
-    case "no_face_template":
-      return "No enrolled face data — this student could not be compared at all, so this is not evidence of absence.";
-    case "incompatible_face_template":
-      return "Enrolled face data was captured with a different model version and could not be compared. Not evidence of absence.";
-    case "recognition_unavailable":
-      return "Recognition did not run for this session. Call the roll and decide each student.";
-    case "identification_unavailable":
-      return "Faces were counted, but face identification is not available (awaiting Azure approval or temporarily unreachable), so nobody was compared. Decide this student yourself.";
-    case "manually_corrected":
-      return "Set by a faculty member.";
-    default:
-      return "";
-  }
-}
-
-/** Confidence as a short, honest label. Null must not render as 0%, since
- * that would read as a confident non-match. It means one of two things, and
- * the reason says which: the student was compared and no face came near them
- * (`no_match`), or they were never compared at all. */
-function confidenceLabel(value: number | null, reason: AttendanceReviewReason): string {
-  if (value === null) return reason === "no_match" ? "no match" : "not compared";
-  return `${Math.round(value * 100)}% match`;
-}
-
-/** "Present — 91%", "Needs review — 58%", "Face too small", "No reliable
- * match" where recognition has something to say; the older short label
- * otherwise. */
-function resultLabel(student: AttendanceReviewStudent): string {
-  return (
-    studentResultLabel({
-      suggestion: student.aiSuggestion,
-      aiResult: student.aiResult,
-      aiConfidence: student.aiConfidence,
-      reason: student.reason,
-    }) ?? confidenceLabel(student.aiConfidence, student.reason)
+/**
+ * Wide screens (1024px and up) show Present beside Needs attention, open; a
+ * phone keeps it folded under its count. The server renders the phone layout,
+ * and a wide screen opens the list once it has hydrated.
+ */
+const WIDE = "(min-width: 1024px)";
+function useWideScreen(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const query = window.matchMedia(WIDE);
+      query.addEventListener("change", onChange);
+      return () => query.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia(WIDE).matches,
+    () => false,
   );
-}
-
-function confidenceToneClasses(value: number | null, presentMin: number | null): string {
-  if (value === null) return "bg-neutral-100 text-neutral-600";
-  if (presentMin !== null && value >= presentMin) return "bg-emerald-50 text-emerald-700";
-  return "bg-amber-50 text-amber-800";
 }
 
 function Avatar({ student }: { student: AttendanceReviewStudent }) {
@@ -149,11 +109,7 @@ function Avatar({ student }: { student: AttendanceReviewStudent }) {
   if (student.photoUrl) {
     return (
       // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={student.photoUrl}
-        alt=""
-        className="h-9 w-9 shrink-0 rounded-full object-cover"
-      />
+      <img src={student.photoUrl} alt="" className="h-9 w-9 shrink-0 rounded-full object-cover" />
     );
   }
   return (
@@ -166,7 +122,7 @@ function Avatar({ student }: { student: AttendanceReviewStudent }) {
   );
 }
 
-function Identity({ student }: { student: AttendanceReviewStudent }) {
+function Identity({ student, line }: { student: AttendanceReviewStudent; line?: string }) {
   return (
     <div className="flex min-w-0 items-center gap-3">
       <Avatar student={student} />
@@ -174,7 +130,11 @@ function Identity({ student }: { student: AttendanceReviewStudent }) {
         <p className="truncate text-sm font-medium text-neutral-900">
           {student.firstName} {student.lastName}
         </p>
-        <p className="truncate text-xs text-neutral-500">{student.studentCode}</p>
+        {/* Wraps rather than truncates: who decided must stay readable on a 320px phone. */}
+        <p className="text-balance break-words text-xs text-neutral-500">
+          {student.studentCode}
+          {line ? ` · ${line}` : ""}
+        </p>
       </div>
     </div>
   );
@@ -186,20 +146,13 @@ function Identity({ student }: { student: AttendanceReviewStudent }) {
  * `toLocaleString()` asks the runtime for its locale and timezone, and the
  * server's are not the reader's: this banner rendered "20/09/2026, 18:34:49"
  * on the server and "9/20/2026, 6:34:49 PM" in the browser, so React threw
- * away the tree and rebuilt it on every finalized register. The bug only
- * appears once a session is finalized, which is why it survived until
- * finalization became routine.
+ * away the tree and rebuilt it on every finalized register.
  *
  * So the server emits the ISO instant — stable, machine-readable, and what
  * `<time dateTime>` wants anyway — and the locale formatting happens after
  * mount, where the browser's own locale is the right one to use.
  */
 function LocalTime({ iso }: { iso: string }) {
-  // `useSyncExternalStore` is the tool for a value that lives outside React and
-  // whose server snapshot is *allowed* to differ from the client one — exactly
-  // this case, and the same pattern the capture wizard uses for
-  // `navigator.onLine`. Subscribing is a no-op because a browser's locale does
-  // not change while the page is open.
   const onClient = useSyncExternalStore(
     () => () => {},
     () => true,
@@ -208,65 +161,46 @@ function LocalTime({ iso }: { iso: string }) {
   return <time dateTime={iso}>{onClient ? new Date(iso).toLocaleString() : iso}</time>;
 }
 
-/**
- * `note` exists because of one specific way these tiles could lie. The Present
- * tile counts decisions, and a recognition suggestion is not one — so while
- * suggestions are pending the tile reads 0 above a Present column holding
- * three people. Both numbers are correct, and together they look like a bug.
- * The note says which is which.
- */
-function CountCard({
-  label,
-  value,
-  tone,
-  note,
-}: {
-  label: string;
-  value: number;
-  tone: "neutral" | "present" | "absent" | "review";
-  note?: string;
-}) {
-  const toneClass =
-    tone === "present"
-      ? "text-emerald-700"
-      : tone === "review"
-        ? "text-amber-700"
-        : "text-neutral-900";
-  return (
-    <div className="rounded-md border border-neutral-200 px-4 py-3">
-      <dt className="text-xs text-neutral-500">{label}</dt>
-      <dd className={`text-2xl font-semibold tabular-nums ${toneClass}`} aria-live="polite">
-        {value}
-      </dd>
-      {note ? (
-        <p className="mt-0.5 text-xs font-medium text-amber-700" aria-live="polite">
-          {note}
-        </p>
-      ) : null}
-    </div>
-  );
-}
+/** Two equal choices — neither one looks already chosen. */
+const CHOICE =
+  "inline-flex min-h-12 items-center justify-center rounded-xl border border-neutral-300 bg-white px-4 text-sm font-semibold text-neutral-900 transition-colors hover:bg-neutral-50 active:bg-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:text-neutral-400";
+
+/** Review: as large as the two choices, quieter, because it decides nothing. */
+const REVIEW_CHOICE =
+  "inline-flex min-h-12 items-center justify-center rounded-xl border border-transparent bg-neutral-100 px-4 text-sm font-semibold text-neutral-800 transition-colors hover:bg-neutral-200 active:bg-neutral-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2 aria-expanded:bg-neutral-200";
+
+const SMALL_ACTION =
+  "inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md px-2 text-sm font-medium text-neutral-700 underline-offset-4 hover:text-neutral-900 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900";
 
 // ---------------------------------------------------------------------------
 
-export function ReviewBoard({
-  initialBoard,
-  showDiagnostics = false,
-  addPhotoHref = null,
-}: Props) {
+export function ReviewBoard({ initialBoard, showDiagnostics = false, addPhotoHref = null }: Props) {
   const router = useRouter();
   const [board, setBoard] = useState(initialBoard);
   const [pending, setPending] = useState<Record<string, boolean>>({});
+  const [rowError, setRowError] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [liveMessage, setLiveMessage] = useState("");
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // null: whatever suits the screen (open on a wide one); a tap makes it the teacher's choice.
+  const [open, setOpen] = useState<{ present: boolean | null; absent: boolean | null }>({ present: null, absent: null });
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editReason, setEditReason] = useState("");
+  const [reviewing, setReviewing] = useState<string | null>(null);
+  const [lastDecision, setLastDecision] = useState<{
+    student: AttendanceReviewStudent;
+    previous: DecisionResult;
+    next: DecisionResult;
+  } | null>(null);
+  const attentionHeading = useRef<HTMLHeadingElement | null>(null);
+  const wide = useWideScreen();
 
   const sessionId = board.session.id;
   const isFinalized = board.session.processingStatus === "FINALIZED";
-  const presentMin = board.session.recognition?.presentMin ?? null;
+  const canEdit = !isFinalized || board.actorCanOverrideFinalized;
+  const summary = reviewSummaryOf(board);
 
   // -------------------------------------------------------------------------
   // Realtime. One SSE connection per open board; each event carries the
@@ -274,13 +208,9 @@ export function ReviewBoard({
   // correction lands here without anybody refetching the page.
   // -------------------------------------------------------------------------
   /**
-   * Guards against an older board landing after a newer one.
-   *
-   * A reconnect reconciliation and an event-driven refresh can overlap; both
-   * run the same query, so the later request is the newer truth. Without this
-   * the earlier response can resolve second and put a stale register — quite
-   * possibly one missing the correction that triggered the refresh — back on
-   * the screen the room is watching.
+   * Guards against an older board landing after a newer one: a reconnect
+   * reconciliation and an event-driven refresh can overlap, and the later
+   * request is the newer truth.
    */
   const latestRefresh = useRef(0);
 
@@ -299,12 +229,10 @@ export function ReviewBoard({
   const handleEvent = useCallback(
     (event: AttendanceRealtimeEvent) => {
       if (event.type === "attendance-record-updated") {
-        // Apply the counts immediately, then reconcile the lists. Counts are
-        // what the room is watching; list membership can lag by one tick.
         setBoard((current) => ({ ...current, counts: event.counts }));
         void refresh();
       } else if (event.type === "attendance-session-finalized") {
-        setLiveMessage("This attendance session was finalized.");
+        setLiveMessage("This attendance was finished.");
         void refresh();
       }
     },
@@ -315,93 +243,121 @@ export function ReviewBoard({
     url: `/api/realtime/attendance/${sessionId}`,
     onEvent: handleEvent,
     // The board may have moved while this screen was disconnected — a second
-    // teacher correcting, or the register being confirmed. Re-read rather than
+    // teacher deciding, or the register being finished. Re-read rather than
     // leave a stale roster in front of the room.
     onReconnect: refresh,
   });
 
   // -------------------------------------------------------------------------
-  // Corrections
+  // Decisions
   // -------------------------------------------------------------------------
   const decide = useCallback(
-    async (student: AttendanceReviewStudent, newResult: DecisionResult) => {
+    async (
+      student: AttendanceReviewStudent,
+      newResult: DecisionResult,
+      options: { reason?: string; undo?: boolean } = {},
+    ) => {
+      const id = student.attendanceRecordId;
       setError(null);
-      setPending((p) => ({ ...p, [student.attendanceRecordId]: true }));
+      setRowError((e) => {
+        const next = { ...e };
+        delete next[id];
+        return next;
+      });
+      setPending((p) => ({ ...p, [id]: true }));
 
       const previous = board;
-      // Optimistic move: the student leaves their current list, joins the
-      // new one, and the counters update in the same render. "Update
-      // counters instantly" is the requirement; this is it.
-      setBoard((current) => moveStudent(current, student.attendanceRecordId, newResult));
+      // Optimistic move: the student leaves their current list, joins the new
+      // one, and the counts update in the same render.
+      setBoard((current) => moveStudent(current, id, newResult));
 
       try {
-        const result = await submitReviewDecisionAction({
-          attendanceRecordId: student.attendanceRecordId,
+        const result = await decideStudentFlow({
+          attendanceRecordId: id,
           newResult,
+          ...(options.reason?.trim() ? { reason: options.reason.trim() } : {}),
         });
-        // Replace the optimistic counts with the server's.
-        setBoard((current) => ({ ...current, counts: result.counts }));
+        if (!result.ok) {
+          // Snap back — a decision the server refused must not appear to
+          // have happened.
+          setBoard(previous);
+          setRowError((e) => ({ ...e, [id]: describeReviewFlowError(result.code) }));
+          if (result.code === "register_changed") void refresh();
+          return;
+        }
+        setBoard((current) => ({ ...current, counts: result.value.counts }));
+        const name = `${student.firstName} ${student.lastName}`;
         setLiveMessage(
-          `${student.firstName} ${student.lastName} marked ${newResult.toLowerCase().replace("_", " ")}.`,
+          newResult === "NEEDS_REVIEW"
+            ? `${name} needs attention again.`
+            : `${name} marked ${newResult === "PRESENT" ? "present" : "absent"}.`,
+        );
+        setEditing(null);
+        setEditReason("");
+        setLastDecision(
+          options.undo || isFinalized
+            ? null
+            : { student: { ...student }, previous: student.finalResult === "PRESENT" || student.finalResult === "ABSENT" ? student.finalResult : "NEEDS_REVIEW", next: newResult },
         );
         void refresh();
-      } catch (e) {
-        // Snap back — a correction the server refused must not appear to
-        // have happened.
+      } catch {
+        // The request itself failed — the connection, usually.
         setBoard(previous);
-        setError(
-          e instanceof Error
-            ? `Could not update ${student.firstName} ${student.lastName}: ${e.message}`
-            : "Could not update that student.",
-        );
+        setRowError((e) => ({ ...e, [id]: "Couldn't save that — check the connection and try again." }));
       } finally {
         setPending((p) => {
           const next = { ...p };
-          delete next[student.attendanceRecordId];
+          delete next[id];
           return next;
         });
       }
     },
-    [board, refresh],
+    [board, isFinalized, refresh],
   );
 
-  const confirm = useCallback(async () => {
+  const undo = useCallback(() => {
+    if (!lastDecision) return;
+    const { student, previous } = lastDecision;
+    setLastDecision(null);
+    void decide({ ...student, finalResult: lastDecision.next }, previous, { undo: true });
+  }, [decide, lastDecision]);
+
+  const finish = useCallback(async () => {
     setError(null);
     setConfirming(true);
     try {
-      await confirmAttendanceAction({ sessionId });
+      const result = await finishAttendanceFlow({ sessionId });
+      if (!result.ok) {
+        setError(describeReviewFlowError(result.code));
+        void refresh();
+        return;
+      }
       setConfirmOpen(false);
+      setLastDecision(null);
       await refresh();
       router.refresh();
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "";
-      setError(
-        message.startsWith("unresolved_review_states")
-          ? "Some students are still awaiting review. Resolve each one as present or absent before confirming."
-          : message
-            ? `Could not confirm attendance: ${message}`
-            : "Could not confirm attendance.",
-      );
-      void refresh();
+    } catch {
+      setError("Couldn't finish attendance — check the connection and try again.");
     } finally {
       setConfirming(false);
     }
   }, [refresh, router, sessionId]);
 
+  const goToAttention = useCallback(() => {
+    const heading = attentionHeading.current;
+    if (!heading) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    heading.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    heading.focus({ preventScroll: true });
+  }, []);
+
   // -------------------------------------------------------------------------
-  // Search and filter.
-  //
-  // These change what is *displayed*, never what is counted. The cards above
-  // stay the register's real tally: a teacher who has typed "sha" must not
-  // read "Present 2" and take it for the state of the class. Section headers
-  // say "2 of 43" while a search is active, for the same reason.
-  //
-  // Finalization is likewise unaffected — a filter cannot hide an unresolved
-  // student into being confirmed, because `canFinalize` comes from the server.
+  // Search. Changes what is *displayed*, never what is counted: the summary
+  // stays the register's real tally, and finishing is the server's call.
   // -------------------------------------------------------------------------
   const needle = query.trim().toLowerCase();
   const filtering = needle.length > 0;
-  const shownNeedsReview = useMemo(
+  const shownAttention = useMemo(
     () => (needle ? board.needsReview.filter((s) => matchesQuery(s, needle)) : board.needsReview),
     [board.needsReview, needle],
   );
@@ -413,42 +369,26 @@ export function ReviewBoard({
     () => (needle ? board.present.filter((s) => matchesQuery(s, needle)) : board.present),
     [board.present, needle],
   );
-  const matchCount = shownNeedsReview.length + shownAbsent.length + shownPresent.length;
-  const showSection = (key: Exclude<StatusFilter, "all">) =>
-    statusFilter === "all" || statusFilter === key;
-
-  // Carried on the Present tile, which counts decisions rather than rows.
-  const suggestionNote =
-    board.awaitingConfirmation > 0
-      ? `+${board.awaitingConfirmation} suggested, not yet confirmed`
-      : undefined;
-  const canPressConfirm =
-    board.actorCanFinalize && board.canFinalize && !confirming && !isFinalized;
+  const matchCount = shownAttention.length + shownAbsent.length + shownPresent.length;
+  const presentOpen = filtering || (open.present ?? wide);
+  const absentOpen = filtering || (open.absent ?? wide);
 
   const provenance = useMemo(() => {
     const s = board.session;
     const bits: string[] = [];
     if (s.generationSource === "manual") {
-      bits.push("Built by manual roll call — recognition did not contribute");
+      bits.push("Taken by hand — face matching did not contribute");
     } else if (s.recognition) {
-      if (showDiagnostics) {
-        bits.push(`${s.recognition.modelName} ${s.recognition.modelVersion}`);
-      }
+      if (showDiagnostics) bits.push(`${s.recognition.modelName} ${s.recognition.modelVersion}`);
       bits.push(
-        `${s.recognition.scoredFacesTotal}/${s.recognition.detectedFacesTotal} faces scored against ${s.recognition.candidatePoolSize} students`,
+        `${s.recognition.scoredFacesTotal} of ${s.recognition.detectedFacesTotal} faces checked against ${plural(s.recognition.candidatePoolSize, "student")}`,
       );
       const unknown = s.recognition.unknownFacesTotal ?? 0;
-      if (unknown > 0) {
-        bits.push(`${unknown} unknown face${unknown === 1 ? "" : "s"}, assigned to nobody`);
-      }
+      if (unknown > 0) bits.push(`${plural(unknown, "face")} matched nobody`);
       const rounds = s.recognition.rounds ?? 1;
       if (rounds > 1) bits.push(`${rounds} rounds of photos merged`);
     }
-    if (s.captureImages.length > 0) {
-      bits.push(
-        `${s.captureImages.length} photo${s.captureImages.length === 1 ? "" : "s"} captured`,
-      );
-    }
+    if (s.captureImages.length > 0) bits.push(plural(s.captureImages.length, "photo"));
     return bits.join(" · ");
   }, [board.session, showDiagnostics]);
 
@@ -456,22 +396,69 @@ export function ReviewBoard({
     ? describeRecognitionAvailability(board.session.recognition, { showDiagnostics })
     : null;
 
+  // -------------------------------------------------------------------------
+  // Rows
+  // -------------------------------------------------------------------------
+  const errorFor = (student: AttendanceReviewStudent) =>
+    rowError[student.attendanceRecordId] ? (
+      <p role="alert" className="px-4 pb-3 text-sm text-red-700 sm:pl-16">
+        {rowError[student.attendanceRecordId]}
+      </p>
+    ) : null;
+
+  const editRow = (student: AttendanceReviewStudent, to: "PRESENT" | "ABSENT") => {
+    const id = student.attendanceRecordId;
+    if (editing !== id) return null;
+    return (
+      <div className="flex flex-col gap-2 px-4 pb-3 sm:flex-row sm:items-center sm:pl-16">
+        {isFinalized ? (
+          <>
+            <label htmlFor={`reason-${id}`} className="sr-only">
+              Reason for the change
+            </label>
+            <input
+              id={`reason-${id}`}
+              value={editReason}
+              onChange={(e) => setEditReason(e.target.value)}
+              maxLength={500}
+              placeholder="Reason (if your school asks for one)"
+              className="min-h-11 rounded-lg border border-neutral-300 px-3 text-sm sm:flex-1"
+            />
+          </>
+        ) : null}
+        <div className="grid grid-cols-2 gap-2 sm:flex">
+          <Button
+            onClick={() => void decide(student, to, { reason: editReason })}
+            disabled={pending[id]}
+          >
+            {to === "ABSENT" ? "Mark absent" : "Mark present"}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setEditing(null);
+              setEditReason("");
+            }}
+            disabled={pending[id]}
+          >
+            Cancel
+          </Button>
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className="flex flex-col gap-5">
+    <div className={`flex flex-col gap-4 md:pb-0 ${isFinalized ? "" : "pb-40"}`}>
       <p aria-live="polite" className="sr-only">
         {liveMessage}
       </p>
 
       {availability && availability.availability !== "ready" && (
-        <div
-          role="alert"
-          className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
-        >
+        <div role="alert" className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
           <strong>{availability.headline}.</strong> {availability.detail}
           {availability.diagnostics && (
-            <span className="mt-1 block font-mono text-[11px] text-neutral-500">
-              {availability.diagnostics}
-            </span>
+            <span className="mt-1 block font-mono text-[11px] text-neutral-500">{availability.diagnostics}</span>
           )}
         </div>
       )}
@@ -479,52 +466,26 @@ export function ReviewBoard({
         <p className="font-mono text-[11px] text-neutral-500">{availability.diagnostics}</p>
       )}
 
-      {!isFinalized && addPhotoHref && (
-        <div className="flex flex-wrap items-center gap-3 rounded-md border border-neutral-200 px-3 py-2 text-xs text-neutral-700">
-          <span className="min-w-0 flex-1">
-            {board.session.recognition?.recommendRetake
-              ? "Some faces were too small to identify. A closer photo of those rows can resolve them."
-              : "Missed someone? Add another photo — it is merged into this register without undoing anything already decided."}
-          </span>
-          <Link
-            href={addPhotoHref}
-            className="rounded-md border border-neutral-300 bg-white px-3 py-1.5 font-medium text-neutral-900 hover:bg-neutral-50"
-          >
-            Add another photo
-          </Link>
-        </div>
-      )}
-
       {/*
         Only once a live connection has been lost, never on first load and
-        never per retry. It matters more here than on the portal: a teacher
-        reading this board to a room needs to know when it has stopped being
-        live, because a second teacher's correction would otherwise be
-        invisible. Stated in words, not by colour alone.
+        never per retry: a teacher reading this board to a room needs to know
+        when it has stopped being live. Stated in words, not by colour alone.
       */}
       {connection === "reconnecting" && (
-        <div
-          role="status"
-          className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
-        >
-          <strong>Live updates interrupted.</strong> Reconnecting — this board
-          will refresh itself once the connection returns. Corrections you make
-          now are still saved.
+        <div role="status" className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <strong>Live updates interrupted.</strong> Reconnecting — this board will refresh
+          itself once the connection returns.
         </div>
       )}
       {connection === "unauthorized" && (
-        <div
-          role="status"
-          className="rounded-md border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700"
-        >
-          <strong>Live updates have stopped.</strong> Reload the page to sign in
-          again.
+        <div role="status" className="rounded-lg border border-neutral-300 bg-neutral-50 px-3 py-2 text-sm text-neutral-700">
+          <strong>Live updates have stopped.</strong> Reload the page to sign in again.
         </div>
       )}
 
       {isFinalized && (
-        <div className="rounded-md border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700">
-          <strong>Attendance finalized</strong>
+        <div className="rounded-lg border border-neutral-300 bg-neutral-50 px-3 py-2 text-sm text-neutral-700">
+          <strong>Attendance finished</strong>
           {board.session.finalizedByName ? ` by ${board.session.finalizedByName}` : ""}
           {board.session.finalizedAt ? (
             <>
@@ -534,371 +495,406 @@ export function ReviewBoard({
           ) : null}
           . Students can now see their result.
           {board.actorCanOverrideFinalized
-            ? " You may still correct a record; every change is recorded as an authorized override."
-            : " Corrections now require an administrator."}
+            ? " You can still correct a record; every change is recorded as an authorized override."
+            : " Corrections now need an administrator."}
         </div>
       )}
 
-      <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <CountCard label="Total students" value={board.counts.total} tone="neutral" />
-        <CountCard
-          label="Present"
-          value={board.counts.present}
-          tone="present"
-          note={suggestionNote}
-        />
-        <CountCard label="Absent" value={board.counts.absent} tone="absent" />
-        <CountCard label="Needs review" value={board.awaitingDecision} tone="review" />
-      </dl>
-
-      {provenance && <p className="text-xs text-neutral-500">{provenance}</p>}
+      {/* The summary: who is present, then who needs the teacher — counts first, in words and icons, never colour alone. */}
+      <section aria-label="Attendance summary" className="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm sm:p-5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="inline-flex size-10 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-emerald-700">
+            <CheckIcon className="size-6" />
+          </span>
+          <p className="text-neutral-900">
+            <span className="text-3xl font-semibold tabular-nums">{summary.present}</span>{" "}
+            <span className="text-lg font-medium">Present</span>
+          </p>
+          {summary.absent > 0 ? (
+            <p className="ml-auto text-sm text-neutral-600">{summary.absent} absent</p>
+          ) : null}
+        </div>
+        <div className="my-4 border-t border-neutral-200" />
+        {summary.attention > 0 ? (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex size-10 shrink-0 items-center justify-center rounded-full bg-amber-50 text-amber-700">
+                <AlertIcon className="size-6" />
+              </span>
+              <p className="text-neutral-900">
+                <span className="text-3xl font-semibold tabular-nums">{summary.attention}</span>{" "}
+                <span className="text-lg font-medium">{needAttentionWords(summary.attention)}</span>
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={goToAttention}
+              className="inline-flex min-h-12 items-center justify-center rounded-xl bg-neutral-900 px-5 text-base font-semibold text-white transition-colors hover:bg-neutral-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2"
+            >
+              {reviewButtonLabel(summary.attention)}
+            </button>
+          </div>
+        ) : (
+          <p className="text-sm text-neutral-700">
+            {isFinalized
+              ? "Attendance is finished."
+              : summary.total === 0
+                ? "No register yet."
+                : "Everyone is accounted for. Finish attendance when you're ready."}
+          </p>
+        )}
+        {summary.legacySuggestions > 0 && !isFinalized ? (
+          <p className="mt-3 text-xs text-neutral-600">
+            {plural(summary.legacySuggestions, "recognised student")} {summary.legacySuggestions === 1 ? "is" : "are"} recorded as
+            present when you finish.
+          </p>
+        ) : null}
+        {!isFinalized && addPhotoHref ? (
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 text-sm text-neutral-600">
+            <span>
+              {board.session.recognition?.recommendRetake
+                ? "Some faces were too small to recognise. A closer photo can resolve them."
+                : "Missed someone?"}
+            </span>
+            <Link href={addPhotoHref} className={SMALL_ACTION}>
+              Add another photo
+            </Link>
+          </div>
+        ) : null}
+      </section>
 
       {error && (
-        <p role="alert" className="text-sm text-red-600">
+        <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">
           {error}
         </p>
       )}
 
-      {/* Search and status filter. Stacks on phones; one row from `sm`. */}
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="relative sm:max-w-xs sm:flex-1">
-          <label htmlFor="student-search" className="sr-only">
-            Search students by name or roll number
-          </label>
-          <input
-            id="student-search"
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search name or roll number"
-            autoComplete="off"
-            className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none"
-          />
+      {lastDecision && !isFinalized ? (
+        <div role="status" className="flex items-center justify-between gap-3 rounded-lg bg-neutral-100 px-3 py-1 text-sm text-neutral-800">
+          <span className="min-w-0 truncate">
+            {lastDecision.student.firstName} {lastDecision.student.lastName} marked{" "}
+            {lastDecision.next === "PRESENT" ? "present" : lastDecision.next === "ABSENT" ? "absent" : "for attention"}.
+          </span>
+          <button type="button" onClick={undo} className={SMALL_ACTION}>
+            Undo
+          </button>
         </div>
-        <div
-          role="group"
-          aria-label="Filter by attendance status"
-          className="flex gap-1 overflow-x-auto"
-        >
-          {STATUS_FILTERS.map((option) => (
-            <button
-              key={option.key}
-              type="button"
-              aria-pressed={statusFilter === option.key}
-              onClick={() => setStatusFilter(option.key)}
-              className={`shrink-0 rounded-md border px-2.5 py-1.5 text-xs font-medium whitespace-nowrap ${
-                statusFilter === option.key
-                  ? "border-neutral-900 bg-neutral-900 text-white"
-                  : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"
-              }`}
-            >
-              {option.label}
-            </button>
-          ))}
+      ) : null}
+
+      {/*
+        One column on a phone: Needs attention, then the folded Present and
+        Absent lists. From 1024px: Present on the left, Needs attention and
+        Absent on the right. The reading order stays attention-first either
+        way, which is the order a screen reader hears.
+      */}
+      <div className="flex flex-col gap-4 lg:grid lg:grid-cols-2 lg:grid-rows-[auto_1fr] lg:items-start lg:gap-x-6 lg:gap-y-4">
+        {/* Needs attention: the only list that asks anything of the teacher. */}
+        {!isFinalized || board.needsReview.length > 0 || filtering ? (
+          <section
+            aria-labelledby="attention-heading"
+            className={`overflow-hidden rounded-2xl border border-amber-200 bg-white lg:col-start-2 lg:row-start-1 ${
+              board.needsReview.length === 0 && !filtering ? "hidden lg:block" : ""
+            }`}
+          >
+            <header className="flex items-center justify-between gap-3 border-b border-amber-100 bg-amber-50 px-4 py-2.5">
+              <h2
+                id="attention-heading"
+                ref={attentionHeading}
+                tabIndex={-1}
+                className="flex items-center gap-2 text-sm font-semibold text-amber-900 focus:outline-none"
+              >
+                <AlertIcon className="size-4" />
+                Needs attention
+              </h2>
+              <span className="text-xs tabular-nums text-amber-900">
+                {filtering && shownAttention.length !== board.needsReview.length
+                  ? `${shownAttention.length} of ${board.needsReview.length}`
+                  : board.needsReview.length}
+              </span>
+            </header>
+            {shownAttention.length === 0 ? (
+              <p className="px-4 py-3 text-sm text-neutral-500">
+                {board.needsReview.length > 0 ? "No student here matches your search." : "Nothing needs your attention."}
+              </p>
+            ) : (
+              <ul className="divide-y divide-neutral-100">
+                {shownAttention.map((student) => {
+                  const id = student.attendanceRecordId;
+                  const evidence = evidenceOf(student);
+                  return (
+                    <li key={id}>
+                      <div className="flex flex-col gap-3 px-4 py-3">
+                        <div className="min-w-0">
+                          <Identity student={student} />
+                          <p className="mt-1 pl-12 text-sm text-neutral-700">
+                            <span className="font-medium text-neutral-900">Reason:</span> {shortReason(student.reason)}
+                          </p>
+                        </div>
+                        <div className={`grid gap-2 ${canEdit ? "grid-cols-3" : "grid-cols-1"}`}>
+                          {canEdit ? (
+                            <>
+                              <button
+                                type="button"
+                                className={CHOICE}
+                                onClick={() => void decide(student, "PRESENT")}
+                                disabled={pending[id]}
+                                aria-label={`Present: ${student.firstName} ${student.lastName}`}
+                              >
+                                Present
+                              </button>
+                              <button
+                                type="button"
+                                className={CHOICE}
+                                onClick={() => void decide(student, "ABSENT")}
+                                disabled={pending[id]}
+                                aria-label={`Absent: ${student.firstName} ${student.lastName}`}
+                              >
+                                Absent
+                              </button>
+                            </>
+                          ) : null}
+                          <button
+                            type="button"
+                            className={REVIEW_CHOICE}
+                            onClick={() => setReviewing((r) => (r === id ? null : id))}
+                            aria-expanded={reviewing === id}
+                            aria-controls={`review-${id}`}
+                            aria-label={`Review ${student.firstName} ${student.lastName}`}
+                          >
+                            Review
+                          </button>
+                        </div>
+                      </div>
+                      {reviewing === id ? (
+                        <div id={`review-${id}`} className="mx-4 mb-3 rounded-xl bg-neutral-50 px-3 py-2.5 text-sm text-neutral-700">
+                          <p>{reasonDetail(student.reason)}</p>
+                          {evidence.length > 0 ? (
+                            <ul className="mt-1.5 flex flex-col gap-0.5 text-xs text-neutral-500">
+                              {evidence.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {errorFor(student)}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        ) : null}
+
+        {/* Present, behind its count: nothing in it asks anything of the teacher. */}
+        <div className="flex flex-col gap-4 lg:col-start-1 lg:row-span-2 lg:row-start-1">
+          {summary.total > 0 && (
+            <div className="flex flex-col gap-1">
+              <label htmlFor="student-search" className="sr-only">
+                Find a student by name or roll number
+              </label>
+              <input
+                id="student-search"
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Find a student"
+                autoComplete="off"
+                className="min-h-11 w-full rounded-lg border border-neutral-300 px-3 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none sm:max-w-xs lg:max-w-none"
+              />
+              {filtering ? (
+                <p aria-live="polite" className="text-xs text-neutral-500">
+                  {matchCount === 0
+                    ? `No student matches “${query.trim()}”.`
+                    : `${matchCount} of ${summary.total} students match. The counts above are for the whole register.`}
+                </p>
+              ) : null}
+            </div>
+          )}
+
+          <Collapsible
+            title="Present"
+            icon={<CheckIcon className="size-4 text-emerald-700" />}
+            count={board.present.length}
+            shown={shownPresent.length}
+            filtering={filtering}
+            open={presentOpen}
+            onToggle={() => setOpen((o) => ({ ...o, present: !(o.present ?? wide) }))}
+            emptyText="Nobody is present yet."
+          >
+            {shownPresent.map((student) => (
+              <li key={student.attendanceRecordId}>
+                <div className="flex items-center justify-between gap-3 px-4 py-2">
+                  <Identity student={student} line={presentProvenance(student)} />
+                  {canEdit ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditing((e) => (e === student.attendanceRecordId ? null : student.attendanceRecordId));
+                        setEditReason("");
+                      }}
+                      aria-expanded={editing === student.attendanceRecordId}
+                      aria-label={`Edit ${student.firstName} ${student.lastName}`}
+                      className={SMALL_ACTION}
+                    >
+                      Edit
+                    </button>
+                  ) : null}
+                </div>
+                {editRow(student, "ABSENT")}
+                {errorFor(student)}
+              </li>
+            ))}
+          </Collapsible>
+        </div>
+
+        <div className="lg:col-start-2 lg:row-start-2">
+          <Collapsible
+            title="Absent"
+            count={board.absent.length}
+            shown={shownAbsent.length}
+            filtering={filtering}
+            open={absentOpen}
+            onToggle={() => setOpen((o) => ({ ...o, absent: !(o.absent ?? wide) }))}
+            emptyText="Nobody is marked absent."
+          >
+            {shownAbsent.map((student) => (
+              <li key={student.attendanceRecordId}>
+                <div className="flex items-center justify-between gap-3 px-4 py-2">
+                  <Identity student={student} line={absentProvenance(student)} />
+                  {canEdit ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditing((e) => (e === student.attendanceRecordId ? null : student.attendanceRecordId));
+                        setEditReason("");
+                      }}
+                      aria-expanded={editing === student.attendanceRecordId}
+                      aria-label={`Edit ${student.firstName} ${student.lastName}`}
+                      className={SMALL_ACTION}
+                    >
+                      Edit
+                    </button>
+                  ) : null}
+                </div>
+                {editRow(student, "PRESENT")}
+                {errorFor(student)}
+              </li>
+            ))}
+          </Collapsible>
         </div>
       </div>
 
-      {filtering && (
-        <p aria-live="polite" className="text-xs text-neutral-500">
-          {matchCount === 0
-            ? `No student matches “${query.trim()}”.`
-            : `${matchCount} of ${board.counts.total} students match “${query.trim()}”. Counts above are for the whole register.`}
-        </p>
-      )}
+      {provenance && <p className="text-xs text-neutral-500">{provenance}</p>}
 
-      {/* Needs Review first: it is the list that blocks finalization. */}
-      {showSection("review") && (
-      <Section
-        title="Needs review"
-        count={board.needsReview.length}
-        shown={shownNeedsReview.length}
-        filtering={filtering}
-        emptyText="Nothing left to review."
-        tone="review"
-      >
-        {shownNeedsReview.map((student) => (
-          <li
-            key={student.attendanceRecordId}
-            className="flex flex-col gap-2 border-b border-neutral-100 px-4 py-3 last:border-b-0 sm:flex-row sm:items-center sm:justify-between"
-          >
-            <div className="flex min-w-0 flex-col gap-1">
-              <Identity student={student} />
-              <p className="text-xs text-neutral-600">{reasonText(student)}</p>
-              <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                <span
-                  className={`rounded-full px-2 py-0.5 font-medium ${confidenceToneClasses(student.aiConfidence, presentMin)}`}
-                >
-                  {resultLabel(student)}
-                </span>
-                {student.bestFaceId && (
-                  <span className="text-neutral-500">
-                    best candidate from photo {student.bestFaceId.split(":")[0]}
-                  </span>
-                )}
-                {!student.wasComparable && (
-                  <span className="text-neutral-500">never compared</span>
-                )}
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <span className="text-xs text-neutral-500">Verify:</span>
-              <Button
-                onClick={() => decide(student, "PRESENT")}
-                disabled={pending[student.attendanceRecordId]}
-                className="!py-1 !text-xs"
-              >
-                Present
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => decide(student, "ABSENT")}
-                disabled={pending[student.attendanceRecordId]}
-                className="!py-1 !text-xs"
-              >
-                Absent
-              </Button>
-            </div>
-          </li>
-        ))}
-      </Section>
-      )}
-
-      {showSection("absent") && (
-      <Section
-        title="Absent"
-        count={board.absent.length}
-        shown={shownAbsent.length}
-        filtering={filtering}
-        emptyText="Nobody is marked absent."
-        tone="neutral"
-      >
-        {shownAbsent.map((student) => (
-          <li
-            key={student.attendanceRecordId}
-            className="flex items-center justify-between gap-3 border-b border-neutral-100 px-4 py-2.5 last:border-b-0"
-          >
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <Identity student={student} />
-              <p className="pl-12 text-xs text-neutral-500">
-                {student.isManuallyCorrected ? "Marked absent by faculty" : reasonText(student)}
-              </p>
-            </div>
-            <Button
-              variant="secondary"
-              onClick={() => decide(student, "PRESENT")}
-              disabled={pending[student.attendanceRecordId]}
-              className="!py-1 !text-xs"
-            >
-              Mark present
-            </Button>
-          </li>
-        ))}
-      </Section>
-      )}
-
-      {showSection("present") && (
-      <Section
-        title={
-          board.awaitingConfirmation > 0
-            ? `Present · ${board.awaitingConfirmation} awaiting confirmation`
-            : "Present"
-        }
-        count={board.present.length}
-        shown={shownPresent.length}
-        filtering={filtering}
-        emptyText="Nobody is marked present yet."
-        tone="present"
-      >
-        {shownPresent.map((student) => {
-          // A suggestion is not a result. Both live in this column because
-          // that is where a reviewer looks for them, but a row nobody has
-          // confirmed says so plainly and offers the confirm action.
-          const suggested = student.finalResult !== "PRESENT";
-          return (
-            <li
-              key={student.attendanceRecordId}
-              className={`flex flex-col gap-2 border-b border-neutral-100 px-4 py-2.5 last:border-b-0 sm:flex-row sm:items-center sm:justify-between ${
-                suggested ? "bg-amber-50/40" : ""
-              }`}
-            >
-              <div className="flex min-w-0 flex-col gap-1">
-                <Identity student={student} />
-                <p className="pl-12 text-xs text-neutral-500">
-                  {suggested
-                    ? "Suggested by recognition — not yet confirmed."
-                    : student.isManuallyCorrected
-                      ? "Confirmed by faculty."
-                      : "Confirmed."}
-                </p>
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <span
-                  className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${confidenceToneClasses(student.aiConfidence, presentMin)}`}
-                  title={
-                    student.isManuallyCorrected
-                      ? `Set by faculty. The system's own result was ${student.aiResult.toLowerCase().replace("_", " ")}.`
-                      : "Proposed by recognition"
-                  }
-                >
-                  {student.isManuallyCorrected
-                    ? "marked by faculty"
-                    : resultLabel(student)}
-                </span>
-                {suggested && (
-                  <Button
-                    onClick={() => decide(student, "PRESENT")}
-                    disabled={pending[student.attendanceRecordId]}
-                    className="!py-1 !text-xs"
-                  >
-                    Confirm
-                  </Button>
-                )}
-                <Button
-                  variant="secondary"
-                  onClick={() => decide(student, "ABSENT")}
-                  disabled={pending[student.attendanceRecordId]}
-                  className="!py-1 !text-xs"
-                >
-                  Mark absent
-                </Button>
-              </div>
-            </li>
-          );
-        })}
-      </Section>
-      )}
-
-      {/* Finalization */}
+      {/* Finishing: pinned within the thumb's reach on a phone; on a wider screen it rides the bottom of the board. */}
       {!isFinalized && (
-        <section className="flex flex-col gap-3 rounded-md border border-neutral-200 p-4">
-          <h2 className="text-sm font-semibold text-neutral-900">Confirm attendance</h2>
-          {!confirmOpen ? (
-            <>
-              <p className="text-xs text-neutral-600">
-                Confirming closes this register. Students will be able to see their
-                own result, and further changes become authorized corrections.
+        <div className="fixed inset-x-0 bottom-0 z-30 border-t border-neutral-200 bg-white px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-4px_16px_rgba(0,0,0,0.06)] md:sticky md:bottom-4 md:z-10 md:rounded-2xl md:border md:p-4 md:shadow-[0_4px_16px_rgba(0,0,0,0.06)]">
+          {confirmOpen ? (
+            <div role="group" aria-label="Finish attendance" className="flex flex-col gap-3">
+              <p className="text-base font-semibold text-neutral-900">Finish today&apos;s attendance?</p>
+              <p className="text-sm text-neutral-700">
+                {summary.present} present · {summary.absent} absent. Students can then see their
+                attendance; you can still correct a record afterwards.
               </p>
-              {board.awaitingConfirmation > 0 && (
-                <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                  <strong>
-                    {board.awaitingConfirmation} student
-                    {board.awaitingConfirmation === 1 ? " is" : "s are"} marked present by
-                    recognition and not yet confirmed by you.
-                  </strong>{" "}
-                  Confirming accepts {board.awaitingConfirmation === 1 ? "that" : "those"}{" "}
-                  suggestion{board.awaitingConfirmation === 1 ? "" : "s"} as your decision, and
-                  each one is recorded against your name. Check them above first if you have not.
-                </p>
-              )}
-              {board.finalizeBlockedReason && (
-                <p className="text-xs text-amber-800">{board.finalizeBlockedReason}</p>
-              )}
-              {!board.actorCanFinalize && (
-                <p className="text-xs text-amber-800">
-                  You do not have permission to finalize attendance. Ask a class
-                  teacher or administrator to confirm this register.
-                </p>
-              )}
-              <div>
-                <Button onClick={() => setConfirmOpen(true)} disabled={!canPressConfirm}>
-                  Confirm attendance
+              <div className="grid grid-cols-2 gap-2 sm:flex">
+                <Button variant="secondary" onClick={() => setConfirmOpen(false)} disabled={confirming}>
+                  Not yet
+                </Button>
+                <Button onClick={() => void finish()} disabled={!summary.canFinish || confirming}>
+                  {confirming ? "Finishing…" : "Finish attendance"}
                 </Button>
               </div>
-            </>
+            </div>
           ) : (
-            <>
-              <p className="text-xs text-neutral-600">
-                You are about to finalize attendance for{" "}
-                <strong>{board.counts.total}</strong> students
-                {board.awaitingConfirmation > 0 ? (
-                  <>
-                    , accepting <strong>{board.awaitingConfirmation}</strong> recognition
-                    suggestion{board.awaitingConfirmation === 1 ? "" : "s"} as your own decision
-                  </>
-                ) : null}
-                :
-              </p>
-              <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-                <CountCard label="Total students" value={board.counts.total} tone="neutral" />
-                <CountCard
-                  label="Present"
-                  value={board.counts.present}
-                  tone="present"
-                  note={suggestionNote}
-                />
-                <CountCard label="Absent" value={board.counts.absent} tone="absent" />
-                <CountCard label="Needs review" value={board.awaitingDecision} tone="review" />
-              </dl>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button onClick={confirm} disabled={!canPressConfirm}>
-                  {confirming ? "Confirming…" : "Yes, finalize attendance"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => setConfirmOpen(false)}
-                  disabled={confirming}
-                >
-                  Go back
-                </Button>
-              </div>
-            </>
+            <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-4">
+              <button
+                type="button"
+                onClick={() => setConfirmOpen(true)}
+                disabled={!summary.canFinish}
+                className="inline-flex min-h-12 w-full items-center justify-center rounded-xl bg-neutral-900 px-5 text-base font-semibold text-white transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:bg-neutral-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2 sm:w-auto"
+              >
+                Finish attendance
+              </button>
+              {summary.finishBlockedReason ? (
+                <p className="text-center text-sm text-neutral-600 sm:text-left">{summary.finishBlockedReason}</p>
+              ) : null}
+            </div>
           )}
-        </section>
+        </div>
       )}
     </div>
   );
 }
 
-function Section({
+function Collapsible({
   title,
+  icon,
   count,
   shown,
-  filtering = false,
+  filtering,
+  open,
+  onToggle,
   emptyText,
-  tone,
   children,
 }: {
   title: string;
+  /** Decorative; the title says it in words. */
+  icon?: React.ReactNode;
   /** How many students are really in this list. */
   count: number;
   /** How many survive the current search. Equals `count` when not searching. */
   shown: number;
-  filtering?: boolean;
+  filtering: boolean;
+  open: boolean;
+  onToggle: () => void;
   emptyText: string;
-  tone: "neutral" | "present" | "review";
   children: React.ReactNode;
 }) {
-  const headerTone =
-    tone === "present"
-      ? "text-emerald-700"
-      : tone === "review"
-        ? "text-amber-700"
-        : "text-neutral-700";
+  const id = `list-${title.toLowerCase()}`;
   return (
-    <section className="overflow-hidden rounded-md border border-neutral-200">
-      <header className="flex items-baseline justify-between border-b border-neutral-200 bg-neutral-50 px-4 py-2">
-        <h2 className={`text-sm font-semibold ${headerTone}`}>{title}</h2>
-        {/* "2 of 43" while searching: the header must never be mistaken for
-            the size of the list it is heading. */}
-        <span className="text-xs tabular-nums text-neutral-500">
-          {filtering && shown !== count ? `${shown} of ${count}` : count}
-        </span>
-      </header>
-      {shown === 0 ? (
-        <p className="px-4 py-3 text-xs text-neutral-500">
-          {count > 0 ? "No student here matches your search." : emptyText}
-        </p>
-      ) : (
-        <ul>{children}</ul>
-      )}
+    <section className="overflow-hidden rounded-2xl border border-neutral-200 bg-white">
+      <h2>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          aria-controls={id}
+          disabled={filtering}
+          className="flex min-h-12 w-full items-center justify-between gap-3 px-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-neutral-900"
+        >
+          <span className="flex items-center gap-2 text-sm font-semibold text-neutral-900">
+            {icon}
+            {title}
+          </span>
+          <span className="flex items-center gap-2 text-sm tabular-nums text-neutral-600">
+            {/* "2 of 43" while searching: never mistaken for the size of the list. */}
+            {filtering && shown !== count ? `${shown} of ${count}` : count}
+            <span aria-hidden className={`text-neutral-400 transition-transform ${open ? "rotate-180" : ""}`}>
+              ▾
+            </span>
+          </span>
+        </button>
+      </h2>
+      {open ? (
+        <div id={id} className="border-t border-neutral-100">
+          {shown === 0 ? (
+            <p className="px-4 py-3 text-sm text-neutral-500">
+              {count > 0 ? "No student here matches your search." : emptyText}
+            </p>
+          ) : (
+            <ul className="divide-y divide-neutral-100">{children}</ul>
+          )}
+        </div>
+      ) : null}
     </section>
   );
 }
 
 /**
  * Optimistic list surgery. Moves one record between the three lists and
- * recomputes the counters from the lists themselves, so the displayed tally
- * can never disagree with the displayed rows.
+ * recomputes the counts from the lists themselves, so the displayed tally can
+ * never disagree with the displayed rows.
  */
 function moveStudent(
   board: AttendanceReviewBoard,
@@ -919,18 +915,18 @@ function moveStudent(
   const byName = (a: AttendanceReviewStudent, b: AttendanceReviewStudent) =>
     a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName);
 
-  // The same grouping rule the server applies: an unconfirmed suggestion
-  // belongs in Present, not in Needs Review. Splitting on `finalResult` alone
-  // would optimistically fling every *other* suggested row into Needs Review
-  // for the moment between the click and the refresh.
+  // The same grouping rule the server applies. A register written before
+  // recognised students were recorded present still holds suggestions, which
+  // belong with Present; splitting on `finalResult` alone would fling them
+  // into "Needs attention" for the moment between the tap and the refresh.
   const unresolved = (s: AttendanceReviewStudent) =>
     s.finalResult === "NEEDS_REVIEW" || s.finalResult === "NOT_EVALUATED";
   const suggestedPresent = (s: AttendanceReviewStudent) =>
     unresolved(s) && s.aiSuggestion === "PRESENT" && !s.isManuallyCorrected;
 
-  const present = [...rest.filter((s) => s.finalResult === "PRESENT" || suggestedPresent(s))];
-  const absent = [...rest.filter((s) => s.finalResult === "ABSENT")];
-  const needsReview = [...rest.filter((s) => unresolved(s) && !suggestedPresent(s))];
+  const present = rest.filter((s) => s.finalResult === "PRESENT" || suggestedPresent(s));
+  const absent = rest.filter((s) => s.finalResult === "ABSENT");
+  const needsReview = rest.filter((s) => unresolved(s) && !suggestedPresent(s));
   if (newResult === "PRESENT") present.push(moved);
   else if (newResult === "ABSENT") absent.push(moved);
   else needsReview.push(moved);
@@ -939,14 +935,24 @@ function moveStudent(
   absent.sort(byName);
   needsReview.sort(byName);
 
+  // Whether it can be finished, as the server will say on the next refresh:
+  // nobody left to decide, in review, and somebody on the register.
+  const canFinalize =
+    needsReview.length === 0 &&
+    board.session.processingStatus === "REVIEW" &&
+    present.length + absent.length > 0;
+
   return {
     ...board,
     present,
     absent,
     needsReview,
+    awaitingDecision: needsReview.length,
+    canFinalize,
+    finalizeBlockedReason: canFinalize ? null : board.finalizeBlockedReason,
     counts: {
       total: present.length + absent.length + needsReview.length,
-      present: present.length,
+      present: present.filter((s) => s.finalResult === "PRESENT").length,
       absent: absent.length,
       needsReview: needsReview.length,
       notEvaluated: 0,

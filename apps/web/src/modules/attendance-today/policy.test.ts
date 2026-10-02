@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   captureHref,
+  formatInTimeZone,
   institutionToday,
   planToday,
   registerStateOf,
@@ -45,6 +46,14 @@ test("date handling: today is the institution's date, not the server's", () => {
   // Early morning in India is still the previous day in UTC.
   const earlyIndia = institutionToday(new Date("2026-10-01T03:00:00Z"), "Asia/Kolkata", "en-US");
   assert.equal(earlyIndia.iso, "2026-10-01");
+});
+
+test("date handling: a register's date and start time read in the institution's timezone", () => {
+  const started = "2026-10-01T03:40:00Z"; // 09:10 in India
+  assert.equal(formatInTimeZone(started, "Asia/Kolkata", { hour: "2-digit", minute: "2-digit", hour12: false }, "en-US"), "09:10");
+  assert.equal(formatInTimeZone(started, "UTC", { hour: "2-digit", minute: "2-digit", hour12: false }, "en-US"), "03:40");
+  assert.equal(formatInTimeZone("2026-10-01T20:00:00Z", "Asia/Kolkata", { day: "numeric", month: "short" }, "en-US"), "Oct 2");
+  assert.equal(formatInTimeZone(started, "Not/AZone", { hour: "2-digit", hour12: false }, "en-US"), "03");
 });
 
 test("date handling: an unknown or missing timezone falls back to UTC instead of failing", () => {

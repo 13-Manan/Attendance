@@ -23,10 +23,11 @@ import type { AttendanceRosterStudent } from "./types.ts";
  * The Phase 6 attendance engine: the rules that decide what a register says,
  * and who is allowed to say it.
  *
- * The invariant every test here circles is one sentence: **the machine
- * produces evidence, a person produces attendance.** Everything else —
- * the state machine, the authorization matrix, the idempotency guards — exists
- * to keep that true when a real classroom is pressing buttons.
+ * The invariant every test here circles: **a confident recognition records a
+ * student present; everything else — every absence, every doubt — is decided by
+ * a person, and only a person closes the register.** Everything else — the
+ * state machine, the authorization matrix, the idempotency guards — exists to
+ * keep that true when a real classroom is pressing buttons.
  */
 
 // ---------------------------------------------------------------------------
@@ -371,9 +372,10 @@ test("generation refuses a finalized or cancelled session", async () => {
 // 2. Recognition → attendance mapping
 // ===========================================================================
 
-test("no recognition outcome produces a final result", () => {
-  // The table, exhaustively. Every combination must leave the register
-  // unresolved; the only differences are the evidence and the reason.
+test("only a confident match is recorded present; no outcome is ever recorded absent", () => {
+  // The table, exhaustively. A confident match (MATCHED, having survived every
+  // demotion) is recorded present; every other outcome leaves the register
+  // unresolved for a person. Nothing the machine finds is ever recorded absent.
   const cases: Array<[string, Parameters<typeof decideCandidate>[0], string]> = [
     [
       "MATCHED",
@@ -414,10 +416,13 @@ test("no recognition outcome produces a final result", () => {
 
   for (const [label, input, expectedAi] of cases) {
     const d = decideCandidate(input);
-    assert.equal(d.finalResult, "NEEDS_REVIEW", `${label} must not decide the register`);
     assert.equal(d.aiResult, expectedAi, `${label} evidence`);
     assert.notEqual(d.finalResult, "ABSENT", `${label} must never mean absent`);
-    assert.notEqual(d.finalResult, "PRESENT", `${label} must never mean present`);
+    if (label === "MATCHED") {
+      assert.equal(d.finalResult, "PRESENT", "a confident match is recorded present");
+    } else {
+      assert.equal(d.finalResult, "NEEDS_REVIEW", `${label} must wait for a person`);
+    }
   }
 });
 
@@ -456,17 +461,53 @@ test("only MATCHED carries a suggestion", () => {
   }
 });
 
+test("the test stand-in's matches stay suggestions: its faces are not real recognition", () => {
+  const d = decideCandidate({
+    aggregate: { advisoryResult: "PRESENT", bestSimilarity: 0.95, wasAmbiguous: false, bestFaceId: "1:0" },
+    recognitionRan: true,
+    hasComparableTemplate: true,
+    hasAnyTemplate: true,
+    recordConfidentMatches: false,
+  });
+  assert.equal(d.finalResult, "NEEDS_REVIEW");
+  assert.equal(d.note.aiSuggestion, "PRESENT", "shown in Present, recorded when the teacher finishes");
+});
+
+test("a register built by the test stand-in model keeps its matches as suggestions; any real model records them present", async () => {
+  const students = roster(2);
+  const standIn = makeStore(students);
+  await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition: runSummary({ modelName: "mock", perStudent: [suggestion("stu-001")] }) },
+    standIn.deps,
+  );
+  assert.equal(standIn.rows.get("stu-001")!.finalResult, "NEEDS_REVIEW");
+
+  const real = makeStore(students);
+  await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition: runSummary({ modelName: "opencv-yunet-sface", productionEligible: false, perStudent: [suggestion("stu-001")] }) },
+    real.deps,
+  );
+  assert.equal(real.rows.get("stu-001")!.finalResult, "PRESENT", "a real model, approved or not, records a confident match");
+});
+
 // ===========================================================================
 // 3. Register generation
 // ===========================================================================
 
-test("every enrolled student gets exactly one row, and none is decided", async () => {
+test("every enrolled student gets exactly one row: the recognised present, the rest waiting for a person", async () => {
   const { store } = await seed();
   assert.equal(store.rows.size, 5);
-  assert.ok(
-    Array.from(store.rows.values()).every((r) => r.finalResult === "NEEDS_REVIEW"),
-    "generation decides nothing",
-  );
+  for (const id of ["stu-001", "stu-002", "stu-003"]) {
+    const row = store.rows.get(id)!;
+    assert.equal(row.finalResult, "PRESENT", `${id} was recognised`);
+    assert.equal(row.isManuallyCorrected, false, "recorded by recognition, not by a person");
+  }
+  for (const id of ["stu-004", "stu-005"]) {
+    assert.equal(store.rows.get(id)!.finalResult, "NEEDS_REVIEW", `${id} was not found: a person decides`);
+  }
+  assert.equal(store.corrections.length, 0, "generation writes no correction rows");
 });
 
 test("regenerating does not duplicate a student", async () => {
@@ -586,8 +627,101 @@ test("finalization is blocked while an undecided row remains", async () => {
   await assert.rejects(() => confirmAttendance(makeUser(), "sess-1", store.deps), /unresolved/);
 });
 
-test("confirming converts every suggestion into a recorded faculty decision", async () => {
+test("finishing the register needs only the undecided rows; the recognised are not decided again", async () => {
   const { store } = await seed();
+  await resolveBlockers(store);
+  const before = store.corrections.length;
+  await confirmAttendance(makeUser({ userId: "user-head" }), "sess-1", store.deps);
+
+  assert.equal(store.corrections.length, before, "no approval written for a recognised student");
+  assert.equal(store.status, "FINALIZED");
+  for (const id of ["stu-001", "stu-002", "stu-003"]) {
+    assert.equal(store.rows.get(id)!.finalResult, "PRESENT");
+  }
+});
+
+test("everyone recognised: nothing needs the teacher, and the register finishes with no decision at all", async () => {
+  const students = roster(4);
+  const store = makeStore(students);
+  await generateAttendanceCandidates(
+    makeUser(),
+    {
+      sessionId: "sess-1",
+      recognition: runSummary({ detectedFacesTotal: 4, perStudent: students.map((s) => suggestion(s.studentId)) }),
+    },
+    store.deps,
+  );
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+  assert.deepEqual([board.present.length, board.needsReview.length, board.absent.length], [4, 0, 0]);
+  assert.equal(board.canFinalize, true, "zero review required");
+  await confirmAttendance(makeUser(), "sess-1", store.deps);
+  assert.equal(store.status, "FINALIZED");
+  assert.equal(store.corrections.length, 0, "nobody was decided by a person, so nobody has a correction row");
+});
+
+test("nobody recognised with confidence: every student waits for the teacher — none present, none absent", async () => {
+  const students = roster(4);
+  const store = makeStore(students);
+  await generateAttendanceCandidates(
+    makeUser(),
+    {
+      sessionId: "sess-1",
+      recognition: runSummary({ detectedFacesTotal: 4, perStudent: students.map((s) => review(s.studentId, 0.5)) }),
+    },
+    store.deps,
+  );
+  const results = Array.from(store.rows.values()).map((r) => r.finalResult);
+  assert.deepEqual(results, ["NEEDS_REVIEW", "NEEDS_REVIEW", "NEEDS_REVIEW", "NEEDS_REVIEW"]);
+  const board = await getAttendanceReviewBoard(makeUser(), "sess-1", store.deps);
+  assert.deepEqual([board.present.length, board.needsReview.length, board.absent.length], [0, 4, 0]);
+  assert.equal(board.canFinalize, false);
+});
+
+test("the generation's audit row names who recognition recorded present — and records no person approving them", async () => {
+  const { store } = await seed();
+  const generated = store.audits.filter((a) => a.action === "attendance.candidates_generated");
+  assert.equal(generated.length, 1);
+  const after = generated[0].afterJson as Record<string, unknown>;
+  assert.equal(after.confidentMatches, "recorded");
+  assert.equal(after.presentByRecognition, 3);
+  assert.deepEqual(after.presentByRecognitionStudentIds, ["stu-001", "stu-002", "stu-003"]);
+  assert.equal(after.needsReview, 2);
+  assert.equal(generated[0].actorUserId, "user-faculty", "the person who ran recognition, not an approver");
+  assert.equal(store.corrections.length, 0, "no AttendanceCorrection: no person decided these students");
+  assert.equal(
+    store.audits.some((a) => a.action !== "attendance.candidates_generated"),
+    false,
+    "and no other event pretends someone did",
+  );
+});
+
+test("the stand-in model's audit row says its matches were only suggested", async () => {
+  const store = makeStore(roster(2));
+  await generateAttendanceCandidates(
+    makeUser(),
+    { sessionId: "sess-1", recognition: runSummary({ modelName: "mock", perStudent: [suggestion("stu-001")] }) },
+    store.deps,
+  );
+  const after = store.audits.find((a) => a.action === "attendance.candidates_generated")!.afterJson as Record<string, unknown>;
+  assert.equal(after.confidentMatches, "suggested");
+  assert.equal(after.presentByRecognition, 0);
+  assert.deepEqual(after.presentByRecognitionStudentIds, []);
+});
+
+/**
+ * A register written before 2026-10-02, when a confident match was stored as
+ * an unconfirmed suggestion (`finalResult: NEEDS_REVIEW`, note `aiSuggestion:
+ * PRESENT`). Registers still in review at the change are finished through the
+ * same path they always were.
+ */
+async function seedLegacy() {
+  const { store, students } = await seed();
+  for (const id of ["stu-001", "stu-002", "stu-003"]) store.rows.get(id)!.finalResult = "NEEDS_REVIEW";
+  return { store, students };
+}
+
+test("a register written under the suggestion rule still converts each suggestion into a recorded decision", async () => {
+  const { store } = await seedLegacy();
   await resolveBlockers(store);
   const before = store.corrections.length;
   await confirmAttendance(makeUser({ userId: "user-head" }), "sess-1", store.deps);
@@ -796,7 +930,7 @@ test("an unguarded correction still writes, so the guard is opt-in", async () =>
 });
 
 test("confirming twice accepts each suggestion once", async () => {
-  const { store } = await seed();
+  const { store } = await seedLegacy();
   await resolveBlockers(store);
   const before = store.corrections.length;
   await confirmAttendance(makeUser(), "sess-1", store.deps);
@@ -810,7 +944,7 @@ test("confirming twice accepts each suggestion once", async () => {
 });
 
 test("every accepted suggestion carries exactly one correction", async () => {
-  const { store } = await seed();
+  const { store } = await seedLegacy();
   await resolveBlockers(store);
   await confirmAttendance(makeUser(), "sess-1", store.deps);
 

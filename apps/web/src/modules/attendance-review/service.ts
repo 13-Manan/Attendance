@@ -31,6 +31,7 @@ import type { Institution } from "@/modules/institutions/types";
 import { attendanceEventPublisher } from "@/modules/realtime/publisher";
 import type { AttendanceEventPublisher } from "@/modules/realtime/types";
 import type { RecognitionRunSummary } from "@/modules/recognition-engine/types";
+import { recognitionAvailability } from "@/modules/recognition-engine/wording";
 import { getSessionById, transitionSessionStatus } from "@/modules/sessions/repository";
 import {
   finalizeAttendanceSession as finalizeAttendanceSessionDefault,
@@ -239,35 +240,40 @@ export function initialsFor(firstName: string, lastName: string): string {
  * | recognition failed outright        | NOT_EVALUATED | -          | NEEDS_REVIEW |
  * | no usable face template            | NOT_EVALUATED | -          | NEEDS_REVIEW |
  * | no face detected in any capture    | NOT_EVALUATED | -          | NEEDS_REVIEW |
- * | matched above presentMin           | PRESENT       | PRESENT    | NEEDS_REVIEW |
+ * | matched above presentMin           | PRESENT       | PRESENT    | PRESENT      |
  * | uncertain / ambiguous / duplicate  | NEEDS_REVIEW  | -          | NEEDS_REVIEW |
  * | compared, nothing above reviewMin  | ABSENT        | -          | NEEDS_REVIEW |
  *
- * ## Every row ends in NEEDS_REVIEW, and that is the point
+ * ## A confident match is Present; everything else waits for a person
  *
- * `finalResult` is what the register records. Nothing the model produces
- * writes it, because the model produces *evidence* and evidence is not a
- * decision. Two rows changed in Phase 6 to make that true:
+ * `finalResult` is what the register records.
  *
- *  - **"compared, nothing above reviewMin" used to write ABSENT.** It was the
- *    one place the system asserted absence on its own. Failing to find
- *    somebody has many causes that are not the student being elsewhere: they
- *    were behind another student, facing away, at the back of a dark room, or
- *    outside the frame. The `aiResult` still records ABSENT — that is the
- *    honest summary of what the comparison found — but the register waits for
- *    a person.
- *  - **"matched above presentMin" used to write PRESENT.** A confident match
- *    is now a *suggestion*: it shows in the Present column marked as the
- *    model's proposal, and becomes a real PRESENT when a faculty member
- *    confirms it, individually or by confirming the register.
+ *  - **"matched above presentMin" writes PRESENT** (since 2026-10-02, by the
+ *    product owner's decision: a recognised student is confirmed present
+ *    without a separate approval, and the teacher's attention goes only to the
+ *    students who were not confidently recognised). "Confident" means the
+ *    match survived every demotion the engine applies — ambiguity between
+ *    students, a reassigned or duplicated face, a lookalike or twin, a
+ *    low-quality face — each of which lands in NEEDS_REVIEW instead. Phase 6
+ *    had made this row a suggestion the teacher confirmed; the register now
+ *    records it, and the teacher can still change it like any other row.
+ *  - **"compared, nothing above reviewMin" does NOT write ABSENT.** It is still
+ *    the one place the system would be asserting absence on its own, and
+ *    failing to find somebody has many causes that are not the student being
+ *    elsewhere: behind another student, facing away, at the back of a dark
+ *    room, outside the frame. `aiResult` records ABSENT — the honest summary
+ *    of what the comparison found — and the register waits for a person.
  *
- * So the only paths to a final PRESENT or ABSENT run through
- * `applyReviewDecision` or `confirmAttendance`, both of which require a
- * permission, record an actor, and append an `AttendanceCorrection` row.
+ * So no row is ever ABSENT without a person, no uncertain match is ever
+ * PRESENT, and nothing becomes final without a person: a register stays in
+ * review — invisible to students and reports — until a faculty member
+ * finalizes it. Every change a person makes goes through
+ * `applyReviewDecision`, which requires a permission, records an actor and
+ * appends an `AttendanceCorrection` row.
  *
- * `aiResult` keeps the machine's finding for every row regardless, so a
- * reviewer can always see what the model thought and a later investigation
- * can tell a human's decision from a machine's.
+ * `aiResult` keeps the machine's finding for every row regardless, and
+ * `isManuallyCorrected` stays false on a row recognition decided, so a later
+ * investigation can always tell a person's decision from the machine's.
  */
 /**
  * Why a matched-but-unconfirmed student needs a person, most specific first.
@@ -331,6 +337,13 @@ export function decideCandidate(args: {
   /** True when the run counted faces but the provider would not identify
    * them. Nobody was compared, so nobody is matched or ruled out. */
   identificationUnavailable?: boolean;
+  /**
+   * Whether a confident match is recorded present (the default) or kept as a
+   * suggestion the teacher confirms. Off only for the test stand-in model,
+   * whose "matches" are not real recognition — see
+   * `recognitionAvailability`, which calls that model "unavailable".
+   */
+  recordConfidentMatches?: boolean;
 }): {
   aiResult: AttendanceRecordRow["aiResult"];
   aiConfidence: number | null;
@@ -460,15 +473,15 @@ export function decideCandidate(args: {
   }
 
   if (agg.advisoryResult === "PRESENT") {
-    // A confident match is a proposal. It shows in the Present column marked
-    // as the model's suggestion and becomes a real PRESENT only when a
-    // faculty member confirms it — individually, or by confirming the
-    // register, which records them as the actor either way.
+    // A confident match is recorded present. It reached PRESENT only by
+    // surviving every demotion — ambiguous, reassigned, duplicated, lookalike
+    // and low-quality faces all arrive here as NEEDS_REVIEW — so the teacher's
+    // attention goes to the rows below, not to these. They can still change it.
     return {
       aiResult: "PRESENT",
       aiConfidence: agg.bestSimilarity,
       matchedEmbeddingId: agg.bestEmbeddingId ?? null,
-      finalResult: "NEEDS_REVIEW",
+      finalResult: args.recordConfidentMatches === false ? "NEEDS_REVIEW" : "PRESENT",
       note: {
         reason: null,
         aiSuggestion: "PRESENT",
@@ -942,6 +955,10 @@ export async function generateAttendanceCandidates(
     ? Math.max(0, ...(previous.captureImages ?? []).map((c) => c.sequenceNumber))
     : 0;
 
+  // A test stand-in cannot tell one real face from another: its matches stay
+  // suggestions. Every real model's confident match is recorded present.
+  const recordConfidentMatches = !recognition || recognitionAvailability(recognition) !== "unavailable";
+
   const notes: Record<string, StoredStudentNote> = {};
   const rows: AttendanceCandidateRow[] = [];
   for (const student of students) {
@@ -959,6 +976,7 @@ export async function generateAttendanceCandidates(
         recognitionRan &&
         recognition!.identification !== undefined &&
         recognition!.identification !== "enabled",
+      recordConfidentMatches,
     });
     const row: AttendanceCandidateRow = {
       institutionId: session.institutionId,
@@ -1040,6 +1058,18 @@ export async function generateAttendanceCandidates(
     await transition(session.id, "PROCESSING", "REVIEW");
   }
 
+  const listRecords = deps.listAttendanceRecords ?? listAttendanceRecordRowsForSession;
+  const persisted = await listRecords(session.id);
+
+  // Who recognition recorded present, on the record of this generation. The
+  // actor is the person who ran it — they took the photo — and nothing here is
+  // a teacher's approval: those students have no AttendanceCorrection row,
+  // because no person decided them. A later change to any of them is a
+  // correction with its own actor, and this row keeps what recognition did.
+  const recordedPresent = persisted
+    .filter((r) => r.finalResult === "PRESENT" && r.aiResult === "PRESENT" && !r.isManuallyCorrected)
+    .map((r) => r.studentId)
+    .sort();
   const auditFn = deps.recordAuditLog ?? ((i: RecordAuditLogInput) => defaultRecordAuditLog(i));
   await auditFn({
     action: "attendance.candidates_generated",
@@ -1053,11 +1083,14 @@ export async function generateAttendanceCandidates(
       rosterSize: students.length,
       created: written.created,
       refreshed: written.refreshed,
+      // "recorded": a confident match is recorded present (since 2026-10-02);
+      // "suggested": the test stand-in, whose matches stay suggestions.
+      confidentMatches: recordConfidentMatches ? "recorded" : "suggested",
+      presentByRecognition: recordedPresent.length,
+      presentByRecognitionStudentIds: recordedPresent,
+      needsReview: persisted.filter((r) => r.finalResult === "NEEDS_REVIEW" || r.finalResult === "NOT_EVALUATED").length,
     },
   });
-
-  const listRecords = deps.listAttendanceRecords ?? listAttendanceRecordRowsForSession;
-  const persisted = await listRecords(session.id);
 
   // `attendance.created` — the register now exists. Sent once per generation
   // with counts rather than one event per student: a class of sixty would

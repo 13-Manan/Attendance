@@ -73,15 +73,16 @@ export function describeRecognitionAvailability(
       return {
         availability,
         headline: "Face recognition ready",
-        detail: "Recognition results require confirmation. Nothing counts until you confirm it.",
+        detail:
+          "Recognised students are marked present; anyone not recognised waits for you. Nothing is final until you finish the register.",
         diagnostics,
       };
     case "not_approved":
       return {
         availability,
-        headline: "Recognition results require confirmation",
+        headline: "Check recognised students before finishing",
         detail:
-          "Faces are compared for real, but the recognition model is not approved for production use. Treat every match as a suggestion and confirm each student yourself.",
+          "Faces are compared for real, but this recognition model is not approved for production use. Recognised students are marked present — check the present list before you finish.",
         diagnostics,
       };
     case "identification_pending":
@@ -136,7 +137,7 @@ export function recognitionCountLabels(c: RecognitionCounts): {
   unknownFaces: string;
 } {
   return {
-    present: plural(c.present, "Present suggestion", "Present suggestions"),
+    present: `${c.present} Present`,
     review: `${c.review} ${c.review === 1 ? "Needs review" : "Need review"}`,
     notDetected: `${c.notDetected} Not detected`,
     unknownFaces: plural(c.unknownFaces, "Unknown face", "Unknown faces"),

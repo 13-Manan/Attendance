@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
-import { CameraIcon, CheckIcon, PlusIcon, RetakeIcon, Spinner, SwitchCameraIcon } from "@/components/attendance/icons";
+import { AlertIcon, CameraIcon, CheckIcon, PlusIcon, RetakeIcon, Spinner, SwitchCameraIcon } from "@/components/attendance/icons";
 import type {
   CaptureImageAnalysis,
   CaptureSessionSummary,
@@ -34,6 +34,7 @@ import {
   summarizeCaptureFlow,
 } from "@/modules/attendance-capture/flow-actions";
 import { useClassroomCamera } from "@/modules/attendance-capture/use-classroom-camera";
+import { reviewButtonLabel } from "@/modules/attendance-review/review-flow";
 import type { GenerateAttendanceCandidatesResult } from "@/modules/attendance-review/service";
 import type { RecognitionRunSummary } from "@/modules/recognition-engine/types";
 import type { AttendanceMode } from "@/modules/institutions/types";
@@ -1046,6 +1047,7 @@ export function CaptureWizard({
   const perStudent = recognition?.perStudent ?? [];
   const ready = readySummaryOf({
     total: generation?.counts.total ?? summary?.enrolledStudentCount ?? started?.enrolledStudentCount ?? 0,
+    present: generation?.counts.present,
     recognition: recognition
       ? {
           recognised: perStudent.filter((s) => s.advisoryResult === "PRESENT").length,
@@ -1101,7 +1103,7 @@ export function CaptureWizard({
           <>
             {canReview && reviewHref ? (
               <ActionButton tone="light" size="lg" onClick={() => router.push(reviewHref)}>
-                Review attendance
+                {ready.toCheck > 0 ? reviewButtonLabel(ready.toCheck) : "Review and finish"}
               </ActionButton>
             ) : (
               <p className="rounded-lg bg-neutral-50 px-3 py-2 text-sm text-neutral-700">
@@ -1143,16 +1145,23 @@ export function CaptureWizard({
               <p className="text-sm text-neutral-500">{subtitle ? `${context.title} · ${subtitle}` : context.title}</p>
             </div>
             <dl className="grid grid-cols-3 gap-2 text-center">
+              {/* Labels share a two-line height, so the numbers stay level when "Need attention" wraps on a narrow phone. */}
               <div className="flex flex-col-reverse rounded-xl bg-emerald-50 px-2 py-3">
-                <dt className="text-xs text-emerald-900">Recognised</dt>
-                <dd className="text-2xl font-semibold tabular-nums text-emerald-800">{ready.recognised}</dd>
+                <dt className="flex min-h-8 items-center justify-center text-xs leading-4 text-emerald-900">Present</dt>
+                <dd className="flex items-center justify-center gap-1 text-2xl font-semibold tabular-nums text-emerald-800">
+                  <CheckIcon className="size-5" />
+                  {ready.present}
+                </dd>
               </div>
               <div className="flex flex-col-reverse rounded-xl bg-amber-50 px-2 py-3">
-                <dt className="text-xs text-amber-900">To check</dt>
-                <dd className="text-2xl font-semibold tabular-nums text-amber-800">{ready.toCheck}</dd>
+                <dt className="flex min-h-8 items-center justify-center text-xs leading-4 text-amber-900">Need attention</dt>
+                <dd className="flex items-center justify-center gap-1 text-2xl font-semibold tabular-nums text-amber-800">
+                  <AlertIcon className="size-5" />
+                  {ready.toCheck}
+                </dd>
               </div>
               <div className="flex flex-col-reverse rounded-xl bg-neutral-100 px-2 py-3">
-                <dt className="text-xs text-neutral-700">Students</dt>
+                <dt className="flex min-h-8 items-center justify-center text-xs leading-4 text-neutral-700">Students</dt>
                 <dd className="text-2xl font-semibold tabular-nums text-neutral-900">{ready.total}</dd>
               </div>
             </dl>
@@ -1171,9 +1180,11 @@ export function CaptureWizard({
               </ul>
             ) : null}
             <p className="text-center text-sm text-neutral-600">
-              {canReview
-                ? "Recognised students are suggestions. Nothing is final until you confirm it on the next screen."
-                : "Recognised students are suggestions until the register is confirmed."}
+              {ready.toCheck === 0
+                ? "Everyone was recognised. Finish attendance on the next screen."
+                : canReview
+                  ? `Recognised students are already marked present. Review the ${ready.toCheck === 1 ? "student who needs" : `${ready.toCheck} students who need`} attention, then finish.`
+                  : "Recognised students are marked present. The class's teacher checks the rest and finishes the register."}
             </p>
             {availability?.diagnostics ? (
               <p className="text-center font-mono text-[11px] text-neutral-400">{availability.diagnostics}</p>
