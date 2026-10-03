@@ -1,4 +1,4 @@
-import type { ConflictEvent, DecisionEvent, PairConflict } from "./types";
+import type { ConflictEvent, DecisionEvent, PairConflict, StandingDecision } from "./types";
 
 /**
  * The pure half of twin confirmations: naming a pair, and folding the audit
@@ -35,23 +35,54 @@ export function parsePairKey(key: unknown): [string, string] | null {
 }
 
 /**
+ * Each pair's latest decision row — the one that stands, whatever its kind.
+ * The same "latest wins" rule the enrollment check reads (repository.ts).
+ */
+export function latestDecisionByPair(decisions: readonly DecisionEvent[]): Map<string, DecisionEvent> {
+  const latest = new Map<string, DecisionEvent>();
+  for (const decision of decisions) {
+    const current = latest.get(decision.pair);
+    if (!current || isLater(decision, current)) latest.set(decision.pair, decision);
+  }
+  return latest;
+}
+
+/** A latest row that is a decision, not the withdrawal of one. */
+export function standingOf(decision: DecisionEvent | null | undefined): StandingDecision | null {
+  return decision && decision.decision !== "withdrawn" ? (decision as StandingDecision) : null;
+}
+
+/**
+ * Pairs whose standing decision is a declaration made in advance: marked as
+ * known twins or lookalikes, and neither withdrawn nor overruled by a review
+ * since. Keyed by pair.
+ */
+export function declaredPairs(decisions: readonly DecisionEvent[]): Map<string, StandingDecision> {
+  const declared = new Map<string, StandingDecision>();
+  for (const [pair, latest] of latestDecisionByPair(decisions)) {
+    if (latest.decision === "confirmed" && latest.source === "declared" && parsePairKey(pair)) {
+      declared.set(pair, latest as StandingDecision);
+    }
+  }
+  return declared;
+}
+
+/**
  * Every pair with at least one conflict, and where each stands.
  *
  * A pair is pending until somebody decides; after that the latest decision is
  * its state. A conflict recorded after a decision does not reopen it — a
  * student retrying after "not confirmed" must not put the pair back in front
- * of staff on every attempt. Decisions about a pair with no conflict are
- * ignored: there is nothing for them to apply to.
+ * of staff on every attempt. A withdrawn declaration is no decision, so a
+ * conflict about that pair is pending again. Decisions about a pair with no
+ * conflict are ignored here: there is nothing for them to apply to (declared
+ * pairs are listed on their own — `declaredPairs`).
  */
 export function foldPairs(
   conflicts: readonly ConflictEvent[],
   decisions: readonly DecisionEvent[],
 ): PairConflict[] {
-  const latestDecision = new Map<string, DecisionEvent>();
-  for (const decision of decisions) {
-    const current = latestDecision.get(decision.pair);
-    if (!current || isLater(decision, current)) latestDecision.set(decision.pair, decision);
-  }
+  const latestDecision = latestDecisionByPair(decisions);
 
   const pairs = new Map<string, PairConflict>();
   for (const conflict of conflicts) {
@@ -83,7 +114,7 @@ export function foldPairs(
   }
 
   for (const pair of pairs.values()) {
-    const decision = latestDecision.get(pair.pair) ?? null;
+    const decision = standingOf(latestDecision.get(pair.pair));
     pair.decision = decision;
     pair.state = decision ? decision.decision : "pending";
   }

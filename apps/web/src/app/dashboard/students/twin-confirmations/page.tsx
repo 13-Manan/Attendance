@@ -1,9 +1,10 @@
 import { redirect } from "next/navigation";
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { ForbiddenError } from "@/modules/authorization/types";
-import { listTwinConfirmations } from "@/modules/twin-confirmation/service";
-import type { TwinConfirmationList } from "@/modules/twin-confirmation/types";
+import { listKnownTwinPairs, listTwinConfirmations } from "@/modules/twin-confirmation/service";
+import type { KnownTwinPairList, TwinConfirmationList } from "@/modules/twin-confirmation/types";
 import { PageTrail } from "@/components/nav/page-trail";
+import { KnownPairsSection } from "./known-pairs";
 import { TwinConfirmationListView } from "./twin-views";
 
 interface PageProps {
@@ -23,14 +24,17 @@ export default async function TwinConfirmationsPage({ searchParams }: PageProps)
   const query = await searchParams;
 
   let list: TwinConfirmationList;
+  let known: KnownTwinPairList;
   try {
-    list = await listTwinConfirmations(user);
+    [list, known] = await Promise.all([listTwinConfirmations(user), listKnownTwinPairs(user)]);
   } catch (error) {
     if (error instanceof ForbiddenError) redirect("/unauthorized");
     throw error;
   }
 
   const decided = typeof query.decided === "string" ? query.decided : null;
+  // Sent from a student's record to mark a pair with them in it.
+  const declare = typeof query.declare === "string" ? query.declare : null;
 
   return (
     <div className="flex w-full max-w-4xl flex-col gap-5">
@@ -47,7 +51,19 @@ export default async function TwinConfirmationsPage({ searchParams }: PageProps)
           confirm this for themselves.
         </p>
       </header>
-      <TwinConfirmationListView list={list} itemHref={(pair) => `${BASE}/${encodeURIComponent(pair)}`} decided={decided} />
+      <TwinConfirmationListView
+        list={list}
+        itemHref={(pair) => `${BASE}/${encodeURIComponent(pair)}`}
+        decided={decided}
+        known={
+          <KnownPairsSection
+            list={known}
+            departmentId={null}
+            initialStudentId={declare}
+            studentHref={(studentId) => `/dashboard/students/${encodeURIComponent(studentId)}`}
+          />
+        }
+      />
     </div>
   );
 }

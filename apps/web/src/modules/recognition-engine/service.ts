@@ -516,6 +516,38 @@ export function findLookalikeStudents(
 }
 
 /**
+ * The lookalikes a run applies: those `findLookalikeStudents` found from the
+ * templates, plus every pair staff declared known twins or lookalikes in this
+ * class (modules/twin-confirmation, `knownTwinPairsInClass`).
+ *
+ * A declaration can only add to the set, and the set can only demote: a
+ * confident match to either student of a declared pair is reviewed, exactly
+ * as for twins found from their faces. It matters most where the faces
+ * cannot speak — one twin enrolled and the other not, where a confident match
+ * to the enrolled twin may be the other one (docs/FACE_ROBUSTNESS_AUDIT.md
+ * §4.14: 5.8–51.2% wrong-twin present with only one enrolled). Nothing about
+ * scoring, thresholds or assignment changes, and no other pair is touched.
+ */
+export function withKnownTwinPairs(
+  found: ReadonlyMap<string, ReadonlySet<string>> | undefined,
+  knownPairs: ReadonlyArray<readonly [string, string]>,
+): Map<string, Set<string>> {
+  const merged = new Map<string, Set<string>>();
+  for (const [studentId, others] of found ?? []) merged.set(studentId, new Set(others));
+  const note = (a: string, b: string) => {
+    const set = merged.get(a) ?? new Set<string>();
+    set.add(b);
+    merged.set(a, set);
+  };
+  for (const [a, b] of knownPairs) {
+    if (a === b) continue;
+    note(a, b);
+    note(b, a);
+  }
+  return merged;
+}
+
+/**
  * How many distinct unknown people a run saw.
  *
  * An unknown face in photo 1 and one in photo 2 may be the same visitor.
@@ -747,6 +779,17 @@ export interface RunRecognitionForSessionDeps {
    */
   detectTimeoutMs?: number;
   now?: () => Date;
+  /**
+   * Pairs staff declared known twins or lookalikes, among this class's
+   * students on roll (see `withKnownTwinPairs`). Defaults to the database
+   * read when the candidate loaders are the database ones, like
+   * `countIneligibleTemplates`; a run with injected loaders has none unless
+   * it injects this too.
+   */
+  loadKnownTwinPairs?: (
+    institutionId: string,
+    cohortId: string,
+  ) => Promise<ReadonlyArray<readonly [string, string]>>;
 }
 
 /** Rejects with `face_ai_timeout` if `promise` has not settled within `ms`. */
@@ -1170,6 +1213,21 @@ export async function runRecognitionForSession(
     calibration: resolveCalibration(modelInfo),
   };
 
+  // Twins and lookalikes staff declared in this class. Read before any
+  // photograph is sent anywhere, and never cached: a declaration made or
+  // removed a moment ago applies to this run. A read that fails fails the
+  // run — a run that does not know who the twins are must not mark either of
+  // them present — and the teacher retries or marks the register by hand.
+  const loadKnownTwinPairs =
+    deps.loadKnownTwinPairs ??
+    (deps.loadCandidateEmbeddings || deps.loadSubjectCandidateEmbeddings || deps.loadGalleryCandidates
+      ? async () => []
+      : async (institutionId: string, cohortId: string) => {
+          const { knownTwinPairsInClass } = await import("@/modules/twin-confirmation/service");
+          return knownTwinPairsInClass(institutionId, cohortId);
+        });
+  const knownTwinPairs = await loadKnownTwinPairs(session.institutionId, session.cohortId);
+
   // Two front halves, one back half. Each front half decides who every face
   // might be — by comparing vectors here, or by asking the provider that holds
   // the class gallery — and everything after that (one-to-one assignment,
@@ -1179,6 +1237,7 @@ export async function runRecognitionForSession(
     : await scoreAgainstEmbeddings(session, input, modelInfo, scoredPolicy, deps);
   const scoredFaces = run.faces;
   const runPolicy = run.policy;
+  const lookalikes = withKnownTwinPairs(run.lookalikes, knownTwinPairs);
 
   const detectedFacesTotal = scoredFaces.length;
   const scoredFacesTotal = scoredFaces.filter((f) => f.scored).length;
@@ -1272,13 +1331,11 @@ export async function runRecognitionForSession(
       runnerUp = scored.runnerUp;
       if (scored.wasAmbiguous) demotions.push("ambiguous");
     }
-    if (
-      decision === "MATCHED" &&
-      (run.lookalikes?.get(given.studentId)?.size ?? 0) > 0
-    ) {
+    if (decision === "MATCHED" && (lookalikes.get(given.studentId)?.size ?? 0) > 0) {
       // Somebody else in this class whose own enrolled face the recogniser
-      // would confidently call this student's — an identical twin. It cannot
-      // tell them apart reliably, so it does not choose between them.
+      // would confidently call this student's — an identical twin — or whom
+      // staff declared this student's twin or lookalike. It cannot tell them
+      // apart reliably, so it does not choose between them.
       demotions.push("ambiguous");
       decision = "UNCERTAIN";
     }
@@ -1355,6 +1412,7 @@ export async function runRecognitionForSession(
 
   logRecognitionRun(summary, {
     lookalikeStudents: run.lookalikes?.size ?? 0,
+    knownTwinStudents: new Set(knownTwinPairs.flat()).size,
     candidateTemplates: run.candidateTemplates ?? null,
     ineligible: run.ineligible ?? null,
   });
@@ -1376,6 +1434,7 @@ function logRecognitionRun(
   summary: RecognitionRunSummary,
   extra: {
     lookalikeStudents: number;
+    knownTwinStudents: number;
     candidateTemplates: number | null;
     ineligible: IneligibleTemplateCounts | null;
   },
@@ -1410,6 +1469,9 @@ function logRecognitionRun(
       // How many students in the pool have a lookalike in it (see
       // findLookalikeStudents) — a count, never who.
       lookalikeStudents: extra.lookalikeStudents,
+      // How many students in this class staff declared a twin or lookalike
+      // of another student in it (see withKnownTwinPairs) — a count, never who.
+      knownTwinStudents: extra.knownTwinStudents,
       // Eligibility (modules/recognition-results/eligibility.ts), as counts:
       // the templates compared, and the live templates of students in this
       // class that were kept out — archived students, rows that disagree

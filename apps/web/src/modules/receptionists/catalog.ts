@@ -136,7 +136,7 @@ export const ACCESS_ITEMS: AccessItem[] = [
     group: "students",
     label: "Twin and lookalike decisions",
     description:
-      "Confirm that two students who look alike are different people, which unblocks their face enrollment. Face enrollment does not include this.",
+      "Confirm — or mark in advance — that two students who look alike are different people, which unblocks their face enrollment. Face enrollment does not include this.",
     grants: ["twinConfirmation.decide"],
     requires: ["students.directory"],
     defaultOn: false,

@@ -11,6 +11,7 @@ import {
   LOOKALIKE_REVIEW_BAND_MATCHES,
   runRecognitionForSession,
   scoreFaceAgainstCandidates,
+  withKnownTwinPairs,
 } from "./service.ts";
 import { DEFAULT_AMBIGUITY_MARGIN, DEFAULT_MIN_DETECTION_CONFIDENCE } from "./types.ts";
 import type { CandidateTemplate, FaceRecognitionResult, RecognitionPolicy } from "./types.ts";
@@ -1907,3 +1908,141 @@ test("the run log counts lookalikes without naming anybody", async () => {
   assert.equal(run.lookalikeStudents, 2);
   assert.doesNotMatch(lines.join("\n"), /twin-a|twin-b/);
 });
+
+// ---------------------------------------------------------------------------
+// Twins staff declared in advance (modules/twin-confirmation)
+// ---------------------------------------------------------------------------
+//
+// A declared pair joins the lookalikes the templates reveal: a match to either
+// student is reviewed, never marked present on the recogniser's word. It
+// matters most where the faces cannot speak — one twin enrolled, the other
+// not — and it can only ever make an answer more cautious.
+
+test("withKnownTwinPairs adds each declared pair both ways, keeps what the templates found, and changes nothing else", () => {
+  const found = new Map([["a", new Set(["b"])], ["b", new Set(["a"])]]);
+  const merged = withKnownTwinPairs(found, [
+    ["c", "d"],
+    ["a", "e"],
+    ["f", "f"],
+  ]);
+  assert.deepEqual([...merged.get("a")!].sort(), ["b", "e"]);
+  assert.deepEqual([...merged.get("b")!], ["a"]);
+  assert.deepEqual([...merged.get("c")!], ["d"]);
+  assert.deepEqual([...merged.get("d")!], ["c"]);
+  assert.deepEqual([...merged.get("e")!], ["a"]);
+  assert.equal(merged.has("f"), false, "a student is never their own twin");
+  assert.deepEqual([...found.get("a")!], ["b"], "what the templates found is not modified");
+  assert.equal(withKnownTwinPairs(undefined, []).size, 0);
+});
+
+test("a declared twin with no face enrolled: a confident match to the enrolled twin goes to review", async () => {
+  // Twin A is enrolled; twin B is in the class but has no samples, so the
+  // templates cannot show they look alike — and a confident match to A may be B.
+  const pool = [{ ...studentRow(0), studentId: "twin-a", id: "emb-twin-a" }, studentRow(2)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.95 })), detectedFace(1, faceMix({ 2: 0.95 }))];
+  const asked: Array<[string, string]> = [];
+  const deps = {
+    ...harness({ pool, faces }).deps,
+    loadKnownTwinPairs: async (institutionId: string, cohortId: string) => {
+      asked.push([institutionId, cohortId]);
+      return [["twin-a", "twin-b"]] as const;
+    },
+  };
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, deps);
+  const students = byStudent(summary);
+  assert.equal(students.get("twin-a")?.advisoryResult, "NEEDS_REVIEW");
+  assert.ok((students.get("twin-a")?.downgrades as string[]).includes("ambiguous_face"));
+  // An unrelated classmate in the same photograph is unaffected.
+  assert.equal(students.get("stu-2")?.advisoryResult, "PRESENT");
+  // Read for this session's own class.
+  assert.deepEqual(asked, [["inst-A", "co-1"]]);
+});
+
+test("without a declaration the same photograph marks the enrolled twin present — today's behaviour, unchanged", async () => {
+  const pool = [{ ...studentRow(0), studentId: "twin-a", id: "emb-twin-a" }, studentRow(2)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.95 })), detectedFace(1, faceMix({ 2: 0.95 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, {
+    ...harness({ pool, faces }).deps,
+    loadKnownTwinPairs: async () => [],
+  });
+  assert.equal(byStudent(summary).get("twin-a")?.advisoryResult, "PRESENT");
+});
+
+test("a declared pair touches its own two students only", async () => {
+  const pool = [studentRow(0), studentRow(2)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.95 })), detectedFace(1, faceMix({ 2: 0.95 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, {
+    ...harness({ pool, faces }).deps,
+    // stu-0's twin is stu-9; stu-2 has nobody.
+    loadKnownTwinPairs: async () => [["stu-0", "stu-9"]] as const,
+  });
+  const students = byStudent(summary);
+  assert.equal(students.get("stu-0")?.advisoryResult, "NEEDS_REVIEW");
+  assert.equal(students.get("stu-2")?.advisoryResult, "PRESENT");
+});
+
+test("a declaration never lifts a match: a review-band face stays in review, an unknown face stays unknown", async () => {
+  const pool = [{ ...studentRow(0), studentId: "twin-a", id: "emb-twin-a" }];
+  const faces = [detectedFace(1, faceMix({ 0: 0.5 })), detectedFace(1, faceMix({ 7: 0.95 }))];
+  const withPair = await runRecognitionForSession(makeUser(), ONE_IMAGE, {
+    ...harness({ pool, faces }).deps,
+    loadKnownTwinPairs: async () => [["twin-a", "twin-b"]] as const,
+  });
+  const without = await runRecognitionForSession(makeUser(), ONE_IMAGE, {
+    ...harness({ pool, faces }).deps,
+    loadKnownTwinPairs: async () => [],
+  });
+  assert.equal(byStudent(withPair).get("twin-a")?.advisoryResult, "NEEDS_REVIEW");
+  assert.deepEqual(
+    withPair.perFace.map((f) => [f.candidateStudentId, f.decision]),
+    without.perFace.map((f) => [f.candidateStudentId, f.decision]),
+  );
+  assert.equal(withPair.unknownFacesTotal, without.unknownFacesTotal);
+});
+
+test("both declared twins in one photograph: one face each, and both reviewed", async () => {
+  // Their templates are far apart, so only the declaration says they are twins.
+  const pool = [studentRow(0), studentRow(3)];
+  const faces = [detectedFace(1, faceMix({ 0: 0.95 })), detectedFace(1, faceMix({ 3: 0.95 }))];
+  const summary = await runRecognitionForSession(makeUser(), ONE_IMAGE, {
+    ...harness({ pool, faces }).deps,
+    loadKnownTwinPairs: async () => [["stu-0", "stu-3"]] as const,
+  });
+  assert.deepEqual(summary.perFace.map((f) => f.candidateStudentId), ["stu-0", "stu-3"], "one-to-one still holds");
+  for (const s of summary.perStudent) assert.equal(s.advisoryResult, "NEEDS_REVIEW");
+});
+
+test("a run that cannot read the declared twins fails before any photograph is sent", async () => {
+  const h = harness({ pool: [studentRow(0)], faces: [detectedFace(1, faceMix({ 0: 0.95 }))] });
+  await assert.rejects(
+    runRecognitionForSession(makeUser(), ONE_IMAGE, {
+      ...h.deps,
+      loadKnownTwinPairs: async () => {
+        throw new Error("database unavailable");
+      },
+    }),
+    /database unavailable/,
+  );
+  assert.equal(h.calls.detectEmbed.length, 0);
+});
+
+test("the run log counts declared twins without naming anybody", async () => {
+  const pool = [{ ...studentRow(0), studentId: "twin-a", id: "emb-twin-a" }];
+  const faces = [detectedFace(1, faceMix({ 0: 0.95 }))];
+  const lines: string[] = [];
+  const original = console.info;
+  console.info = (line: string) => void lines.push(line);
+  try {
+    await runRecognitionForSession(makeUser(), ONE_IMAGE, {
+      ...harness({ pool, faces }).deps,
+      loadKnownTwinPairs: async () => [["twin-a", "twin-b"]] as const,
+    });
+  } finally {
+    console.info = original;
+  }
+  const run = JSON.parse(lines.find((l) => l.includes("recognition.run"))!);
+  assert.equal(run.knownTwinStudents, 2);
+  assert.equal(run.lookalikeStudents, 0, "the templates alone found nothing");
+  assert.doesNotMatch(lines.join("\n"), /twin-a|twin-b/);
+});
+

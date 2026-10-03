@@ -37,7 +37,11 @@ this document is the overview.
   recogniser cannot tell apart is found from its own templates and sent to
   review; with five samples each, the wrong-twin rate fell to **0.0%** for
   three of the four pairs measured at that size. With one sample each, or
-  with only one twin enrolled, it cannot be prevented.
+  with only one twin enrolled, the faces alone cannot prevent it. Since
+  2026-10-03 staff who know two students are twins can mark them in advance
+  (Twin / Lookalike confirmations); a declared pair in a class is treated as
+  lookalikes whether or not both are enrolled, so a match to either goes to
+  review instead.
 - **Lookalikes are enrolled, not refused.** The enrolment check applied a
   per-class threshold to the whole institution and would have refused most
   new students' photographs at a few hundred students.

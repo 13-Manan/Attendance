@@ -1,7 +1,9 @@
 import Link from "next/link";
+import type { ReactNode } from "react";
 import type {
   TwinConfirmationDetail,
   TwinConfirmationList,
+  TwinHistoryEntry,
   TwinPairState,
   TwinReviewItem,
   TwinStudentSummary,
@@ -32,7 +34,7 @@ const STATE_TONE: Record<TwinPairState, BadgeTone> = {
   rejected: "danger",
 };
 
-const MOMENT_FORMAT = new Intl.DateTimeFormat("en-GB", {
+export const MOMENT_FORMAT = new Intl.DateTimeFormat("en-GB", {
   day: "numeric",
   month: "short",
   year: "numeric",
@@ -42,12 +44,21 @@ const MOMENT_FORMAT = new Intl.DateTimeFormat("en-GB", {
 
 export const TWIN_REASON = "Face enrollment appears similar to an existing enrolled student.";
 
-function name(student: TwinStudentSummary): string {
+export function name(student: { firstName: string; lastName: string }): string {
   return `${student.firstName} ${student.lastName}`.trim();
 }
 
-function classes(student: TwinStudentSummary): string {
+export function classes(student: { classes: string[] }): string {
   return student.classes.length > 0 ? student.classes.join(", ") : "Not in a class";
+}
+
+/** A decision in a pair's history, in words. */
+function historyLabel(entry: TwinHistoryEntry): string {
+  if (entry.kind === "withdrawn") return "Known twin/lookalike declaration removed";
+  if (entry.kind === "confirmed") {
+    return entry.source === "declared" ? "Marked as known twin/lookalike" : "Confirmed different people";
+  }
+  return "Not confirmed";
 }
 
 function faceStatus(student: TwinStudentSummary): string {
@@ -119,10 +130,13 @@ export function TwinConfirmationListView({
   list,
   itemHref,
   decided,
+  known,
 }: {
   list: TwinConfirmationList;
   itemHref: (pair: string) => string;
   decided: string | null;
+  /** Pairs marked in advance, and the way to mark one — between the queue and its history. */
+  known?: ReactNode;
 }) {
   return (
     <>
@@ -145,6 +159,8 @@ export function TwinConfirmationListView({
           </ul>
         )}
       </Panel>
+
+      {known}
 
       {list.decided.length > 0 ? (
         <Panel title="Decided" description="A decision can be changed: open the pair and decide again. Every decision is recorded.">
@@ -241,9 +257,7 @@ export function TwinConfirmationReviewView({
             {history.map((entry, index) => (
               <li key={index} className="flex flex-wrap items-baseline justify-between gap-2 py-2 text-sm first:pt-0">
                 <span className="text-neutral-800">
-                  {entry.kind === "conflict"
-                    ? entry.detail
-                    : `${entry.kind === "confirmed" ? "Confirmed different people" : "Not confirmed"} — ${entry.detail}`}
+                  {entry.kind === "conflict" ? entry.detail : `${historyLabel(entry)} — ${entry.detail}`}
                 </span>
                 <span className="text-xs text-neutral-500">{MOMENT_FORMAT.format(entry.at)}</span>
               </li>

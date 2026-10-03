@@ -131,6 +131,7 @@ export const AUDIT_MODULES: readonly AuditModule[] = [
       "face_enrollment.distinct_person_confirmed",
       "face_twin_confirmation.confirmed",
       "face_twin_confirmation.rejected",
+      "face_twin_confirmation.withdrawn",
       "face_enrollment.deactivated",
       "face_enrollment.deleted",
       "face_data.retention_purged",

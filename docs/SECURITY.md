@@ -103,7 +103,18 @@ Three keys, all pre-existing, none invented for this work:
   classes; a college HOD for pairs inside their department's current
   sections; and a school receptionist whom the principal has explicitly given
   `twinConfirmation.decide` (§10 — off by default, and not implied by enrolling
-  faces). A student, a teacher who is not
+  faces). The same people may also **mark a pair as known twins or
+  lookalikes in advance**, before either face is enrolled: the same
+  `face_twin_confirmation.confirmed` decision on the same pair key, with
+  `source: "declared"`, recorded once per pair under a per-pair lock. It
+  waives that pair's duplicate check exactly as a review does — the quality
+  gates and the student's own-sample check still apply — and, unlike a
+  review, it reaches attendance: a recognition run treats a declared pair in
+  its class as lookalikes, so a match to either is reviewed and never marked
+  present on the recogniser's word (`withKnownTwinPairs`). Removing a
+  declaration writes `face_twin_confirmation.withdrawn`, which returns the pair
+  to no decision (not to "not confirmed"); no face sample, register or record
+  is touched. A student, a teacher who is not
   the class teacher, department faculty and operators are refused by the
   server, and a student is never told who they matched. The decision waives
   that one pair's collision and nothing else (`modules/twin-confirmation`).

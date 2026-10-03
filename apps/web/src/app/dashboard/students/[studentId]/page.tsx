@@ -23,7 +23,8 @@ import { EmptyState, Panel } from "@/components/ui/panel";
 import { StudentLogin } from "./student-login";
 import { VerificationChecklist } from "@/components/students/verification";
 import { runningFaceModel, verificationOf } from "@/modules/students/verification-service";
-import { canReviewTwinConfirmations } from "@/modules/twin-confirmation/service";
+import { canReviewTwinConfirmations, knownTwinsOfStudent } from "@/modules/twin-confirmation/service";
+import { StudentKnownTwinsPanel } from "../twin-confirmations/known-pairs";
 import { getInstitutionById } from "@/modules/institutions/repository";
 import { resolveSelfEnrollmentEnabled } from "@/modules/face-enrollment/policy";
 import { getStudentLogin } from "@/modules/students/login-provisioning";
@@ -147,6 +148,9 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
   const faceBlocked =
     verification?.face === "blocked_pending_review" || verification?.face === "blocked_not_confirmed";
   const canReviewTwins = faceBlocked ? await canReviewTwinConfirmations(user) : false;
+  // Known twins: only for somebody who may manage this student's pairs. A
+  // panel that cannot be built is left out rather than taking the record with it.
+  const knownTwins = await knownTwinsOfStudent(user, student.id).catch(() => null);
 
   const currentIds = new Set(student.classes.map((link) => link.enrollmentId));
   const pastClasses = student.allClasses.filter((link) => !currentIds.has(link.enrollmentId));
@@ -352,6 +356,15 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
           </p>
         )}
       </Panel>
+
+      {knownTwins ? (
+        <StudentKnownTwinsPanel
+          known={knownTwins}
+          departmentId={null}
+          declareHref={`${BASE}/twin-confirmations?declare=${encodeURIComponent(student.id)}#declare`}
+          studentHref={(studentId) => `${BASE}/${encodeURIComponent(studentId)}`}
+        />
+      ) : null}
 
       <StudentLogin
         studentId={student.id}

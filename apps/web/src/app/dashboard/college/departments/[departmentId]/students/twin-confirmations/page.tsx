@@ -1,9 +1,10 @@
 import { requireUser } from "@/modules/auth-tenancy/session";
 import { hasPermission } from "@/modules/authorization/service";
-import { listTwinConfirmations } from "@/modules/twin-confirmation/service";
+import { listKnownTwinPairs, listTwinConfirmations } from "@/modules/twin-confirmation/service";
 import { PageTrail } from "@/components/nav/page-trail";
 import { EmptyState } from "@/components/ui/panel";
 import { departmentHref, departmentPeopleHref, departmentTrail, first, readOrDeny } from "@/app/dashboard/college/shared";
+import { KnownPairsSection } from "@/app/dashboard/students/twin-confirmations/known-pairs";
 import { TwinConfirmationListView } from "@/app/dashboard/students/twin-confirmations/twin-views";
 
 interface PageProps {
@@ -22,7 +23,9 @@ export default async function DepartmentTwinConfirmationsPage({ params, searchPa
   const { departmentId } = await params;
   const query = await searchParams;
 
-  const result = await readOrDeny(() => listTwinConfirmations(user, { departmentId }));
+  const result = await readOrDeny(() =>
+    Promise.all([listTwinConfirmations(user, { departmentId }), listKnownTwinPairs(user, { departmentId })]),
+  );
   if (!result.ok) {
     return (
       <div className="flex w-full max-w-4xl flex-col gap-5">
@@ -31,7 +34,7 @@ export default async function DepartmentTwinConfirmationsPage({ params, searchPa
       </div>
     );
   }
-  const list = result.value;
+  const [list, known] = result.value;
   const department = list.reviewer.department ?? { id: departmentId, name: "Department" };
   const studentsHref = departmentPeopleHref(department.id, "students");
   const here = departmentPeopleHref(department.id, "students", "twin-confirmations");
@@ -56,6 +59,14 @@ export default async function DepartmentTwinConfirmationsPage({ params, searchPa
         list={list}
         itemHref={(pair) => `${here}/${encodeURIComponent(pair)}`}
         decided={first(query.decided) ?? null}
+        known={
+          <KnownPairsSection
+            list={known}
+            departmentId={department.id}
+            initialStudentId={first(query.declare) ?? null}
+            studentHref={(studentId) => departmentPeopleHref(department.id, "students", studentId)}
+          />
+        }
       />
     </div>
   );

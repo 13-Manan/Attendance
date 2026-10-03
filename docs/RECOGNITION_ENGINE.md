@@ -369,6 +369,11 @@ frame.
      the pair different people (Twin / Lookalike confirmations), so a pair is
      normally a confirmed one. No pair was found among unrelated
      people ([CALIBRATION.md](../services/face-ai/docs/CALIBRATION.md#twins)).
+     A pair staff **declared** known twins or lookalikes in advance is added
+     to the same set when both students are on roll in the class, whether or
+     not either has a face enrolled (`withKnownTwinPairs`, read from the
+     database on every run): it is the case the templates cannot show — one
+     twin enrolled, the other not. A declaration only ever adds a demotion.
    - `duplicate_within_capture` — see §6.
    - `low_quality_face` — the winning face failed a quality check that face-ai
      reported. It is still matched; it is never matched above review.

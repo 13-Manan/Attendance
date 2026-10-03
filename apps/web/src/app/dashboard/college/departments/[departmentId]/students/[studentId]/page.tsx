@@ -15,6 +15,8 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { RemovePlacementButton, StudentSectionForm } from "@/app/dashboard/college/college-controls";
 import { StudentAccountPanel } from "@/app/dashboard/college/student-account";
+import { StudentKnownTwinsPanel } from "@/app/dashboard/students/twin-confirmations/known-pairs";
+import { knownTwinsOfStudent } from "@/modules/twin-confirmation/service";
 import {
   LINK_PRIMARY,
   LINK_SECONDARY,
@@ -103,6 +105,9 @@ export default async function DepartmentStudentPage({ params, searchParams }: Pa
   const faceBlocked =
     verification?.face === "blocked_pending_review" || verification?.face === "blocked_not_confirmed";
   const twinHref = departmentPeopleHref(department.id, "students", "twin-confirmations");
+  // Known twins, for the head or an administrator on this department's page.
+  // Left out, not fatal, if it cannot be built.
+  const knownTwins = await knownTwinsOfStudent(user, student.studentId, { departmentId: department.id }).catch(() => null);
 
   const created = first(query.created) === "1";
   const added = named(first(query.added));
@@ -329,6 +334,15 @@ export default async function DepartmentStudentPage({ params, searchParams }: Pa
           />
         </Panel>
       </div>
+
+      {knownTwins ? (
+        <StudentKnownTwinsPanel
+          known={knownTwins}
+          departmentId={department.id}
+          declareHref={`${twinHref}?declare=${encodeURIComponent(student.studentId)}#declare`}
+          studentHref={(studentId) => departmentPeopleHref(department.id, "students", studentId)}
+        />
+      ) : null}
     </div>
   );
 }

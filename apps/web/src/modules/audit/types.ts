@@ -130,6 +130,13 @@ export type AuditAction =
   // never a face, a vector or a score.
   | "face_twin_confirmation.confirmed"
   | "face_twin_confirmation.rejected"
+  // Staff may also mark two students as known twins or lookalikes before the
+  // enrollment check meets them: a `confirmed` row like the one above, with
+  // `source: "declared"` (and no conflict behind it). `withdrawn` removes such
+  // a declaration — the pair has no decision again, so a later collision is
+  // refused and queued for review as if none had been made. Same key, same
+  // "latest row wins"; ids, the reviewer's scope, never a face or a score.
+  | "face_twin_confirmation.withdrawn"
   // A student with live face templates was archived, or brought back. The
   // `student.archived`/`student.restored` row records the status change;
   // these record what it did to recognition, by name, so "when did this
