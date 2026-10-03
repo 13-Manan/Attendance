@@ -101,20 +101,28 @@ Three keys, all pre-existing, none invented for this work:
   director, administrators) institution-wide; a school's class teacher
   (`student.update` and the primary-teacher link) for pairs inside their own
   classes; a college HOD for pairs inside their department's current
-  sections. No permission was added for it. A student, a teacher who is not
+  sections; and a school receptionist whom the principal has explicitly given
+  `twinConfirmation.decide` (§10 — off by default, and not implied by enrolling
+  faces). A student, a teacher who is not
   the class teacher, department faculty and operators are refused by the
   server, and a student is never told who they matched. The decision waives
   that one pair's collision and nothing else (`modules/twin-confirmation`).
 - `faceEmbedding.manage` — staff enrollment, deactivation, deletion and the
   retention sweep.
+- `faceEmbedding.enroll` — staff enrollment and re-enrollment only, through
+  the same service and checks, camera or upload. Never erasure, deletion or
+  the sweep. Held only by a school receptionist the principal gave face
+  enrollment (§10).
 - `institution.read` / `institution.update` — reading and changing the
   retention policy, which is institution configuration.
 
-No new `PermissionKey` was introduced. `modules/authorization/permissions.ts`
+No new `PermissionKey` was introduced for this work. `modules/authorization/permissions.ts`
 is code, but the role→permission rows are **seeded data**: a new key would
 exist in this build and in nobody's database, locking every current
 administrator out of the screen. A biometric control nobody can reach is worse
-than no control.
+than no control. (The receptionist keys of §10 are the exception that proves
+it: each is accepted only *alongside* the existing key it narrows, so no
+existing role lost anything when they arrived.)
 
 ### Institution isolation
 
@@ -522,6 +530,8 @@ comes from the session (`modules/student-password-reveal`):
 
 - `user.invite` (the existing account-management permission) — any student of
   the actor's own institution;
+- `studentLogin.reveal` — the same, for a school receptionist the principal
+  gave "See student portal passwords" (§10), audited identically;
 - an active, designated head of department — a student in one of their own
   department's sections in a non-archived session, the department taken from
   the session and database, never the request.
@@ -628,3 +638,79 @@ cd apps/web && node --import ./scripts/register-test-loader.mjs --test "src/**/*
 # The service token and request bounds
 cd services/face-ai && .venv/bin/python -m pytest -q
 ```
+
+---
+
+## 10. School receptionist accounts
+
+A principal delegates the school's front-office work — admissions, student
+records, portal logins, face enrollment, attendance — to receptionist
+accounts, and keeps everything else (`modules/receptionists`).
+
+**No schema change.** Each receptionist has their own institution-scoped,
+non-system role, `RECEPTIONIST__<userId>`, in the existing `Role`,
+`RolePermission` and `UserRoleAssignment` tables. The principal's switches
+are that role's grants; the bootstrap sync touches only global system roles
+and never these. An optional phone number lives in the account's audit
+events, as twin decisions do. Passwords are the staff ones: scrypt, a
+temporary password shown once and replaced at first sign-in, never
+recoverable — a lost one is reset.
+
+**Who manages them.** `role.assign` in a school — the principal's authority to
+give people roles. A receptionist can never hold it, so a receptionist can
+never create, change or see receptionists, or change their own access.
+
+**What can be switched on.** Existing keys where one fits exactly
+(`student.read`, `student.create`, `student.update`, `enrollment.manage`,
+`attendanceSession.create/capture/finalize`, `attendanceRecord.read/correct`,
+`academicStructure.manage`, `cohort.manage`, `institution.read/update`,
+`auditLog.read`), and seven narrow keys where the existing one is too broad to
+hand out. Each narrow key is accepted *alongside* the key it narrows, so
+every existing role behaves exactly as before:
+
+| Narrow key | Instead of | Why the broad one is not granted |
+|---|---|---|
+| `studentLogin.manage` | `user.invite` | also creates staff, reactivates administrators |
+| `studentLogin.reveal` | `user.invite` | same; reveal is audited as before |
+| `faceEmbedding.enroll` | `faceEmbedding.manage` | also erases face data, runs the sweep, decides twins |
+| `twinConfirmation.decide` | `faceEmbedding.manage` | twins only, separately, off by default |
+| `attendance.allClasses` | `cohort.manage` | also restructures classes and appoints class teachers |
+| `staff.read` | `institution.read` | also opens settings, API keys, webhooks; sign-in times are withheld |
+| `staff.manage` | `user.invite/update/deactivate` | teacher accounts only, never one with more access than the receptionist |
+
+**Never grantable**, whatever a request names: `role.assign`, `role.read`,
+`user.invite`, `user.update`, `user.deactivate`, `campus.manage`,
+`department.manage`, `faceEmbedding.manage`, the platform keys, and the
+student-only `.own` keys. A principal can grant only keys they hold.
+
+**Defaults.** Operational switches on; twin decisions, class structure and
+class teachers, teacher accounts, settings/API keys/integrations and the
+audit log off, each asking for confirmation before it is turned on.
+
+**Live changes.** Sessions are read from the database on every request, so a
+switch turned off refuses the receptionist's very next page or action, and
+switching the account off or resetting its password deletes its sessions.
+An open register stream is a request that lasts as long as the tab: it asks
+its connect-time checks again every minute (`modules/realtime/stream-access.ts`)
+and ends when they fail.
+
+**Isolation.** The institution always comes from the session. A receptionist
+id from another school is "not found" to its principal; a student, class,
+face or register id from another school is refused by the same checks every
+other account meets.
+
+**Audit.** `receptionist.created`, `.updated`, `.disabled`, `.enabled`,
+`.permissions_changed` (before, after, switched on, switched off) and
+`.password_reset`. Never a password or hash. Student password views stay
+`student.password_viewed`; face enrollment, student and attendance changes
+keep their own events, now naming the receptionist as actor.
+
+**Known limits.** Some switches are wider than their labels could be, because
+the existing keys are: editing a student and taking them off roll share
+`student.update`; reviewing, finishing and correcting a register share
+`attendanceRecord.correct` and `attendanceSession.finalize`, and taking
+attendance therefore brings reviewing with it; viewing settings, API keys,
+webhooks and integrations is one key (`institution.read`), and changing them
+another. There is no read-only academic-year page in the product, so the
+academic year is visible with "Manage classes" only.
+

@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import {
-  hasPermission,
+  hasAnyPermission,
   requirePermission,
   requireSameInstitution,
 } from "@/modules/authorization/service";
@@ -617,7 +617,9 @@ function toSubjectSummary(row: CohortSubjectRow): FacultySubjectSummary {
  * What this faculty member is allowed to see, resolved once.
  *
  * An actor with `cohort.manage` administers the institution and gets an
- * unrestricted scope. Everyone else gets the union of:
+ * unrestricted scope, as does a receptionist granted `attendance.allClasses`
+ * (who still needs `attendanceRecord.read` to read anything through it).
+ * Everyone else gets the union of:
  *
  *   - classes they are linked to via `CohortFaculty` (school class teacher,
  *     or a college lecturer attached to the class), and
@@ -632,7 +634,7 @@ export async function resolveFacultyScope(
   actor: SessionUser,
   deps: AnalyticsDeps = {},
 ): Promise<FacultyScope> {
-  const isAdmin = hasPermission(actor, "cohort.manage");
+  const isAdmin = hasAnyPermission(actor, "cohort.manage", "attendance.allClasses");
   const institutionId = requireInstitutionScope(actor);
 
   const countEnrollments =
@@ -852,7 +854,7 @@ async function resolveCohortViewScope(
   cohortId: string,
   deps: AnalyticsDeps,
 ): Promise<{ restrictToCohortSubjectIds: string[] | undefined; isClassTeacher: boolean }> {
-  if (hasPermission(actor, "cohort.manage")) {
+  if (hasAnyPermission(actor, "cohort.manage", "attendance.allClasses")) {
     return { restrictToCohortSubjectIds: undefined, isClassTeacher: false };
   }
   const institutionId = requireInstitutionScope(actor);

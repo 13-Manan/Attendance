@@ -170,6 +170,11 @@ export interface ClassTeacherRow extends FacultyClassLink {
 }
 
 export interface FacultyDirectory {
+  /**
+   * Whether `members[].lastLoginAt` was filled in: only for an administrator
+   * (`institution.read`). A receptionist's list leaves it out on the server.
+   */
+  showsSignIns: boolean;
   /** The current page of the staff table, already filtered and sorted. */
   members: FacultyMember[];
   /** Matching the current filter. */

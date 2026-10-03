@@ -1,12 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import {
-  buildStaffWhere,
-  clampFacultyPage,
-  facultyOrderBy,
-  facultyPageSkip,
-  FACULTY_PAGE_SIZE,
-  type FacultyFilters,
-} from "./directory-filters";
+import { buildStaffWhere, clampFacultyPage, facultyOrderBy, facultyPageSkip, FACULTY_PAGE_SIZE, type FacultyFilters, STAFF_DEFINITION } from "./directory-filters";
 import type {
   AssignableMember,
   ClassTeacherRow,
@@ -118,7 +111,8 @@ export async function searchStaffRows(
  */
 export async function listAssignableStaff(institutionId: string): Promise<AssignableMember[]> {
   const rows = await prisma.user.findMany({
-    where: { institutionId, roleAssignments: { none: { role: { key: "STUDENT" } } } },
+    // The same definition of staff the table uses: no student, no receptionist.
+    where: { institutionId, ...STAFF_DEFINITION },
     select: { id: true, name: true, status: true },
     orderBy: [{ status: "asc" }, { name: "asc" }],
     take: 1000,

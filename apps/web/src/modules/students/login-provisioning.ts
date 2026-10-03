@@ -15,7 +15,7 @@ import {
   placeholderLoginEmail,
 } from "@/modules/auth-tenancy/student-login-policy";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
-import { requirePermission } from "@/modules/authorization/service";
+import { requireAnyPermission, requirePermission } from "@/modules/authorization/service";
 import type { IssuedPassword } from "@/modules/faculty/directory-types";
 import { StudentError } from "./directory-types";
 
@@ -145,11 +145,17 @@ export async function issueTemporaryPassword(): Promise<{ password: string; pass
   return { password, passwordHash: await hashPassword(password) };
 }
 
-function requireInstitution(actor: SessionUser): string {
+function requireInstitution(
+  actor: SessionUser,
+  narrower: "studentLogin.manage" | "studentLogin.reveal" = "studentLogin.manage",
+): string {
   // `user.invite` is the permission that already means "may create an account
   // in this institution" — it is what the faculty directory checks. Reusing it
-  // keeps one answer to that question rather than inventing a second.
-  requirePermission(actor, "user.invite");
+  // keeps one answer to that question rather than inventing a second. A
+  // receptionist holds only the narrower slice for the one operation: student
+  // logins (`studentLogin.manage`), or seeing one's password
+  // (`studentLogin.reveal`) — never staff accounts.
+  requireAnyPermission(actor, "user.invite", narrower);
   if (!actor.institutionId) {
     throw new StudentError(
       "This account is not scoped to a single institution, so it cannot provision student logins here.",
@@ -305,7 +311,7 @@ export async function createStudentLoginWithin(
     passwordHash: string;
   },
 ): Promise<string> {
-  requirePermission(actor, "user.invite");
+  requireAnyPermission(actor, "user.invite", "studentLogin.manage");
   const { institutionId, student } = input;
   const name = `${student.firstName} ${student.lastName}`.trim();
 
@@ -579,7 +585,7 @@ export type RevealedStudentPassword =
  *
  * `user.invite` is required: the permission that already means "may manage
  * this institution's accounts", the one creating and resetting a student's
- * login take. A head of department reaches this only through the college
+ * login take — or a receptionist's narrower `studentLogin.reveal`. A head of department reaches this only through the college
  * setup service, which lends it for this one call after confirming the
  * student is in one of their department's current sections. The student is
  * looked up within the actor's institution; the account must be switched on,
@@ -601,7 +607,7 @@ export async function revealStudentLoginPassword(
     userAgent?: string | null;
   },
 ): Promise<RevealedStudentPassword> {
-  const institutionId = requireInstitution(actor);
+  const institutionId = requireInstitution(actor, "studentLogin.reveal");
 
   const student = await prisma.student.findFirst({
     where: { id: studentId, institutionId },

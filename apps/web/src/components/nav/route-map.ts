@@ -53,6 +53,8 @@ export const DASHBOARD_ROUTES: readonly RouteEntry[] = [
   },
 
   { pattern: "/dashboard/faculty", label: "Faculty" },
+  { pattern: "/dashboard/receptionists", label: "Receptionists" },
+  { pattern: "/dashboard/receptionists/[userId]", namedTrail: true },
 
   { pattern: "/dashboard/academic", label: "Academic" },
   { pattern: "/dashboard/academic/sessions", label: "Academic sessions" },

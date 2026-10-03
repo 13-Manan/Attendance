@@ -1,10 +1,12 @@
 import { notFound } from "next/navigation";
-import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
-import { requireSameInstitution } from "@/modules/authorization/service";
+import { requireAnyPermissionOrRedirect } from "@/modules/auth-tenancy/session";
+import { hasPermission, requireSameInstitution } from "@/modules/authorization/service";
+import { ForbiddenError } from "@/modules/authorization/types";
 import { getStudentById } from "@/modules/students/repository";
 import { studentOriginPath } from "@/modules/students/record-origin";
 import { studentDisplayName } from "@/modules/students/types";
 import { getStudentFaceEnrollment } from "@/modules/face-enrollment/service";
+import { canReviewTwinConfirmations } from "@/modules/twin-confirmation/service";
 import { RETURN_PARAM, withReturnPath } from "@/lib/return-path";
 import { PageTrail } from "@/components/nav/page-trail";
 import { Panel } from "@/components/ui/panel";
@@ -40,15 +42,26 @@ export default async function StaffEnrollFacePage({
   params: Promise<{ studentId: string }>;
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const user = await requirePermissionOrRedirect("faceEmbedding.manage");
+  // Enrolment itself is open to faceEmbedding.enroll (a receptionist); erasure below is not.
+  const user = await requireAnyPermissionOrRedirect("faceEmbedding.manage", "faceEmbedding.enroll");
   const { studentId } = await params;
   // Opened from a section, the way back to the record keeps the way back there.
   const origin = studentOriginPath((await searchParams)[RETURN_PARAM]);
   const student = await getStudentById(studentId);
   if (!student) notFound();
-  requireSameInstitution(user, student.institutionId);
+  try {
+    requireSameInstitution(user, student.institutionId);
+  } catch (error) {
+    // Another institution's student is "not found", as on the student's own
+    // page — an id from elsewhere learns nothing, not even that it exists.
+    if (error instanceof ForbiddenError) notFound();
+    throw error;
+  }
 
   const { status, samples, runningModel } = await getStudentFaceEnrollment(user, student.id);
+  // Enrolling faces does not carry twin decisions: without them, a refused
+  // lookalike says who to ask instead of linking to a review that would refuse.
+  const canReviewTwins = await canReviewTwinConfirmations(user);
 
   return (
     <div className="flex w-full max-w-5xl flex-col gap-5">
@@ -80,15 +93,18 @@ export default async function StaffEnrollFacePage({
         title="Capture"
         description="Camera or an uploaded photograph. Both are checked for quality, and both are compared against this institution's existing templates before anything is stored."
       >
-        <StaffEnrollmentClient studentId={student.id} initialStatus={status} />
+        <StaffEnrollmentClient studentId={student.id} initialStatus={status} canReviewTwins={canReviewTwins} />
       </Panel>
 
       <SampleHistory status={status} samples={samples} />
 
-      {/* Reachable by the same `faceEmbedding.manage` that gates this page, so
-          the administrator who receives an erasure request can act on it here
-          rather than asking somebody with database access. */}
-      <DeleteFaceData studentId={student.id} studentCode={student.studentCode} />
+      {/* Shown with `faceEmbedding.manage` only — the same permission the
+          erasure service requires — so the administrator who receives an
+          erasure request can act on it here rather than asking somebody with
+          database access. A receptionist who may enrol may not erase. */}
+      {hasPermission(user, "faceEmbedding.manage") ? (
+        <DeleteFaceData studentId={student.id} studentCode={student.studentCode} />
+      ) : null}
     </div>
   );
 }

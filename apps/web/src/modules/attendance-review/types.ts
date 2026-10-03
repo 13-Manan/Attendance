@@ -214,6 +214,11 @@ export interface AttendanceReviewBoard {
   actorCanFinalize: boolean;
   /** True when the caller may still change results after FINALIZED. */
   actorCanOverrideFinalized: boolean;
+  /** True when the caller may decide or correct a record at all
+   * (`attendanceRecord.correct`). Every role that can open a register holds
+   * it; a receptionist given records and reports without reviewing does not,
+   * and sees the register read-only rather than buttons that would refuse. */
+  actorCanCorrect: boolean;
 }
 
 /**

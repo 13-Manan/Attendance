@@ -1284,6 +1284,7 @@ export async function getAttendanceReviewBoard(
     awaitingDecision,
     actorCanFinalize: hasPermission(actor, "attendanceSession.finalize"),
     actorCanOverrideFinalized: hasPermission(actor, "attendanceSession.finalize"),
+    actorCanCorrect: hasPermission(actor, "attendanceRecord.correct"),
   };
 }
 

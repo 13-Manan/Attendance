@@ -37,6 +37,11 @@ export interface NavItem {
   /** Show when the viewer holds any of these — for a link an administrator and a head of department share. */
   anyOf?: PermissionKey[];
   /**
+   * Also shown to a school receptionist, whatever their permissions — their own
+   * account page. A receptionist is recognised by their role, not by a key.
+   */
+  receptionist?: boolean;
+  /**
    * Hide from a viewer who holds this: a head of department's "My department"
    * is an administrator's "Departments", and one person should see one of them.
    */
@@ -147,8 +152,20 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/dashboard/faculty",
     label: "Faculty",
     group: "People",
-    permission: "institution.read",
+    // A receptionist's `staff.read` reads the same list (see faculty/page.tsx).
+    anyOf: ["institution.read", "staff.read"],
     schoolSetupStep: 2,
+  },
+  {
+    // The principal's own: receptionists' accounts and what each may do.
+    href: "/dashboard/receptionists",
+    label: "Receptionists",
+    group: "People",
+    permission: "role.assign",
+    only: "SCHOOL",
+    // Last in the principal's setup run: once the school has its classes and
+    // students, the people who help run it day to day.
+    schoolSetupStep: 5,
   },
   {
     // A head of department's own department's people; see /dashboard/college.
@@ -262,7 +279,8 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/dashboard/face-enrollment",
     label: "Face enrollment",
     group: "Attendance",
-    permission: "faceEmbedding.manage",
+    // A receptionist enrols with `faceEmbedding.enroll`; erasure stays the administrator's.
+    anyOf: ["faceEmbedding.manage", "faceEmbedding.enroll"],
   },
 
   {
@@ -296,7 +314,13 @@ export const NAV_ITEMS: NavItem[] = [
     permission: "auditLog.read",
   },
 
-  { href: "/dashboard/account", label: "My account", group: "Account", permission: "department.manage" },
+  {
+    href: "/dashboard/account",
+    label: "My account",
+    group: "Account",
+    permission: "department.manage",
+    receptionist: true,
+  },
 ];
 
 export interface NavSection {
@@ -366,6 +390,7 @@ export function buildNavSections(
   can: (permission: PermissionKey) => boolean,
   kind: InstitutionKind,
   isPlatform = false,
+  viewer: { receptionist?: boolean } = {},
 ): NavSection[] {
   // Someone who sets a school up reads its setup as one run, in order; see
   // SCHOOL_SETUP_GROUP. Everyone else sees each link under its own group.
@@ -393,8 +418,9 @@ export function buildNavSections(
     const items = NAV_ITEMS.filter(
       (item) =>
         groupOf(item) === group &&
-        (!item.permission || can(item.permission)) &&
-        (!item.anyOf || item.anyOf.some((permission) => can(permission))) &&
+        ((item.receptionist === true && viewer.receptionist === true) ||
+          ((!item.permission || can(item.permission)) &&
+            (!item.anyOf || item.anyOf.some((permission) => can(permission))))) &&
         (!item.unless || !can(item.unless)) &&
         // An unknown institution kind only reaches here for a non-platform
         // account with no institution, which the routes themselves handle.

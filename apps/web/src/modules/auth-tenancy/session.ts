@@ -1,6 +1,6 @@
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { hasPermission } from "@/modules/authorization/service";
+import { hasAnyPermission, hasPermission } from "@/modules/authorization/service";
 import type { PermissionKey } from "@/modules/authorization/permissions";
 import { getSessionUserByRawToken } from "./service";
 import { loginPathFor, PASSWORD_CHANGE_PATH, REQUESTED_PATH_HEADER } from "./redirect";
@@ -104,5 +104,15 @@ export async function requestMetadata(): Promise<{ ipAddress: string | null; use
 export async function requirePermissionOrRedirect(permission: PermissionKey): Promise<SessionUser> {
   const user = await requireUser();
   if (!hasPermission(user, permission)) redirect("/unauthorized");
+  return user;
+}
+
+/** `requirePermissionOrRedirect`, also accepting a narrower alternative (permissions.ts). */
+export async function requireAnyPermissionOrRedirect(
+  permission: PermissionKey,
+  ...alternatives: PermissionKey[]
+): Promise<SessionUser> {
+  const user = await requireUser();
+  if (!hasAnyPermission(user, permission, ...alternatives)) redirect("/unauthorized");
   return user;
 }

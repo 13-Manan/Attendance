@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { requirePermission } from "@/modules/authorization/service";
+import { requireAnyPermission } from "@/modules/authorization/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import type { TemplateModel } from "./policy";
 
@@ -250,7 +250,7 @@ export async function getFaceCoverage(
   overrides: CoverageDeps = {},
 ): Promise<FaceCoverage> {
   const d = deps(overrides);
-  requirePermission(actor, "faceEmbedding.manage");
+  requireAnyPermission(actor, "faceEmbedding.manage", "faceEmbedding.enroll");
   if (!actor.institutionId) {
     throw new Error("face_coverage_requires_institution");
   }

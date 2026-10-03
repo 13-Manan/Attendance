@@ -12,6 +12,8 @@ import { getInstitutionType } from "@/modules/institutions/repository";
 import { SessionRow } from "@/components/attendance/session-list";
 import { TodayAttendance } from "@/components/attendance/today-attendance";
 import { DepartmentOverviewPanel } from "@/components/dashboard/department-overview-panel";
+import { ReceptionistHome } from "@/components/dashboard/receptionist-home";
+import { isReceptionist } from "@/modules/receptionists/catalog";
 import { QuickActionsPanel } from "@/components/dashboard/quick-actions-panel";
 import { SystemStatusPanel } from "@/components/dashboard/system-status-panel";
 import { StatCard, StatGrid, formatSessionDate } from "@/components/ui/attendance-stat";
@@ -60,6 +62,12 @@ export default async function DashboardHomePage() {
    * `isPlatformUser` can tell the two apart.
    */
   if (isPlatformUser(user)) redirect("/dashboard/platform");
+
+  // A school receptionist's home is their day's work — attendance, students,
+  // faces — and only what the principal switched on. Decided before the
+  // attendance check below: a receptionist without attendance still has
+  // students to see to.
+  if (isReceptionist(user)) return <ReceptionistHome user={user} />;
 
   if (!hasPermission(user, "attendanceRecord.read")) {
     // A student account: /dashboard has nothing for them, and an empty staff

@@ -1,5 +1,5 @@
 import { recordAuditLog as defaultRecordAuditLog } from "@/modules/audit/service";
-import { requirePermission, requireSameInstitution } from "@/modules/authorization/service";
+import { requireAnyPermission, requirePermission, requireSameInstitution } from "@/modules/authorization/service";
 import { ForbiddenError } from "@/modules/authorization/types";
 import type { RecordAuditLogInput } from "@/modules/audit/types";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
@@ -331,7 +331,7 @@ export async function enrollFaceForStudentRequest(
   overrides: FaceEnrollmentDeps = {},
 ): Promise<FaceEnrollmentResult> {
   const d = deps(overrides);
-  requirePermission(actor, "faceEmbedding.manage");
+  requireAnyPermission(actor, "faceEmbedding.manage", "faceEmbedding.enroll");
 
   const student = await d.getStudentById(input.studentId);
   if (!student) throw new Error("student_not_found");
@@ -386,7 +386,7 @@ export async function replaceFaceEnrollmentRequest(
   overrides: FaceEnrollmentDeps = {},
 ): Promise<FaceEnrollmentResult> {
   const d = deps(overrides);
-  requirePermission(actor, "faceEmbedding.manage");
+  requireAnyPermission(actor, "faceEmbedding.manage", "faceEmbedding.enroll");
 
   const student = await d.getStudentById(input.studentId);
   if (!student) throw new Error("student_not_found");
@@ -1188,7 +1188,7 @@ export async function deactivateFaceEmbeddingRequest(
   overrides: FaceEnrollmentDeps = {},
 ): Promise<void> {
   const d = deps(overrides);
-  requirePermission(actor, "faceEmbedding.manage");
+  requireAnyPermission(actor, "faceEmbedding.manage", "faceEmbedding.enroll");
 
   const owner = await d.getTemplateOwner(embeddingId);
   if (!owner) throw new Error("face_embedding_not_found");
@@ -1246,7 +1246,7 @@ export async function getStudentFaceEnrollment(
   overrides: FaceEnrollmentDeps = {},
 ): Promise<StudentFaceEnrollment> {
   const d = deps(overrides);
-  requirePermission(actor, "faceEmbedding.manage");
+  requireAnyPermission(actor, "faceEmbedding.manage", "faceEmbedding.enroll");
 
   const student = await d.getStudentById(studentId);
   if (!student) throw new Error("student_not_found");

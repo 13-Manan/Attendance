@@ -44,6 +44,41 @@ export const PERMISSIONS = [
   // could target other students.
   "faceEmbedding.enroll.own",
   "auditLog.read",
+
+  // ---------------------------------------------------------------------------
+  // Narrow permissions for a school receptionist (modules/receptionists).
+  //
+  // Each one is a slice of a broader key that is unsafe to hand to a
+  // receptionist whole, and each is accepted ALONGSIDE that broader key, never
+  // instead of it — so every system role behaves exactly as before, and none
+  // of them holds these keys. They are granted only through a receptionist's
+  // own institution-scoped role, which the school's administrator edits; no
+  // production role sync is involved. The broader key each one narrows:
+  //
+  //   attendance.allClasses  — cohort.manage's "every class" reach, without
+  //                            class structure or teacher assignment. Paired
+  //                            with the attendance keys, which it never implies.
+  //   studentLogin.manage    — user.invite's student portal logins (create,
+  //                            reset, enable/disable), without staff accounts.
+  //   studentLogin.reveal    — user.invite's "show a student's password".
+  //   faceEmbedding.enroll   — faceEmbedding.manage's staff enrolment of a
+  //                            student (enrol, re-enrol, withdraw a sample),
+  //                            without erasure, retention or twin decisions.
+  //                            Not `.own`: it targets other people.
+  //   twinConfirmation.decide — faceEmbedding.manage's twin/lookalike pairs.
+  //   staff.read             — institution.read's staff list, without the
+  //                            settings, integrations and API keys it opens.
+  //   staff.manage           — user.invite/update/deactivate for TEACHER
+  //                            accounts only (modules/faculty refuses any
+  //                            other target for a holder of this key alone).
+  // ---------------------------------------------------------------------------
+  "attendance.allClasses",
+  "studentLogin.manage",
+  "studentLogin.reveal",
+  "faceEmbedding.enroll",
+  "twinConfirmation.decide",
+  "staff.read",
+  "staff.manage",
 ] as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[number];

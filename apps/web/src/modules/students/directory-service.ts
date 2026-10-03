@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { requirePermission } from "@/modules/authorization/service";
+import { requireAnyPermission, requirePermission } from "@/modules/authorization/service";
 import type { PermissionKey } from "@/modules/authorization/permissions";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import {
@@ -345,7 +345,8 @@ export async function createStudentWithLoginForRequest(
   const d = deps(overrides);
   // Checked before anything else, like the class's permission: creating an
   // account is part of what was asked, so lacking it refuses the whole step.
-  requirePermission(actor, "user.invite");
+  // A receptionist's narrower `studentLogin.manage` covers it.
+  requireAnyPermission(actor, "user.invite", "studentLogin.manage");
   const { institutionId, cohortId, data } = await prepareNewStudent(actor, input, d);
   if (cohortId === null) throw new StudentError("Choose the class they join.");
   if (!data.email) {

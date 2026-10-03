@@ -2,7 +2,7 @@ import { recordAuditLog as defaultRecordAuditLog } from "@/modules/audit/service
 import type { RecordAuditLogInput } from "@/modules/audit/types";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { requireCohortAccess } from "@/modules/authorization/cohort-access";
-import { hasPermission, requirePermission, requireSameInstitution } from "@/modules/authorization/service";
+import { hasAnyPermission, requirePermission, requireSameInstitution } from "@/modules/authorization/service";
 import { ForbiddenError } from "@/modules/authorization/types";
 import { getCohortById, listCohortsByInstitution, listCohortsForFaculty } from "@/modules/cohorts/repository";
 import type { Cohort } from "@/modules/cohorts/types";
@@ -78,7 +78,8 @@ export interface ListCapturableCohortsDeps {
 
 /**
  * Cohorts the caller may start an attendance session in. `cohort.manage`
- * holders (admins) see every cohort in their institution — everyone else
+ * holders (admins), and a receptionist granted `attendance.allClasses`, see
+ * every cohort in their institution — everyone else
  * sees only cohorts they are linked to as faculty. Cross-institution
  * cohorts are never returned regardless of role.
  */
@@ -92,7 +93,7 @@ export async function listCapturableCohortsForActor(
   const byInstitution = deps.listCohortsByInstitution ?? listCohortsByInstitution;
   const getInstitution = deps.getInstitutionById ?? getInstitutionById;
 
-  const cohorts = hasPermission(actor, "cohort.manage")
+  const cohorts = hasAnyPermission(actor, "cohort.manage", "attendance.allClasses")
     ? actor.institutionId
       ? await byInstitution(actor.institutionId)
       : []

@@ -20,6 +20,7 @@ import {
   type CohortSubjectOption,
   type DepartmentOption,
   type FacultyMember,
+  type FacultyRoleKey,
 } from "@/modules/faculty/directory-types";
 import { Panel } from "@/components/ui/panel";
 import { Button } from "@/components/ui/button";
@@ -151,7 +152,14 @@ function DepartmentField({
   );
 }
 
-export function InviteFacultyForm({ departments }: { departments: DepartmentOption[] }) {
+export function InviteFacultyForm({
+  departments,
+  roles = FACULTY_ROLE_KEYS,
+}: {
+  departments: DepartmentOption[];
+  /** The roles this person may grant; a receptionist managing teachers may be offered fewer. */
+  roles?: readonly FacultyRoleKey[];
+}) {
   const [state, formAction, pending] = useActionState(inviteFacultyAction, initialState);
   const [open, setOpen] = useState(false);
 
@@ -209,7 +217,7 @@ export function InviteFacultyForm({ departments }: { departments: DepartmentOpti
 
           <fieldset className="flex flex-col gap-2">
             <legend className="text-sm font-medium text-neutral-700">What may they do?</legend>
-            {FACULTY_ROLE_KEYS.map((key, index) => (
+            {roles.map((key, index) => (
               <label key={key} className="flex items-start gap-2 text-sm text-neutral-700">
                 <input
                   type="radio"

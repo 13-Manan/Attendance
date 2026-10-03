@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
-import { hasPermission } from "@/modules/authorization/service";
+import { requireAnyPermissionOrRedirect } from "@/modules/auth-tenancy/session";
+import { hasAnyPermission, hasPermission } from "@/modules/authorization/service";
+import { staffManageRefusal } from "@/modules/faculty/directory-policy";
 import { getFacultyDirectory } from "@/modules/faculty/directory-service";
 import {
   FACULTY_SORTS,
@@ -11,7 +12,7 @@ import {
   hasActiveFacultyFilters,
   parseFacultyFilters,
 } from "@/modules/faculty/directory-filters";
-import { STAFF_ROLE_KEYS, type FacultyMember } from "@/modules/faculty/directory-types";
+import { FACULTY_ROLE_KEYS, STAFF_ROLE_KEYS, type FacultyMember } from "@/modules/faculty/directory-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Panel, EmptyState } from "@/components/ui/panel";
@@ -73,10 +74,13 @@ function formatWhen(value: Date | null, fallback: string): string {
  * Three states that look alike in a database and mean very different things to
  * an administrator: stopped, never given a password, and fine but never used.
  */
-function AccessCell({ member }: { member: FacultyMember }) {
+function AccessCell({ member, showsSignIns }: { member: FacultyMember; showsSignIns: boolean }) {
   if (member.status === "INACTIVE") {
     return <span className="text-sm text-neutral-500">Stopped</span>;
   }
+  // A receptionist's list says whether an account is in use, never when
+  // anybody last signed in — the service left those times out.
+  if (!showsSignIns) return <span className="text-sm text-neutral-600">Active</span>;
   if (!member.canSignIn) {
     return (
       <span className="text-sm text-amber-700">
@@ -92,7 +96,8 @@ function AccessCell({ member }: { member: FacultyMember }) {
 }
 
 export default async function FacultyPage({ searchParams }: PageProps) {
-  const user = await requirePermissionOrRedirect("institution.read");
+  // A receptionist reads the same list through `staff.read`.
+  const user = await requireAnyPermissionOrRedirect("institution.read", "staff.read");
 
   if (!user.institutionId) {
     return (
@@ -108,8 +113,17 @@ export default async function FacultyPage({ searchParams }: PageProps) {
   const directory = await getFacultyDirectory(user, filters);
 
   const filtered = hasActiveFacultyFilters(filters);
-  const canInvite = hasPermission(user, "user.invite");
-  const canManageAccounts = hasPermission(user, "user.update");
+  // An administrator's own permissions, or a receptionist's `staff.manage` —
+  // which reaches teacher accounts within their own permissions only, so the
+  // controls appear exactly where the service will allow them.
+  const throughStaffManage = !hasPermission(user, "user.update") && hasPermission(user, "staff.manage");
+  const canInvite = hasAnyPermission(user, "user.invite", "staff.manage");
+  const canManageAccounts = hasAnyPermission(user, "user.update", "staff.manage");
+  const canManageRow = (member: FacultyMember) =>
+    !throughStaffManage || staffManageRefusal(user, member.roleKeys) === null;
+  const invitableRoles = throughStaffManage
+    ? FACULTY_ROLE_KEYS.filter((key) => staffManageRefusal(user, [key]) === null)
+    : FACULTY_ROLE_KEYS;
   const canAssign = hasPermission(user, "cohort.manage");
 
   const showDepartments = directory.isCollege && directory.departments.length > 0;
@@ -137,8 +151,8 @@ export default async function FacultyPage({ searchParams }: PageProps) {
         </p>
       </header>
 
-      {canInvite ? (
-        <InviteFacultyForm departments={showDepartments ? directory.departments : []} />
+      {canInvite && invitableRoles.length > 0 ? (
+        <InviteFacultyForm departments={showDepartments ? directory.departments : []} roles={invitableRoles} />
       ) : (
         <p className="text-xs text-neutral-500">
           You can see the staff list, but adding and changing accounts needs the staff-management
@@ -304,7 +318,7 @@ export default async function FacultyPage({ searchParams }: PageProps) {
                         </td>
                       ) : null}
                       <td className="py-3 pr-4 first:pl-3">
-                        <AccessCell member={member} />
+                        <AccessCell member={member} showsSignIns={directory.showsSignIns} />
                       </td>
                       <td className="py-3 pr-4 text-sm text-neutral-600">
                         {member.classes.length === 0 && member.subjects.length === 0 ? (
@@ -327,10 +341,14 @@ export default async function FacultyPage({ searchParams }: PageProps) {
                       </td>
                       {canManageAccounts ? (
                         <td className="py-3">
-                          <MemberActions
-                            member={member}
-                            departments={showDepartments ? directory.departments : []}
-                          />
+                          {canManageRow(member) ? (
+                            <MemberActions
+                              member={member}
+                              departments={showDepartments ? directory.departments : []}
+                            />
+                          ) : (
+                            <span className="text-xs text-neutral-400">Principal only</span>
+                          )}
                         </td>
                       ) : null}
                     </tr>

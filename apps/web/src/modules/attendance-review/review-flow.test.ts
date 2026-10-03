@@ -72,6 +72,7 @@ function board(
     awaitingDecision: counts.attention,
     actorCanFinalize: true,
     actorCanOverrideFinalized: true,
+    actorCanCorrect: true,
     ...rest,
   };
 }

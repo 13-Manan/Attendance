@@ -7,6 +7,7 @@ import {
   NO_DEPARTMENT,
   NO_PASSWORD,
   NO_ROLE,
+  STAFF_DEFINITION,
   buildStaffWhere,
   clampFacultyPage,
   facultyFilterQuery,
@@ -66,11 +67,7 @@ test("students are excluded by every filter combination", () => {
   ];
   for (const combination of combinations) {
     const where = buildStaffWhere("inst-1", combination);
-    assert.deepEqual(
-      where.AND[0],
-      { roleAssignments: { none: { role: { key: "STUDENT" } } } },
-      "the definition of staff is the first clause, always",
-    );
+    assert.deepEqual(where.AND[0], STAFF_DEFINITION, "the definition of staff is the first clause, always");
   }
 });
 
@@ -78,8 +75,14 @@ test("a filter for 'no role' still cannot list a student", () => {
   // The one combination worth naming: "accounts with no role" is exactly the
   // shape that would list children if the student clause were conditional.
   const where = buildStaffWhere("inst-1", filters({ role: NO_ROLE }));
-  assert.deepEqual(where.AND[0], { roleAssignments: { none: { role: { key: "STUDENT" } } } });
+  assert.deepEqual(where.AND[0], STAFF_DEFINITION);
   assert.deepEqual(where.AND[1], { roleAssignments: { none: {} } });
+});
+
+test("the definition of staff excludes students and receptionists, and nothing else", () => {
+  assert.deepEqual(STAFF_DEFINITION, {
+    roleAssignments: { none: { role: { OR: [{ key: "STUDENT" }, { key: { startsWith: "RECEPTIONIST__" } }] } } },
+  });
 });
 
 // ---------------------------------------------------------------------------

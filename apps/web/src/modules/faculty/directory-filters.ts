@@ -1,3 +1,4 @@
+import { RECEPTIONIST_ROLE_PREFIX } from "@/modules/receptionists/catalog";
 import { STAFF_ROLE_KEYS } from "./directory-types";
 
 /**
@@ -156,7 +157,19 @@ type TextMatch = {
   [K in FacultySearchField]?: { contains: string; mode: "insensitive" };
 };
 
+type StaffDefinition = {
+  roleAssignments: { none: { role: { OR: Array<{ key: string } | { key: { startsWith: string } }> } } };
+};
+
+/** Who this screen is about: no student, and no receptionist (they have their own screen). */
+export const STAFF_DEFINITION: StaffDefinition = {
+  roleAssignments: {
+    none: { role: { OR: [{ key: "STUDENT" }, { key: { startsWith: RECEPTIONIST_ROLE_PREFIX } }] } },
+  },
+};
+
 type RoleClause =
+  | StaffDefinition
   | { roleAssignments: { none: Record<string, never> | { role: { key: string } } } }
   | { roleAssignments: { some: { role: { key: string } } } };
 
@@ -186,14 +199,15 @@ export interface StaffWhere {
  * `institutionId` first, and not optional.
  *
  * The first `AND` clause is the definition of "staff": everyone in this
- * institution who is not a student. It is written unconditionally rather than
- * as an option, because a screen that lists logins must not have a filter
- * combination that quietly starts listing children.
+ * institution who is not a student — and not a receptionist, whose account is
+ * the principal's to manage on its own screen. It is written unconditionally
+ * rather than as an option, because a screen that lists logins must not have a
+ * filter combination that quietly starts listing children.
  */
 export function buildStaffWhere(institutionId: string, filters: FacultyFilters): StaffWhere {
   const where: StaffWhere = {
     institutionId,
-    AND: [{ roleAssignments: { none: { role: { key: "STUDENT" } } } }],
+    AND: [STAFF_DEFINITION],
   };
 
   if (filters.status !== "") where.status = filters.status;

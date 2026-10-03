@@ -1,3 +1,6 @@
+import type { SessionUser } from "@/modules/auth-tenancy/types";
+import { SYSTEM_ROLES } from "@/modules/authorization/permissions";
+import { hasPermission } from "@/modules/authorization/service";
 import {
   FACULTY_ROLE_KEYS,
   FacultyError,
@@ -76,4 +79,29 @@ export function validateFacultyRole(raw: unknown): FacultyRoleKey {
   throw new FacultyError(
     `"${key}" is not a role that can be granted here. Choose one of: ${FACULTY_ROLE_KEYS.join(", ")}.`,
   );
+}
+
+/**
+ * Why a receptionist acting through `staff.manage` alone may not touch an
+ * account holding these roles — or null when they may.
+ *
+ * Teacher accounts only, and only ones that can do nothing the actor cannot:
+ * never the principal's, another administrator's, a head of department's or a
+ * receptionist's — and never a teacher whose sign-in would carry more than the
+ * receptionist was given (a class teacher's student edits, say), because a
+ * password they issue is a password they know. Pure, so the page offers only
+ * the actions the service will allow.
+ */
+export function staffManageRefusal(actor: SessionUser, roleKeys: readonly string[]): string | null {
+  const teacherRoles: readonly string[] = FACULTY_ROLE_KEYS;
+  if (roleKeys.length === 0 || roleKeys.some((key) => !teacherRoles.includes(key))) {
+    return "You can manage teacher accounts only. Ask the principal about this one.";
+  }
+  for (const key of roleKeys) {
+    const role = SYSTEM_ROLES.find((r) => r.key === key);
+    if (!role || role.permissions.some((permission) => !hasPermission(actor, permission))) {
+      return "That account can do things your own account cannot, so only the principal can change it.";
+    }
+  }
+  return null;
 }

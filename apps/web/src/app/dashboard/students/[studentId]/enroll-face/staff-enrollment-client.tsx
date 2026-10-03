@@ -20,12 +20,18 @@ import type { FaceCaptureSource, FaceEnrollmentResult } from "@/modules/face-enr
  * that another administrator may have changed a moment ago, and a stale
  * history beside a fresh refusal reads as a contradiction.
  */
+const TWIN_REVIEW_ELSEWHERE =
+  "Only the principal, or the class teacher of both students, can confirm that two students are different people. Ask one of them to review this pair in Twin / Lookalike confirmations; once it is confirmed, enrol this sample again.";
+
 export function StaffEnrollmentClient({
   studentId,
   initialStatus,
+  canReviewTwins = true,
 }: {
   studentId: string;
   initialStatus: FaceEnrollmentStatusSummary;
+  /** False for a receptionist who may enrol faces but not decide twin pairs. */
+  canReviewTwins?: boolean;
 }) {
   const router = useRouter();
 
@@ -53,9 +59,12 @@ export function StaffEnrollmentClient({
       onReplace={replace}
       initialStatus={initialStatus}
       subject="student"
-      twinReviewHref={(otherStudentId) =>
-        `/dashboard/students/twin-confirmations/${pairKey(studentId, otherStudentId)}`
+      twinReviewHref={
+        canReviewTwins
+          ? (otherStudentId) => `/dashboard/students/twin-confirmations/${pairKey(studentId, otherStudentId)}`
+          : undefined
       }
+      twinReviewNote={canReviewTwins ? undefined : TWIN_REVIEW_ELSEWHERE}
     />
   );
 }

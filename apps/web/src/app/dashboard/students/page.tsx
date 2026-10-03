@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
-import { hasPermission } from "@/modules/authorization/service";
+import { hasAnyPermission, hasPermission } from "@/modules/authorization/service";
 import {
   getStudentFormOptionsForRequest,
   listStudentsForRequest,
@@ -87,7 +87,8 @@ export default async function StudentsPage({ searchParams }: PageProps) {
 
   const filtered = hasActiveStudentFilters(filters);
   const canCreate = hasPermission(user, "student.create");
-  const canEnrollFace = hasPermission(user, "faceEmbedding.manage");
+  // An administrator, or a receptionist given face enrollment.
+  const canEnrollFace = hasAnyPermission(user, "faceEmbedding.manage", "faceEmbedding.enroll");
 
   const firstOnPage = page.total === 0 ? 0 : (page.page - 1) * page.pageSize + 1;
   const lastOnPage = Math.min(page.page * page.pageSize, page.total);

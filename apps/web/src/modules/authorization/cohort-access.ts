@@ -1,11 +1,13 @@
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { getCohortFacultyLink, getCohortSubjectFacultyLink } from "./repository";
-import { hasPermission } from "./service";
+import { hasAnyPermission } from "./service";
 import { ForbiddenError } from "./types";
 
 /**
  * DB-backed wrapper used by Server Actions/Route Handlers. Admins with
- * cohort.manage bypass the ownership check entirely; everyone else must
+ * cohort.manage bypass the ownership check entirely, as does a receptionist
+ * granted attendance.allClasses (every caller is an attendance path, and the
+ * attendance keys themselves are still required by each); everyone else must
  * have a matching CohortFaculty row. The pure predicate this wraps
  * (isFacultyOfCohort) lives in ./ownership.ts, kept import-free so it can be
  * unit-tested without a database.
@@ -15,7 +17,7 @@ export async function requireCohortAccess(
   cohortId: string,
   opts?: { requirePrimary?: boolean },
 ): Promise<void> {
-  if (hasPermission(user, "cohort.manage")) return;
+  if (hasAnyPermission(user, "cohort.manage", "attendance.allClasses")) return;
 
   const link = await getCohortFacultyLink(cohortId, user.userId);
   if (!link || (opts?.requirePrimary && link.role !== "PRIMARY")) {
@@ -27,7 +29,7 @@ export async function requireCohortSubjectAccess(
   user: SessionUser,
   cohortSubjectId: string,
 ): Promise<void> {
-  if (hasPermission(user, "cohort.manage")) return;
+  if (hasAnyPermission(user, "cohort.manage", "attendance.allClasses")) return;
 
   const link = await getCohortSubjectFacultyLink(cohortSubjectId, user.userId);
   if (!link) {

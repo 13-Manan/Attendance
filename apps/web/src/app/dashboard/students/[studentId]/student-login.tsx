@@ -45,7 +45,10 @@ interface Props {
   lastSignIn: string | null;
   /** When the password was last set and by whom, formatted on the server; null if nothing records it. */
   lastPasswordChange: string | null;
+  /** Create, reset, switch on or off. */
   canManage: boolean;
+  /** Show the current password. Separate: a receptionist may hold either without the other. */
+  canReveal: boolean;
 }
 
 /** This page's origin, read in the browser; empty while rendering on the server. */
@@ -66,6 +69,7 @@ export function StudentLogin({
   lastSignIn,
   lastPasswordChange,
   canManage,
+  canReveal,
 }: Props) {
   const [adding, setAdding] = useState(false);
   const [dismissed, setDismissed] = useState<string | null>(null);
@@ -189,7 +193,7 @@ export function StudentLogin({
             student ID and password work on several phones and computers at once.
           </p>
 
-          {canManage ? <PortalPasswordReveal studentId={studentId} recoverable={login.passwordRecoverable} /> : null}
+          {canReveal ? <PortalPasswordReveal studentId={studentId} recoverable={login.passwordRecoverable} /> : null}
 
           {canManage ? (
             <div className="flex flex-wrap items-start gap-2">

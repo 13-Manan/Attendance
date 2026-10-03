@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
-import { hasPermission } from "@/modules/authorization/service";
+import { hasAnyPermission, hasPermission } from "@/modules/authorization/service";
 import {
   getStudentForRequest,
   getStudentFormOptionsForRequest,
@@ -105,7 +105,8 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
 
   const canUpdate = hasPermission(user, "student.update");
   const canPlace = hasPermission(user, "enrollment.manage");
-  const canManageFace = hasPermission(user, "faceEmbedding.manage");
+  // Enrolling a face — not erasing one — is open to a receptionist's faceEmbedding.enroll.
+  const canManageFace = hasAnyPermission(user, "faceEmbedding.manage", "faceEmbedding.enroll");
 
   let student;
   try {
@@ -122,8 +123,10 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
 
   // `user.invite` is the same permission the faculty directory uses to mean
   // "may create an account in this institution"; the panel is read-only
-  // without it.
-  const canManageLogin = hasPermission(user, "user.invite");
+  // without it. A receptionist holds the narrower slices instead: managing
+  // student logins, and seeing a student's password, each on its own.
+  const canManageLogin = hasAnyPermission(user, "user.invite", "studentLogin.manage");
+  const canRevealLogin = hasAnyPermission(user, "user.invite", "studentLogin.reveal");
   const login = await getStudentLogin(user, studentId);
 
   // Opened from a section or a class roster, the record leads back there —
@@ -203,6 +206,13 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
                     >
                       Review twin/lookalike confirmation
                     </Link>
+                  ) : null}
+                  {faceBlocked && !canReviewTwins && canManageFace ? (
+                    <span className="max-w-xl text-xs text-neutral-600">
+                      Only the principal, or the class teacher of both students, can confirm that two students
+                      are different people. Ask one of them to review this pair; enrolment can go ahead once it
+                      is confirmed.
+                    </span>
                   ) : null}
                   {canManageFace && !faceBlocked ? (
                     <Link
@@ -356,6 +366,7 @@ export default async function StudentPage({ params, searchParams }: PageProps) {
             : null
         }
         canManage={canManageLogin}
+        canReveal={canRevealLogin}
       />
 
       {canUpdate ? (

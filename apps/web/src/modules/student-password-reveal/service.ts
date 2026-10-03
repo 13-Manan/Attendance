@@ -1,6 +1,6 @@
 import { recordAuditLog } from "@/modules/audit/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
-import { hasPermission } from "@/modules/authorization/service";
+import { hasAnyPermission, hasPermission } from "@/modules/authorization/service";
 import { ForbiddenError } from "@/modules/authorization/types";
 import { revealDepartmentStudentPassword } from "@/modules/college-setup/service";
 import { CollegeSetupError } from "@/modules/college-setup/types";
@@ -56,7 +56,7 @@ export async function revealStudentPassword(
 ): Promise<RevealOutcome> {
   const studentId = typeof rawStudentId === "string" ? rawStudentId.trim() : "";
   const actorRoles = actor.roles.map((role) => role.key);
-  const path = hasPermission(actor, "user.invite")
+  const path = hasAnyPermission(actor, "user.invite", "studentLogin.reveal")
     ? "account_manager"
     : hasPermission(actor, "department.manage")
       ? "head_of_department"

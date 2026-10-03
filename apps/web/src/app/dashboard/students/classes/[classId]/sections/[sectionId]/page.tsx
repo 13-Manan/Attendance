@@ -1,7 +1,7 @@
 import { runningFaceModel, verificationFor } from "@/modules/students/verification-service";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { hasPermission } from "@/modules/authorization/service";
+import { hasAnyPermission, hasPermission } from "@/modules/authorization/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import {
   getStudentSectionForRequest,
@@ -84,7 +84,7 @@ export default async function StudentSectionPage({ params, searchParams }: PageP
   // filtered and paged now.
   const listPath = `${here}${studentFilterQuery(filters)}`;
   const filtered = hasActiveStudentFilters(filters);
-  const canEnrollFace = hasPermission(user, "faceEmbedding.manage");
+  const canEnrollFace = hasAnyPermission(user, "faceEmbedding.manage", "faceEmbedding.enroll");
   // Adding here places the new student in this section, which is its own
   // permission; without it the form could only add them unplaced.
   const canAdd =

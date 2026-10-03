@@ -16,6 +16,30 @@ export function requirePermission(user: SessionUser, permission: PermissionKey):
   }
 }
 
+/** Holds `permission`, or one of its narrower `alternatives` (see permissions.ts). */
+export function hasAnyPermission(
+  user: SessionUser,
+  permission: PermissionKey,
+  ...alternatives: PermissionKey[]
+): boolean {
+  return hasPermission(user, permission) || alternatives.some((key) => hasPermission(user, key));
+}
+
+/**
+ * `requirePermission`, accepting a narrower alternative too. A refusal still
+ * names the primary permission, so callers and their tests see the same
+ * ForbiddenError they always did.
+ */
+export function requireAnyPermission(
+  user: SessionUser,
+  permission: PermissionKey,
+  ...alternatives: PermissionKey[]
+): void {
+  if (!hasAnyPermission(user, permission, ...alternatives)) {
+    throw new ForbiddenError(permission);
+  }
+}
+
 export function isPlatformUser(user: SessionUser): boolean {
   return user.roles.some((role) => role.key === PLATFORM_ROLE_KEY);
 }

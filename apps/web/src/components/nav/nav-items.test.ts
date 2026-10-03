@@ -199,7 +199,11 @@ test("a principal reads Academic year, Faculty, Classes, Students — in that or
     const groups = sections.map((section) => section.group);
     assert.deepEqual(groups.slice(0, 3), ["Today", "Academic", "Attendance"], key);
     assert.ok(!groups.includes("People"), `${key}: an empty People heading`);
-    assert.deepEqual(sections.find((section) => section.group === "Academic")?.items, SCHOOL_SETUP, key);
+    assert.deepEqual(
+      sections.find((section) => section.group === "Academic")?.items,
+      [...SCHOOL_SETUP, { href: "/dashboard/receptionists", label: "Receptionists" }],
+      `${key}: the four setup steps, then the receptionists who help run the school`,
+    );
 
     const all = hrefs(sections);
     const at = (href: string) => all.indexOf(href);
@@ -347,4 +351,21 @@ test("a head of department's course, faculty and student pages light their own l
   assert.deepEqual(navClaims(role("SCHOOL_ADMIN"), "SCHOOL"), {});
   assert.deepEqual(navClaims(role("HOD"), "SCHOOL"), {}, "only at a college");
   assert.deepEqual(navClaims(role("PLATFORM_SUPER_ADMIN"), null), {});
+});
+
+test("a receptionist sees only what they were given, and their own account — never Receptionists", () => {
+  const granted = new Set(["student.read", "cohort.read", "faceEmbedding.enroll", "staff.read", "attendanceRecord.read"]);
+  const sections = buildNavSections((permission) => granted.has(permission), "SCHOOL", false, { receptionist: true });
+  const all = hrefs(sections);
+  for (const href of ["/dashboard/students", "/dashboard/faculty", "/dashboard/face-enrollment", "/dashboard/reports", "/dashboard/account"]) {
+    assert.ok(all.includes(href), `${href} missing: ${all.join(" ")}`);
+  }
+  for (const href of ["/dashboard/receptionists", "/dashboard/api-keys", "/dashboard/institutions/settings", "/dashboard/audit-logs", "/dashboard/academic/classes", "/dashboard/attendance"]) {
+    assert.ok(!all.includes(href), `${href} offered: ${all.join(" ")}`);
+  }
+});
+
+test("a teacher still has no account page and no receptionists link", () => {
+  const all = hrefs(buildNavSections(role("CLASS_TEACHER"), "SCHOOL"));
+  assert.ok(!all.includes("/dashboard/account") && !all.includes("/dashboard/receptionists"), all.join(" "));
 });

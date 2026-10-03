@@ -1,5 +1,6 @@
 import { hasPermission, isPlatformUser } from "@/modules/authorization/service";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
+import { isReceptionist } from "@/modules/receptionists/catalog";
 import { buildNavSections, navClaims, type InstitutionKind } from "./nav-items";
 import { NavLink } from "./nav-link";
 
@@ -40,6 +41,7 @@ export function Sidebar({
     // which is how the rail came to offer them seventeen links into
     // institutions they do not belong to.
     isPlatformUser(user),
+    { receptionist: isReceptionist(user) },
   );
 
   // The full set of hrefs the shell will render. `NavLink` uses this to

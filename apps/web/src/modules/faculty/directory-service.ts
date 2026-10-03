@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { recordAuditLog as defaultRecordAuditLog } from "@/modules/audit/service";
 import type { RecordAuditLogInput } from "@/modules/audit/types";
-import { requirePermission } from "@/modules/authorization/service";
+import { hasPermission, requireAnyPermission } from "@/modules/authorization/service";
 import type { PermissionKey } from "@/modules/authorization/permissions";
 import type { SessionUser } from "@/modules/auth-tenancy/types";
 import { hashPassword } from "@/modules/auth-tenancy/password";
 import { getInstitutionType } from "@/modules/institutions/repository";
 import * as repo from "./directory-repository";
 import {
+  staffManageRefusal,
   validateEmployeeCode,
   validateFacultyEmail,
   validateFacultyName,
@@ -140,14 +141,37 @@ function deps(overrides: FacultyDeps) {
   };
 }
 
-function requireInstitution(actor: SessionUser, permission: PermissionKey): string {
-  requirePermission(actor, permission);
+function requireInstitution(
+  actor: SessionUser,
+  permission: PermissionKey,
+  ...alternatives: PermissionKey[]
+): string {
+  requireAnyPermission(actor, permission, ...alternatives);
   if (!actor.institutionId) {
     throw new FacultyError(
       "This account is not scoped to a single institution, so it cannot manage staff here.",
     );
   }
   return actor.institutionId;
+}
+
+/**
+ * Whether the actor reaches a staff write only through `staff.manage` — a
+ * receptionist the principal let manage teachers — rather than through the
+ * administrator's own permission for it.
+ */
+function onlyThroughStaffManage(actor: SessionUser, permission: PermissionKey): boolean {
+  return !hasPermission(actor, permission) && hasPermission(actor, "staff.manage");
+}
+
+/** The limit on `staff.manage` (see `staffManageRefusal`), as a refusal. */
+function assertTeacherAccountWithin(actor: SessionUser, roleKeys: readonly string[]): void {
+  const refusal = staffManageRefusal(actor, roleKeys);
+  if (refusal) throw new FacultyError(refusal);
+}
+
+function roleKeysOf(row: { roleAssignments: Array<{ role: { key: string } }> }): string[] {
+  return row.roleAssignments.map((assignment) => assignment.role.key);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +193,9 @@ export async function getFacultyDirectory(
   overrides: FacultyDeps = {},
 ): Promise<FacultyDirectory> {
   const d = deps(overrides);
-  const institutionId = requireInstitution(actor, "institution.read");
+  // `institution.read` for an administrator; a receptionist's `staff.read` sees
+  // the same list without the settings that key opens elsewhere.
+  const institutionId = requireInstitution(actor, "institution.read", "staff.read");
 
   const [staffPage, classLinks, subjectLinks, cohorts, departments, type, assignable] =
     await Promise.all([
@@ -189,8 +215,15 @@ export async function getFacultyDirectory(
     staffPage.rows.map((row) => row.id),
   );
 
+  // When people last signed in is the administrator's to see, not a list
+  // viewer's: the principal's own sign-ins are on it. Left out here, on the
+  // server, rather than hidden by the page.
+  const showsSignIns = hasPermission(actor, "institution.read");
+  const members = repo.assembleMembers(staffPage.rows, withPassword, classLinks, subjectLinks);
+
   return {
-    members: repo.assembleMembers(staffPage.rows, withPassword, classLinks, subjectLinks),
+    members: showsSignIns ? members : members.map((member) => ({ ...member, lastLoginAt: null })),
+    showsSignIns,
     total: staffPage.total,
     totalAll: staffPage.totalAll,
     activeAll: staffPage.activeAll,
@@ -307,12 +340,13 @@ async function createStaffAccount(
   overrides: FacultyDeps,
 ): Promise<InvitedFaculty> {
   const d = deps(overrides);
-  const institutionId = requireInstitution(actor, "user.invite");
+  const institutionId = requireInstitution(actor, "user.invite", "staff.manage");
 
   const name = validateFacultyName(input.name);
   const email = validateFacultyEmail(input.email);
   const employeeCode = validateEmployeeCode(input.employeeCode);
   const roleKey = rules.role(input.roleKey);
+  if (onlyThroughStaffManage(actor, "user.invite")) assertTeacherAccountWithin(actor, [roleKey]);
   const departmentId = await resolveDepartment(d, institutionId, input.departmentId ?? "");
   if (rules.departmentRequired && departmentId === null) {
     throw new FacultyError("Choose the department this teacher belongs to.");
@@ -391,9 +425,10 @@ export async function updateFacultyDetails(
   overrides: FacultyDeps = {},
 ): Promise<FacultyMember> {
   const d = deps(overrides);
-  const institutionId = requireInstitution(actor, "user.update");
+  const institutionId = requireInstitution(actor, "user.update", "staff.manage");
 
   const before = await requireMember(d, institutionId, id);
+  if (onlyThroughStaffManage(actor, "user.update")) assertTeacherAccountWithin(actor, roleKeysOf(before));
   const name = validateFacultyName(input.name);
   const employeeCode = validateEmployeeCode(input.employeeCode);
   const departmentId =
@@ -449,7 +484,7 @@ export async function deactivateFaculty(
   overrides: FacultyDeps = {},
 ): Promise<FacultyMember> {
   const d = deps(overrides);
-  const institutionId = requireInstitution(actor, "user.deactivate");
+  const institutionId = requireInstitution(actor, "user.deactivate", "staff.manage");
 
   if (id === actor.userId) {
     throw new FacultyError(
@@ -458,6 +493,7 @@ export async function deactivateFaculty(
   }
 
   const before = await requireMember(d, institutionId, id);
+  if (onlyThroughStaffManage(actor, "user.deactivate")) assertTeacherAccountWithin(actor, roleKeysOf(before));
   if (before.status === "INACTIVE") throw new FacultyError("That account is already stopped.");
 
   const updated = await d.setStatus(institutionId, id, "INACTIVE");
@@ -483,9 +519,10 @@ export async function reactivateFaculty(
   overrides: FacultyDeps = {},
 ): Promise<FacultyMember> {
   const d = deps(overrides);
-  const institutionId = requireInstitution(actor, "user.invite");
+  const institutionId = requireInstitution(actor, "user.invite", "staff.manage");
 
   const before = await requireMember(d, institutionId, id);
+  if (onlyThroughStaffManage(actor, "user.invite")) assertTeacherAccountWithin(actor, roleKeysOf(before));
   if (before.status === "ACTIVE") throw new FacultyError("That account is already active.");
 
   const updated = await d.setStatus(institutionId, id, "ACTIVE");
@@ -518,9 +555,10 @@ export async function resetFacultyPassword(
   overrides: FacultyDeps = {},
 ): Promise<IssuedPassword> {
   const d = deps(overrides);
-  const institutionId = requireInstitution(actor, "user.update");
+  const institutionId = requireInstitution(actor, "user.update", "staff.manage");
 
   const member = await requireMember(d, institutionId, id);
+  if (onlyThroughStaffManage(actor, "user.update")) assertTeacherAccountWithin(actor, roleKeysOf(member));
 
   const password = d.newPassword();
   const passwordHash = await d.hashSecret(password);

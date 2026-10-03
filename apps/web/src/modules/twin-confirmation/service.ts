@@ -1,5 +1,5 @@
 import type { SessionUser } from "@/modules/auth-tenancy/types";
-import { hasPermission } from "@/modules/authorization/service";
+import { hasAnyPermission, hasPermission } from "@/modules/authorization/service";
 import { ForbiddenError } from "@/modules/authorization/types";
 import { blockedStateOf, foldPairs, orderForQueue, pairKey, parsePairKey } from "./policy";
 import * as repo from "./repository";
@@ -138,7 +138,10 @@ async function resolveReviewer(actor: SessionUser, context: TwinReviewContext, d
     };
   }
 
-  if (hasPermission(actor, "faceEmbedding.manage")) {
+  // An administrator, or a receptionist the administrator explicitly granted
+  // twin decisions to (`twinConfirmation.decide`, off by default — enrolling
+  // faces does not imply it).
+  if (hasAnyPermission(actor, "faceEmbedding.manage", "twinConfirmation.decide")) {
     return {
       kind: "institution",
       institutionId,

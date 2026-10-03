@@ -199,7 +199,7 @@ export function ReviewBoard({ initialBoard, showDiagnostics = false, addPhotoHre
 
   const sessionId = board.session.id;
   const isFinalized = board.session.processingStatus === "FINALIZED";
-  const canEdit = !isFinalized || board.actorCanOverrideFinalized;
+  const canEdit = board.actorCanCorrect && (!isFinalized || board.actorCanOverrideFinalized);
   const summary = reviewSummaryOf(board);
 
   // -------------------------------------------------------------------------

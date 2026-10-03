@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requirePermissionOrRedirect } from "@/modules/auth-tenancy/session";
+import { requireAnyPermissionOrRedirect } from "@/modules/auth-tenancy/session";
 import { getFaceCoverage } from "@/modules/face-enrollment/coverage";
 import { faceModelInfo } from "@/lib/face-ai-client";
 import type { ModelInfoResponse } from "@attendance/shared-types";
@@ -142,7 +142,8 @@ function ModelProvenance({ model }: { model: ModelInfoResponse | null }) {
 }
 
 export default async function FaceEnrollmentPage() {
-  const user = await requirePermissionOrRedirect("faceEmbedding.manage");
+  // A receptionist granted faceEmbedding.enroll sees the same coverage they enrol against.
+  const user = await requireAnyPermissionOrRedirect("faceEmbedding.manage", "faceEmbedding.enroll");
 
   if (!user.institutionId) {
     return (

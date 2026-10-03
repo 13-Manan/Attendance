@@ -113,6 +113,12 @@ export interface FaceCaptureProps {
    * both students, and then the sample is enrolled again.
    */
   twinReviewHref?: (otherStudentId: string) => string;
+  /**
+   * Staff who cannot open that review themselves (a receptionist without twin
+   * decisions): who to take the case to, shown in its place. Never a link
+   * that would only refuse them.
+   */
+  twinReviewNote?: string;
 }
 
 const ACCEPTED_FILE_TYPES = "image/jpeg,image/png,image/webp";
@@ -129,6 +135,7 @@ export function FaceCapture({
   cameraOnly = false,
   onCameraStarted,
   twinReviewHref,
+  twinReviewNote,
 }: FaceCaptureProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -587,6 +594,11 @@ export function FaceCapture({
               {result.twinReview === "not_confirmed" ? "Open confirmation" : "Review twin/lookalike confirmation"}
             </Link>
           </div>
+        ) : null}
+        {result && !result.ok && result.reason === "duplicate_identity" && !twinReviewHref && twinReviewNote ? (
+          <p className="max-w-md rounded-md border border-neutral-200 px-3 py-2 text-xs text-neutral-600">
+            {twinReviewNote}
+          </p>
         ) : null}
         {result?.ok && status.remainingSlots > 0 ? (
           <p className="text-xs text-neutral-500">

@@ -187,6 +187,16 @@ export type AuditAction =
   | "user.updated"
   | "user.deactivated"
   | "user.reactivated"
+  // A school receptionist's account (modules/receptionists), managed by the
+  // principal: who created, changed, stopped or restarted it, what it may do
+  // and when that changed, and when its password was replaced. Never the
+  // password or its hash; the access is recorded as the switches' names.
+  | "receptionist.created"
+  | "receptionist.updated"
+  | "receptionist.disabled"
+  | "receptionist.enabled"
+  | "receptionist.permissions_changed"
+  | "receptionist.password_reset"
   | "cohort_faculty.removed"
   // School academic setup. A section set up by mistake can be removed, but
   // only while nothing has ever happened in it — no student placed, no
